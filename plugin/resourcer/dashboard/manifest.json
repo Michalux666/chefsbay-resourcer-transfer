@@ -1,0 +1,15 @@
+{
+  "name": "resourcer",
+  "label": "Resourcer",
+  "description": "CV sourcing pipeline: live progress, runs, territories, halt control, search requests",
+  "icon": "Database",
+  "version": "1.0.0",
+  "tab": {
+    "path": "/resourcer",
+    "position": "end"
+  },
+  "slots": ["header-banner"],
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

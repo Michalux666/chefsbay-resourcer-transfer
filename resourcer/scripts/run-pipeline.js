@@ -1,0 +1,445 @@
+#!/usr/bin/env node
+'use strict';
+
+// Deterministic pipeline orchestrator, called after Phase 1 (phase1.js) completes. Reads the phase1 status JSON and continues:
+//   status phase1_complete + sources both (Phase 2 pending) -> Reed Phase 1 -> merge -> Phase 2 once -> optimiser
+//   sources caterer (or Phase 2 already done)               -> nothing to run, results are located for the optimiser
+// RESOURCER_SOURCES (caterer|reed|both, default caterer) gates Reed: when it excludes Reed the Reed step is skipped and
+// Phase 2 runs once on the Caterer queue. The same happens while Reed is on hold (a human login is pending or running, or a recent
+// auth failure needs time): the Reed step is skipped WITHOUT recording an auth failure, so the pending search keeps its Reed retries.
+//
+// Usage: node scripts/run-pipeline.js --status-file <path-to-phase1-status.json>
+// Exit codes: 0 done (also PIPELINE_SKIPPED for a parallel run, and when Phase 2 itself failed: legacy), 1 no/unreadable status file or fatal.
+// Stdout: PIPELINE_COMPLETE / SOURCES: / QUEUE_FILE: / RESULTS_FILE: / CREDITS: / VERDICT: (child output is echoed to stderr).
+
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+const paths = require('./lib/paths');
+const env = require('./lib/env');
+const fsx = require('./lib/fsx');
+const { AUTH_MARKER, sourcesGate, syncGateStatus, authHold } = require('./reed-api-client');
+const launcher = require('./ensure-chrome-cdp');
+
+const RUNS_DIR = paths.RUNS;
+const DOWNLOADS = paths.DOWNLOADS;
+const SCRIPTS = paths.SCRIPTS;
+const RUN_LOCK_MAX_AGE_MIN = 60;
+const CAPTURE_CAP = 200 * 1024;
+
+function log(msg) { console.error(`[pipeline] ${msg}`); }
+function out(msg) { console.log(msg); }
+
+function readJson(file) {
+  return fsx.readJson(file, null);
+}
+
+// Runs a child, echoing its output to our stderr (prefixed) while capturing a capped copy.
+function spawnCapture(cmd, args, tag, extraEnv) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd: paths.HOME, stdio: ['inherit', 'pipe', 'pipe'], env: { ...process.env, ...(extraEnv || {}) } });
+    let stdout = '';
+    let stderr = '';
+    const feed = (which) => (d) => {
+      const s = d.toString();
+      process.stderr.write(s.split('\n').filter((l) => l.length).map((l) => `[${tag}] ${l}\n`).join(''));
+      if (which === 'out') { stdout = (stdout + s).slice(-CAPTURE_CAP); } else { stderr = (stderr + s).slice(-CAPTURE_CAP); }
+    };
+    child.stdout.on('data', feed('out'));
+    child.stderr.on('data', feed('err'));
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', reject);
+  });
+}
+
+function getTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+}
+
+function newestMatching(dir, test) {
+  try {
+    const files = fs.readdirSync(dir)
+      .filter(test)
+      .map((f) => ({ p: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m);
+    return files[0] ? files[0].p : null;
+  } catch {
+    return null;
+  }
+}
+
+const findPhase2Results = () => newestMatching(DOWNLOADS, (f) => f.startsWith('phase2-results-') && f.endsWith('.json'));
+const findPhase1StatusFile = () => newestMatching(RUNS_DIR, (f) => f.startsWith('phase1-') && f.endsWith('.json'));
+
+function parseArgs(argv) {
+  const i = argv.indexOf('--status-file');
+  return { statusFile: i >= 0 && i + 1 < argv.length ? argv[i + 1] : null, help: argv.includes('--help') || argv.includes('-h') };
+}
+
+// RESOURCER_SOURCES gate. Anything that is not caterer|reed|both is treated as caterer.
+function reedEnabled() {
+  const g = sourcesGate();
+  if (!g.valid) log(`WARN: RESOURCER_SOURCES='${g.raw}' is not caterer|reed|both - treating as caterer`);
+  return g.reedEnabled;
+}
+
+// ---------------------------------------------------------------- Reed Phase 1
+
+async function runReedPhase1(opts, extraEnv) {
+  log('=== Reed Phase 1 ===');
+  const args = [
+    path.join(SCRIPTS, 'reed-phase1.js'),
+    '--job-title', opts.jobTitle || '',
+    '--location', opts.location || '',
+    '--distance', String(opts.distance || 20),
+    '--active-within', 'month',
+    '--cv-limit', '20',
+  ];
+  if (opts.queueFile) args.push('--caterer-queue', opts.queueFile);
+
+  // Clear any stale auth-failed marker so a fresh failure can be detected.
+  fsx.safeUnlink(AUTH_MARKER);
+
+  const { code, stdout, stderr } = await spawnCapture(paths.NODE, args, 'reed', extraEnv);
+  log(`Reed Phase 1 exit: ${code}`);
+
+  if (code !== 0) {
+    const tail = (s) => (s || '').trim().split('\n').slice(-25).join('\n');
+    log(`Reed Phase 1 FAILED - diagnostic output:\n--- reed stdout (tail) ---\n${tail(stdout)}\n--- reed stderr (tail) ---\n${tail(stderr)}\n--- end reed output ---`);
+  }
+
+  // Auth failure via marker file (reliable) or, on a non-zero exit, signatures in the output (2026-06-17: a 401 reports on stderr).
+  let authFailure = null;
+  const reedOut = `${stdout || ''}\n${stderr || ''}`;
+  if (fs.existsSync(AUTH_MARKER)) {
+    authFailure = readJson(AUTH_MARKER) || { reason: 'marker_unreadable' };
+  } else if (code !== 0 && /REED_AUTH_FAILED|REED_RELOGIN_NEEDED|REED_BROWSER_BUSY|HTTP 401|HTTP 451|No refresh token available/i.test(reedOut)) {
+    authFailure = { reason: 'reed_401_or_relogin', failedAt: new Date().toISOString() };
+  }
+  if (authFailure) log(`!! Reed AUTH FAILED - reason=${authFailure.reason}. Reed stats will show the failure in the results.`);
+
+  let reedQueue = null;
+  const sm = stdout.match(/REED_PHASE1_SUMMARY:(\{.*\})/);
+  if (sm) {
+    try { reedQueue = JSON.parse(sm[1]).queuePath || null; } catch { reedQueue = null; }
+  }
+  if (!reedQueue) {
+    const match = stdout.match(/reed-approved-queue-([^.]+)\.json/);
+    if (match) reedQueue = path.join(DOWNLOADS, `reed-approved-queue-${match[1]}.json`);
+  }
+  return { code, reedQueue, authFailure };
+}
+
+// ---------------------------------------------------------------- queue merge
+
+async function mergeQueues(catererQueueFile, reedQueueFile) {
+  const ts = getTimestamp();
+  const mergedFile = path.join(DOWNLOADS, `merged-queue-${ts}.json`);
+  const empty = { candidates: [], searchDate: new Date().toISOString().slice(0, 10) };
+
+  const caterer = (catererQueueFile && fs.existsSync(catererQueueFile)) ? (readJson(catererQueueFile) || empty) : empty;
+  const reed = (reedQueueFile && fs.existsSync(reedQueueFile)) ? (readJson(reedQueueFile) || empty) : empty;
+
+  const real = (m) => (m && m !== 'unknown' ? m : null);
+  const merged = {
+    searchDate: caterer.searchDate || reed.searchDate || new Date().toISOString().slice(0, 10),
+    jobTitle: caterer.jobTitle || reed.jobTitle || '',
+    location: caterer.location || reed.location || '',
+    distance: caterer.distance || reed.distance || 20,
+    activeWithin: caterer.activeWithin || reed.activeWithin || 'month',
+    sources: 'both',
+    // Prefer a real model name over 'unknown' (Caterer writes 'unknown' when no batch ran)
+    screeningModel: real(caterer.screeningModel) || real(reed.screeningModel) || caterer.screeningModel || reed.screeningModel || 'unknown',
+    creditsRemaining: caterer.creditsRemaining || reed.creditsRemaining || null,
+    phase1StartedAt: caterer.phase1StartedAt || reed.phase1StartedAt || null,
+    requestedAt: caterer.requestedAt || reed.requestedAt || null,
+    candidateCount: (caterer.candidateCount || 0) + (reed.candidateCount || 0),
+    phase1Stats: { caterer: caterer.phase1Stats || {}, reed: reed.phase1Stats || {} },
+    candidates: [...(caterer.candidates || []), ...(reed.candidates || [])],
+  };
+
+  fsx.writeJsonAtomic(mergedFile, merged, 0o600);
+  log(`Merged queue: ${mergedFile} (${merged.candidates.length} candidates)`);
+  return mergedFile;
+}
+
+// ---------------------------------------------------------------- Phase 2
+
+async function runPhase2(queueFile, extraEnv) {
+  if (!queueFile || !fs.existsSync(queueFile)) {
+    log('No queue file - Phase 2 skipped');
+    return { code: 0, resultsFile: null };
+  }
+  log(`=== Phase 2: ${queueFile} ===`);
+  const { code } = await spawnCapture(paths.NODE, [path.join(SCRIPTS, 'process-approved-queue.js'), queueFile], 'phase2', extraEnv);
+  const resultsFile = findPhase2Results();
+  log(`Phase 2 exit: ${code}, results: ${resultsFile || 'none'}`);
+  return { code, resultsFile };
+}
+
+// PRIMARY: match by timestamp in the filename (phase1-<ts>.json -> approved-queue-<ts>.json); the mtime fallback only applies
+// when there is no status file or no name match (2026-05-15: an mtime match picked a sibling territory's queue).
+function findApprovedQueue(statusFile) {
+  try {
+    if (statusFile) {
+      const m = path.basename(statusFile, '.json').match(/^phase1-(.+)$/);
+      if (m) {
+        const direct = path.join(DOWNLOADS, `approved-queue-${m[1]}.json`);
+        if (fs.existsSync(direct)) return direct;
+      }
+    }
+    return newestMatching(DOWNLOADS, (f) => f.startsWith('approved-queue-') && f.endsWith('.json'));
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- optimiser
+
+async function runOptimiser(resultsFile) {
+  if (!resultsFile || !fs.existsSync(resultsFile)) {
+    log('No results - optimiser skipped');
+    return null;
+  }
+  log('Running optimiser...');
+  const { stdout } = await spawnCapture(paths.NODE, [path.join(SCRIPTS, 'pipeline-optimiser.js'), resultsFile], 'optimiser');
+  try {
+    const result = JSON.parse(stdout);
+    log(`Verdict: ${result.verdict}`);
+    if (result.observations) result.observations.forEach((o) => log(`  ${o}`));
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- per-status-file run lock (parallel-invocation guard)
+
+// 2026-05-14 (NG10): two invocations on the same status file raced through Reed -> merge -> Phase 2 -> Zoho POST and created
+// duplicate records. The lock is created exclusively; a holder that is dead or older than 60 min is taken over.
+function acquireRunLock(statusFile) {
+  const lockPath = `${statusFile}.run-lock`;
+  const now = Date.now();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx', 0o644);
+      try { fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: now, statusFile }, null, 2)); } finally { fs.closeSync(fd); }
+      return { acquired: true, lockPath };
+    } catch (e) {
+      if (e.code !== 'EEXIST') return { acquired: false, error: e.message };
+    }
+    const lock = readJson(lockPath);
+    if (lock) {
+      const ageMin = (now - (lock.startedAt || 0)) / 60000;
+      const alive = !!lock.pid && fsx.pidAlive(lock.pid);
+      if (ageMin < RUN_LOCK_MAX_AGE_MIN && alive) return { acquired: false, holderPid: lock.pid, holderAgeMin: ageMin };
+      log(`Stale run-lock (pid=${lock.pid} age=${ageMin.toFixed(1)}m alive=${alive}) - taking over`);
+    } else {
+      log('run-lock unreadable - taking over');
+    }
+    fsx.safeUnlink(lockPath);
+  }
+  return { acquired: false, error: 'could not take over the run-lock' };
+}
+
+function releaseRunLock(lockPath) {
+  fsx.safeUnlink(lockPath);
+}
+
+// ---------------------------------------------------------------- main
+
+const USAGE = 'Usage: node scripts/run-pipeline.js --status-file <path-to-phase1-status.json>\nGate: RESOURCER_SOURCES=caterer|reed|both (default caterer).\nExit codes: 0 done, 1 no/unreadable status file or fatal.';
+
+async function main(argv) {
+  const opts = parseArgs(argv);
+  if (opts.help) { out(USAGE); return 0; }
+
+  // The dashboard's Reed indicator says 'disabled' whenever the gate excludes Reed, whatever this run does next.
+  try { syncGateStatus(); } catch (e) { log(`WARN: could not sync runtime/reed-status.json: ${e.message}`); }
+
+  const statusFile = opts.statusFile || findPhase1StatusFile();
+  if (!statusFile || !fs.existsSync(statusFile)) {
+    console.error('FATAL: No phase1 status file found');
+    return 1;
+  }
+
+  const lockResult = acquireRunLock(statusFile);
+  if (!lockResult.acquired) {
+    log(`ABORT: Another run-pipeline.js (pid=${lockResult.holderPid}) is already processing this status file (age=${lockResult.holderAgeMin ? lockResult.holderAgeMin.toFixed(1) : '?'}m). Skipping to prevent Zoho duplicates.`);
+    out(`PIPELINE_SKIPPED: parallel run in progress (pid=${lockResult.holderPid})`);
+    return 0;
+  }
+  let browserLock = null;
+  let ownsBrowser = false;
+  // The browser side is released as soon as Phase 2 has downloaded the Reed CVs; the run-lock is held until exit (legacy).
+  // Order matters: the browser is quit (through CDP, so the login survives) BEFORE the browser lock is given up.
+  const keepBrowser = () => env.get('REED_KEEP_CHROME', '0') === '1';
+  const stopBrowser = async () => {
+    if (ownsBrowser) {
+      ownsBrowser = false;
+      if (!keepBrowser()) {
+        try { await launcher.stopChromeGraceful(); } catch (e) { log(`WARN: could not stop the Reed browser: ${e.message}`); }
+      }
+    }
+    if (browserLock) { browserLock.release(); browserLock = null; }
+  };
+  const cleanupSync = () => {
+    if (ownsBrowser) {
+      ownsBrowser = false;
+      if (!keepBrowser()) {
+        try { launcher.stopChrome(); } catch (e) { log(`WARN: could not stop the Reed browser: ${e.message}`); }
+      }
+    }
+    if (browserLock) { browserLock.release(); browserLock = null; }
+    releaseRunLock(lockResult.lockPath);
+  };
+  process.on('exit', cleanupSync);
+  process.on('SIGINT', () => { stopBrowser().finally(() => { cleanupSync(); process.exit(130); }); });
+  process.on('SIGTERM', () => { stopBrowser().finally(() => { cleanupSync(); process.exit(143); }); });
+
+  try {
+    log(`Reading status: ${statusFile}`);
+    const status = readJson(statusFile);
+    if (!status) {
+      console.error('FATAL: Could not parse status file');
+      return 1;
+    }
+    log(`Status: ${status.status}, sources: ${status.sources}`);
+    log(`Pool: ${status.pool}, approved: ${status.approved}, errors: ${status.errors}`);
+
+    // phase2Status (set by phase1): 'done' = Phase 2 already ran inline, 'pending' = deferred until Reed has run;
+    // absent = decide from sources (both -> run Reed + Phase 2, otherwise assume Phase 2 ran inline).
+    const p2status = status.phase2Status;
+    const src = status.sources || 'caterer';
+    const needsReed = src === 'both' && p2status !== 'done';
+    const phase2AlreadyDone = p2status === 'done' || src !== 'both';
+
+    const queueFile = findApprovedQueue(statusFile);
+    log(`Queue file: ${queueFile || 'none'}`);
+
+    let finalQueueFile = queueFile;
+    let resultsFile = null;
+
+    if (needsReed) {
+      let childEnv = {};
+      let reedQueuePath = null;
+      let reedAuthFailure = null;
+      let reedSkippedByConfig = false;
+      let reedHold = null;
+
+      if (!reedEnabled()) {
+        reedSkippedByConfig = true;
+        log(`REED_DISABLED: RESOURCER_SOURCES=${env.get('RESOURCER_SOURCES', 'caterer')} excludes Reed - Reed step skipped, Phase 2 runs on the Caterer queue`);
+      } else if ((reedHold = authHold())) {
+        log(`REED_HELD: ${reedHold.reason} (${reedHold.detail}) - Reed step skipped, its retries are not spent, Phase 2 runs on the Caterer queue`);
+      } else {
+        log('Sources = both - running Reed Phase 1...');
+        const waitSec = Number(env.get('REED_LOCK_WAIT_SEC', '300'));
+        const waitMs = (Number.isFinite(waitSec) && waitSec >= 0 ? waitSec : 300) * 1000;
+        const lock = await launcher.browserLock.wait('reed', { purpose: 'run-pipeline', waitMs, pollMs: 5000 });
+        if (!lock.acquired) {
+          const h = lock.holder || {};
+          reedAuthFailure = { reason: 'browser_lock_busy', failedAt: new Date().toISOString(), holder: h.owner ? `${h.owner}:${h.pid}` : null };
+          log(`!! Reed SKIPPED: browser.lock held by ${h.owner || 'another process'} (pid ${h.pid || '?'}) after waiting ${Math.round(waitMs / 1000)}s`);
+        } else {
+          browserLock = lock;
+          ownsBrowser = !lock.borrowed && !lock.reentrant;
+          childEnv = { RESOURCER_BROWSER_LOCK_HOLDER_PID: String(lock.borrowed ? lock.holder.pid : process.pid) };
+          try {
+            const reedResult = await runReedPhase1({
+              jobTitle: status.jobTitle, location: status.location, distance: status.distance, queueFile,
+            }, childEnv);
+            reedQueuePath = reedResult.reedQueue;
+            reedAuthFailure = reedResult.authFailure;
+          } catch (err) {
+            log(`ERROR: Reed Phase 1 threw: ${err.message} - treating as auth/runtime failure`);
+            reedAuthFailure = { reason: 'spawn_threw', error: (err.message || '').slice(0, 200), failedAt: new Date().toISOString() };
+          }
+        }
+      }
+
+      if (reedSkippedByConfig || reedHold) {
+        finalQueueFile = queueFile;
+      } else if (reedQueuePath && fs.existsSync(reedQueuePath)) {
+        // Always merge, even if the Reed queue is empty: the merged file records that both sources were attempted.
+        finalQueueFile = await mergeQueues(queueFile, reedQueuePath);
+      } else {
+        if (reedAuthFailure) {
+          log(`!! Reed SKIPPED due to auth failure (${reedAuthFailure.reason}) - merged queue will carry authFailed flag`);
+        } else {
+          log('WARNING: Reed produced no queue - merging with empty Reed to record both-source attempt');
+        }
+        // The placeholder makes the merged queue report sources='both'; phase1Stats.authFailed lets Phase 2 keep the pending
+        // search for a Reed retry (Reed must never be silently skipped).
+        const placeholderReed = path.join(DOWNLOADS, `reed-empty-${getTimestamp()}.json`);
+        fsx.writeJsonAtomic(placeholderReed, {
+          searchDate: new Date().toISOString().slice(0, 10),
+          jobTitle: status.jobTitle,
+          location: status.location,
+          source: 'reed',
+          candidates: [],
+          phase1Stats: {
+            pool: 0, pagesScraped: 0, inDb: 0, crossDedup: 0, rejected: 0, approved: 0,
+            authFailed: !!reedAuthFailure,
+            authFailureReason: (reedAuthFailure && reedAuthFailure.reason) || null,
+            authFailedAt: (reedAuthFailure && reedAuthFailure.failedAt) || null,
+          },
+        }, 0o600);
+        finalQueueFile = await mergeQueues(queueFile, placeholderReed);
+      }
+
+      // Phase 2 ALWAYS runs once on the final queue, even with 0 candidates (territory map update, pending-search cleanup).
+      const phase2Result = await runPhase2(finalQueueFile, childEnv);
+      resultsFile = phase2Result.resultsFile;
+
+      // Mark phase2Status done so a second invocation is a no-op.
+      const fresh = readJson(statusFile);
+      if (fresh) {
+        fresh.phase2Status = 'done';
+        fresh.updatedAt = new Date().toISOString();
+        try { fsx.writeJsonAtomic(statusFile, fresh); } catch { /* best effort */ }
+      }
+    } else if (phase2AlreadyDone) {
+      log('Single-source run - Phase 2 already completed inline');
+      resultsFile = findPhase2Results();
+    } else {
+      log('WARNING: No clear phase2 signal - assuming Phase 2 ran inline');
+      resultsFile = findPhase2Results();
+    }
+
+    await stopBrowser();
+
+    const optimiserResult = await runOptimiser(resultsFile);
+
+    log('========================================');
+    log('Pipeline orchestration complete');
+    log('========================================');
+
+    out('PIPELINE_COMPLETE');
+    out(`SOURCES: ${status.sources || 'caterer'}`);
+    out(`QUEUE_FILE: ${finalQueueFile || ''}`);
+    out(`RESULTS_FILE: ${resultsFile || ''}`);
+    out(`CREDITS: ${status.credits || ''}`);
+    out(`VERDICT: ${(optimiserResult && optimiserResult.verdict) || 'unknown'}`);
+
+    if (optimiserResult && (optimiserResult.verdict === 'ATTENTION' || optimiserResult.verdict === 'DEGRADED')) {
+      out(`WARNING: PERFORMANCE ${optimiserResult.verdict}`);
+      (optimiserResult.regressions || []).forEach((r) => {
+        out(`  ${r.metric}: ${r.current} vs baseline ${r.baseline} (${r.change})`);
+      });
+    }
+    return 0;
+  } finally {
+    cleanupSync();
+  }
+}
+
+if (require.main === module) {
+  main(process.argv.slice(2)).then((code) => process.exit(code)).catch((err) => {
+    console.error(`FATAL: ${err.message}`);
+    console.error(err.stack);
+    process.exit(1);
+  });
+}
+
+module.exports = { main, acquireRunLock, releaseRunLock, findApprovedQueue, mergeQueues, reedEnabled, parseArgs };

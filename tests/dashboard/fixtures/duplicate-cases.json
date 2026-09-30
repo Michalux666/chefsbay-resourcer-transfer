@@ -1,0 +1,63 @@
+{
+  "_comment": "Duplicate / in-flight detection cases shared by the Python and Node suites. now is fixed; {\"$agoMin\": n} becomes an ISO time n minutes before now; mtimeAgoMin sets the file mtime. Synthetic data only.",
+  "now": "2026-09-29T12:00:00.000Z",
+  "request": { "jobTitle": "Sous Chef", "location": "YO2" },
+  "cases": [
+    { "name": "no files", "files": [], "expect": { "status": 200 } },
+    { "name": "same key pending, different case", "files": [
+        { "path": "pending-searches/search-1759000000000-aaaaaa.json", "json": { "jobTitle": "sous chef", "location": "yo2", "distance": 30, "keywords": "dbs", "sources": "caterer" } } ],
+      "expect": { "status": 409, "where": "pending", "file": "search-1759000000000-aaaaaa.json" } },
+    { "name": "same key from a scheduled territory file", "files": [
+        { "path": "pending-searches/territory-42-20260929-0800.json", "json": { "jobTitle": "Sous Chef", "location": "YO2", "distance": 20, "sources": "both", "source": "queue-due-territories-autocatchup" } } ],
+      "expect": { "status": 409, "where": "pending" } },
+    { "name": "claimed pending file still counts", "files": [
+        { "path": "pending-searches/territory-42-20260929-0800.json", "json": { "jobTitle": "Sous Chef", "location": "YO2", "spawnedAt": { "$agoMin": 3 } } } ],
+      "expect": { "status": 409, "where": "pending" } },
+    { "name": "different location is fine", "files": [
+        { "path": "pending-searches/search-1759000000000-aaaaaa.json", "json": { "jobTitle": "Sous Chef", "location": "YO3" } } ],
+      "expect": { "status": 200 } },
+    { "name": "different title is fine", "files": [
+        { "path": "pending-searches/search-1759000000000-aaaaaa.json", "json": { "jobTitle": "Head Chef", "location": "YO2" } } ],
+      "expect": { "status": 200 } },
+    { "name": "held file is not a pending file", "files": [
+        { "path": "pending-searches/territory-42-20260929-0800.json.held", "json": { "jobTitle": "Sous Chef", "location": "YO2" } } ],
+      "expect": { "status": 200 } },
+    { "name": "dot temp file is not a pending file", "files": [
+        { "path": "pending-searches/.search-1759000000000-aaaaaa.json.1234.tmp", "json": { "jobTitle": "Sous Chef", "location": "YO2" } } ],
+      "expect": { "status": 200 } },
+    { "name": "unparseable pending file is ignored", "files": [
+        { "path": "pending-searches/search-1759000000000-aaaaaa.json", "text": "{not json" } ],
+      "expect": { "status": 200 } },
+    { "name": "phase1 running now", "files": [
+        { "path": "runs/phase1-2026-09-29-1158.json", "mtimeAgoMin": 2, "json": { "id": "phase1-2026-09-29-1158", "status": "phase1_running", "jobTitle": "Sous Chef", "location": "YO2", "distance": 20, "sources": "both", "startedAt": { "$agoMin": 10 }, "updatedAt": { "$agoMin": 2 }, "page": 2, "approved": 3 } } ],
+      "expect": { "status": 409, "where": "in_flight" } },
+    { "name": "phase1 running but stale (no update for 90 min)", "files": [
+        { "path": "runs/phase1-2026-09-29-1030.json", "mtimeAgoMin": 90, "json": { "id": "phase1-2026-09-29-1030", "status": "phase1_running", "jobTitle": "Sous Chef", "location": "YO2", "startedAt": { "$agoMin": 100 }, "updatedAt": { "$agoMin": 90 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "phase1 running long ago (3 h)", "files": [
+        { "path": "runs/phase1-2026-09-29-0900.json", "mtimeAgoMin": 180, "json": { "id": "phase1-2026-09-29-0900", "status": "phase1_running", "jobTitle": "Sous Chef", "location": "YO2", "startedAt": { "$agoMin": 190 }, "updatedAt": { "$agoMin": 180 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "phase1 initializing too long (25 min)", "files": [
+        { "path": "runs/phase1-2026-09-29-1135.json", "mtimeAgoMin": 25, "json": { "id": "phase1-2026-09-29-1135", "status": "phase1_initializing", "jobTitle": "Sous Chef", "location": "YO2", "startedAt": { "$agoMin": 25 }, "updatedAt": { "$agoMin": 25 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "phase2 pushing now", "files": [
+        { "path": "runs/run-merged-queue-2026-09-29T11-55-00.json", "mtimeAgoMin": 1, "json": { "id": "run-merged-queue-2026-09-29T11-55-00", "status": "phase2_pushing", "jobTitle": "Sous Chef", "location": "YO2", "startedAt": { "$agoMin": 8 }, "updatedAt": { "$agoMin": 1 }, "phase2": { "total": 5, "pushed": 2, "duplicates": 0, "errors": 0 } } } ],
+      "expect": { "status": 409, "where": "in_flight" } },
+    { "name": "phase1 file superseded by a completed run", "files": [
+        { "path": "runs/phase1-2026-09-29-1130.json", "mtimeAgoMin": 20, "json": { "id": "phase1-2026-09-29-1130", "status": "phase1_running", "jobTitle": "Sous Chef", "location": "YO2", "startedAt": { "$agoMin": 30 }, "updatedAt": { "$agoMin": 20 } } },
+        { "path": "runs/run-merged-queue-2026-09-29T11-45-00.json", "mtimeAgoMin": 10, "json": { "id": "run-merged-queue-2026-09-29T11-45-00", "status": "complete", "jobTitle": "Sous Chef", "location": "YO2", "completedAt": { "$agoMin": 10 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "phase1_complete with phase 2 done", "files": [
+        { "path": "runs/phase1-2026-09-29-1150.json", "mtimeAgoMin": 3, "json": { "id": "phase1-2026-09-29-1150", "status": "phase1_complete", "phase2Status": "done", "jobTitle": "Sous Chef", "location": "YO2", "sources": "caterer", "updatedAt": { "$agoMin": 3 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "phase1_complete during the Reed stage", "files": [
+        { "path": "runs/phase1-2026-09-29-1145.json", "mtimeAgoMin": 15, "json": { "id": "phase1-2026-09-29-1145", "status": "phase1_complete", "phase2Status": "pending", "jobTitle": "Sous Chef", "location": "YO2", "sources": "both", "updatedAt": { "$agoMin": 15 } } } ],
+      "expect": { "status": 409, "where": "in_flight" } },
+    { "name": "different key in flight", "files": [
+        { "path": "runs/phase1-2026-09-29-1158.json", "mtimeAgoMin": 2, "json": { "id": "phase1-2026-09-29-1158", "status": "phase1_running", "jobTitle": "Head Chef", "location": "LS1", "updatedAt": { "$agoMin": 2 } } } ],
+      "expect": { "status": 200 } },
+    { "name": "old run files are ignored by name date", "files": [
+        { "path": "runs/phase1-2026-09-20-1158.json", "mtimeAgoMin": 2, "json": { "id": "phase1-2026-09-20-1158", "status": "phase1_running", "jobTitle": "Sous Chef", "location": "YO2", "updatedAt": { "$agoMin": 2 } } } ],
+      "expect": { "status": 200 } }
+  ]
+}

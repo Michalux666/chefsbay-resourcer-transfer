@@ -1,0 +1,3 @@
+name: resourcer
+version: "1.0.0"
+description: Resourcer pipeline dashboard tab (progress, runs, territories, halt control, search requests)

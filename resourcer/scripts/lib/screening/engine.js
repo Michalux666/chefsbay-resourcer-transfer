@@ -1,0 +1,522 @@
+'use strict';
+// The screening engine. Three selectable engines (config engine / SCREEN_ENGINE):
+//   llm         the normal LLM decides, using the legacy recruiter prompt (shared rubric).
+//   jev_shadow  (default) the LLM decides exactly as in llm; Jev answers in parallel and is ONLY
+//               LOGGED (shadow/screening-*.jsonl). Jev can never change a decision, an exit code or
+//               (beyond a small bounded grace wait) the run time.
+//   jev         Jev first: atomic questions -> decide() lanes. approve and reject are final; review,
+//               injection flags, invalid answers and a Jev outage go to the LLM. A small share of Jev
+//               decisions is re-checked by the LLM in the background (audit) and logged.
+// Stage-1 rules (rules.js) run first in every engine; only rules set to 'enforce' decide.
+//
+// Failure semantics (legacy parity + deliberate changes D3/D4):
+//   - every candidate gets exactly one decision or the whole call fails (all-or-nothing);
+//   - transport failure (network, timeout, 429/5xx after retries, 401/402/403) -> ScreeningUnavailable
+//     (CLI: API_UNAVAILABLE, exit 3); the first hard auth/credit error, or N consecutive candidates
+//     failing, stops the run early instead of hammering a dead service;
+//   - a model answer that stays unusable after retries and the backup model becomes
+//     sys_invalid_result (reject, logged) for that candidate only (a poison pill must not halt the
+//     pipeline) - unless it is systemic (many invalid results), which is treated as unavailable so
+//     candidates are not silently burned;
+//   - decisions made before a failure are cached so the caller's page retry re-asks only the rest.
+
+const path = require('path');
+const paths = require('../paths');
+const fsx = require('../fsx');
+const env = require('../env');
+const { HttpFailure, InvalidAnswer, ScreeningUnavailable, reasonKeyOf } = require('./errors');
+const { LlmClient, parseJsonLoose } = require('./llm-client');
+const { JevClient } = require('./jev-client');
+const { redactSnippet, redactTitle, sha16 } = require('./redact');
+const { getRoleTier } = require('./tiers');
+const { detectSource, snippetFeatures, evaluateRules } = require('./rules');
+const rubric = require('./rubric');
+const reasons = require('./reasons');
+const { decide, compactAnswers } = require('./decide');
+const Q = require('./jev-questions');
+const { DecisionCache } = require('./cache');
+const { ShadowLog } = require('./shadow');
+const { Limiter, mapPool, settleWithin } = require('./pool');
+const streak = require('./streak');
+
+const ERRORS_LOG = path.join(paths.LOGS, 'errors.jsonl');
+const DEGRADED_FILE = path.join(paths.RUNTIME, 'screening-degraded.json');
+
+function isNum(x) { return typeof x === 'number' && Number.isFinite(x); }
+function clamp01(x) { return Math.min(1, Math.max(0, x)); }
+
+// Validate one LLM decision object. approved MUST be a boolean (deliberate change D2: the legacy
+// coercion turned the string "false" into true).
+function parseDecision(content) {
+  let v = parseJsonLoose(content);
+  if (Array.isArray(v) && v.length === 1 && v[0] && typeof v[0] === 'object') v = v[0];
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new InvalidAnswer('decision is not an object', 'not_object');
+  if (typeof v.approved !== 'boolean') throw new InvalidAnswer('approved is not a boolean', 'bad_approved');
+  return {
+    approved: v.approved,
+    reason: typeof v.reason === 'string' ? v.reason : '',
+    reasonCode: reasons.normaliseCode(v.reasonCode, v.approved),
+    confidence: isNum(v.confidence) ? clamp01(v.confidence) : null,
+  };
+}
+
+function appendError(entry) {
+  try { fsx.appendLine(ERRORS_LOG, JSON.stringify(entry)); } catch (e) { /* logging must never throw */ }
+}
+
+class Run {
+  constructor(cfg, cands, ctx, stage, deps) {
+    this.cands = cands;
+    this.ctx = ctx;
+    this.stage = stage;
+    this.results = new Array(cands.length).fill(null);
+    this.rows = [];
+    this.abort = new AbortController();
+    this.shadowAbort = new AbortController();
+    this.llmLimiter = new Limiter(cfg.llm.concurrency);
+    this.jevLimiter = new Limiter(cfg.jev.concurrency);
+    this.comparisons = [];
+    this.fatal = null;
+    this.unavailable = 0;
+    this.failStreak = 0;
+    this.invalid = 0;
+    this.successes = 0;
+    this.usable = 0;
+    this.jevFailures = 0;
+    this.primaryRequestErrors = 0;
+    this.jevAttempts = 0;
+    this.lastErr = null;
+    this.attempted = new Set();
+    this.used = new Map();
+    this.deps = deps;
+    this.cfg = cfg;
+  }
+
+  trip(fatal) {
+    if (this.fatal) return;
+    this.fatal = fatal;
+    this.abort.abort();
+  }
+
+  noteUsed(model, rank) { if (model && !this.used.has(model)) this.used.set(model, rank); }
+
+  compare(fn) {
+    const p = Promise.resolve().then(fn).catch(() => ({ status: 'error', code: 'internal' }));
+    this.comparisons.push(p);
+    return p;
+  }
+}
+
+function createEngine(cfg, deps) {
+  const d = deps || {};
+  const log = d.log || (() => {});
+  const rng = d.rng || Math.random;
+  const eff = cfg.engineEffective;
+  const llmClient = d.llm || new LlmClient({ cfg, log, rng });
+  const jevClient = d.jev || new JevClient({ cfg, log: eff === 'jev' ? log : () => {}, rng });
+  const cache = d.cache || new DecisionCache({ ttlSec: cfg.cache.ttlSec, maxEntries: cfg.cache.maxEntries });
+  const shadow = d.shadow || new ShadowLog({ enabled: cfg.shadow.enabled });
+  const errorLog = d.errorLog || appendError;
+
+  const rubricOpts = { tierMode: cfg.tierMode, staleProfileClause: cfg.rubric.staleProfileClause, insufficientEvidence: cfg.rubric.insufficientEvidence };
+
+  const sig = sha16([
+    eff, cfg.llm.model, cfg.llm.backupModel || '', cfg.jev.model, rubric.variantOf(rubricOpts), cfg.tierMode,
+    Q.QUESTIONS_VERSION, JSON.stringify(cfg.decide), JSON.stringify(cfg.stage1.rules),
+    cfg.redact.enabled ? 'r1' : 'r0',
+  ].join('|'));
+
+  function prepare(run, i) {
+    const c = run.cands[i] || {};
+    const rs = redactSnippet(c.snippet, { firstName: c.name, enabled: cfg.redact.enabled, maxChars: cfg.redact.maxSnippetChars });
+    const titleText = run.stage === 'post_unlock' ? redactTitle(c.title, { enabled: cfg.redact.enabled }).text : '';
+    // A title that is only masks (a postcode or e-mail in the title field) is no title: it would reach Jev as '<PC>'.
+    const title = /^(?:<[A-Z]+>\s*)+$/.test(titleText) ? '' : titleText;
+    const source = run.ctx.source || detectSource(rs.text);
+    const features = snippetFeatures(rs.text, source);
+    const rules = evaluateRules(features, { searchTier: run.searchTier }, cfg);
+    return { id: String(c.id || ''), snippet: rs.text, title, source, features, rules, sha: sha16(rs.text), len: rs.text.length };
+  }
+
+  function newRow(run, prep) {
+    return {
+      v: 1,
+      ts: new Date().toISOString(),
+      mode: eff,
+      runId: run.ctx.runId || null,
+      source: prep.source,
+      stage: run.stage,
+      jobTitle: run.ctx.job,
+      searchTier: run.searchTier,
+      candidateId: prep.id,
+      snippetSha: prep.sha,
+      snippetLen: prep.len,
+      // D3: the REDACTED input is kept (retention window applies) so recruiters can label a gold set; switch off with shadow.storeText
+      ...(cfg.shadow.storeText ? { input: prep.snippet } : {}),
+      ...(cfg.shadow.storeText && run.stage === 'post_unlock' ? { inputTitle: prep.title } : {}),
+      redacted: cfg.redact.enabled,
+      flags: prep.rules.flags,
+      rules: prep.rules.hits.map(h => ({ id: h.id, mode: h.mode, decision: h.decision })),
+      used: null,
+      llm: null,
+      jev: null,
+      rv: rubric.variantOf(rubricOpts),
+      qv: Q.QUESTIONS_VERSION,
+      tm: cfg.tierMode,
+    };
+  }
+
+  function decisionOf(source, o) {
+    return {
+      approved: o.approved,
+      reasonCode: o.reasonCode,
+      // the LLM's own line is used as before (legacy default 'Approved'/'Rejected' when empty); other engines get the code's sentence
+      reason: reasons.reasonText({ text: o.reason, code: source === 'llm' ? null : o.reasonCode, approved: o.approved, job: o.job }),
+      confidence: o.confidence === undefined ? null : o.confidence,
+      source,
+      engineModel: o.model,
+      escalated: !!o.escalated,
+      ruleId: o.ruleId || null,
+    };
+  }
+
+  async function runJev(run, prep, shadowCall) {
+    if (prep.features.noContent) return { status: 'skipped', why: 'no_content' };
+    const signal = shadowCall ? AbortSignal.any([run.abort.signal, run.shadowAbort.signal]) : run.abort.signal;
+    const jevStage = run.stage === 'post_unlock' && prep.title ? 2 : 1;
+    const maxAttempts = shadowCall ? cfg.shadow.jevMaxAttempts : cfg.jev.maxAttempts;
+    if (!shadowCall) run.attempted.add(cfg.jev.model);
+    const t0 = Date.now();
+    let last = null;
+    for (let inv = 1; inv <= cfg.jev.maxInvalidAttempts; inv++) {
+      let r;
+      try {
+        r = await run.jevLimiter.run(() => jevClient.evaluate({
+          searchRole: run.ctx.job, searchTier: run.searchTier, snippet: prep.snippet, realJobTitle: prep.title, stage: jevStage, signal, maxAttempts,
+        }));
+      } catch (e) {
+        if (e instanceof HttpFailure && e.kind === 'aborted') return { status: 'timeout', latencyMs: Date.now() - t0 };
+        throw e;
+      }
+      run.jevAttempts += r.attempts || (r.meta && r.meta.attempts) || 1;
+      if (r.ok) {
+        const dec = decide({ answers: r.answers, searchRole: run.ctx.job, searchTier: run.searchTier, stage: jevStage }, cfg);
+        return {
+          status: 'ok',
+          model: r.meta.model,
+          lane: dec.lane,
+          reasonCode: dec.reasonCode,
+          reviewReason: dec.reviewReason,
+          confidence: dec.confidence,
+          flags: dec.flags,
+          stage: jevStage,
+          answers: compactAnswers(r.answers),
+          requestId: r.meta.requestId,
+          latencyMs: Date.now() - t0,
+          attempts: r.meta.attempts,
+        };
+      }
+      last = r;
+      if (r.kind !== 'invalid') break;
+    }
+    return { status: last.kind === 'invalid' ? 'invalid' : 'error', kind: last.kind, code: last.code, latencyMs: Date.now() - t0, attempts: last.attempts || 1 };
+  }
+
+  function llmMessages(run, prep) {
+    const opts = { ...rubricOpts, output: 'object' };
+    const user = run.stage === 'post_unlock'
+      ? rubric.buildSinglePrompt(run.ctx.job, prep.title, prep.snippet, opts)
+      : rubric.buildBatchPrompt(run.ctx.job, run.ctx.location, run.ctx.distance, [{ id: prep.id, snippet: prep.snippet }], opts);
+    return [{ role: 'system', content: rubric.SYSTEM_MESSAGE }, { role: 'user', content: user }];
+  }
+
+  // LLM decision for one candidate: primary model (retrying unusable output), then the backup model.
+  async function runLlm(run, prep, signal, opts) {
+    const o = opts || {};
+    // a primary model the gateway keeps refusing as a bad request (retired or misspelt slug) is skipped
+    // for the rest of the run once it has failed twice in a row, so every candidate does not pay for it
+    const skipPrimary = !!cfg.llm.backupModel && run.primaryRequestErrors >= 2;
+    const models = (skipPrimary ? [cfg.llm.backupModel] : [cfg.llm.model, cfg.llm.backupModel]).filter(Boolean);
+    const messages = llmMessages(run, prep);
+    const t0 = Date.now();
+    if (!models.length) {
+      const err = new HttpFailure('request', 'no LLM model is configured');
+      return { ok: false, kind: 'request', err, summary: { status: 'error', model: null, code: 'no_model', latencyMs: 0 } };
+    }
+    let sawTransient = null;
+    let invalidCode = null;
+    let requestErr = null;
+    let attempts = 0;
+    for (let mi = 0; mi < models.length; mi++) {
+      const model = models[mi];
+      run.attempted.add(model);
+      const isPrimary = model === cfg.llm.model;
+      const tries = isPrimary ? cfg.llm.maxInvalidAttempts : 1;
+      for (let t = 0; t < tries; t++) {
+        try {
+          const r = await run.llmLimiter.run(() => llmClient.chat({
+            model, messages, schemaName: 'screening_decision', schema: rubric.DECISION_SCHEMA, signal,
+            maxAttempts: o.maxAttempts, timeoutMs: o.timeoutMs,
+          }));
+          attempts += r.attempts || 1;
+          const parsed = parseDecision(r.content);
+          if (isPrimary) run.primaryRequestErrors = 0;
+          return { ok: true, dec: { ...parsed, model }, summary: { status: 'ok', model, approved: parsed.approved, reasonCode: parsed.reasonCode, confidence: parsed.confidence, latencyMs: Date.now() - t0, attempts, backup: mi > 0 } };
+        } catch (e) {
+          if (e instanceof InvalidAnswer) { invalidCode = e.code; attempts++; continue; }
+          if (e instanceof HttpFailure) {
+            if (e.kind === 'aborted') return { ok: false, kind: 'aborted', summary: { status: 'timeout', model, latencyMs: Date.now() - t0 } };
+            if (e.hard) return { ok: false, kind: 'hard', err: e, summary: { status: 'error', model, code: `http_${e.status || e.kind}`, latencyMs: Date.now() - t0 } };
+            if (e.kind === 'transient') { sawTransient = e; break; }
+            if (e.kind === 'request') { requestErr = e; if (isPrimary) run.primaryRequestErrors++; break; }
+          }
+          throw e;
+        }
+      }
+    }
+    if (sawTransient) {
+      return { ok: false, kind: 'transient', err: sawTransient, summary: { status: 'error', model: models[0], code: `http_${sawTransient.status || 'network'}`, latencyMs: Date.now() - t0, attempts } };
+    }
+    // A 4xx means our request or configuration is wrong (retired slug, unsupported flag): systemic, never a verdict on the candidate.
+    if (requestErr) {
+      return { ok: false, kind: 'request', err: requestErr, summary: { status: 'error', model: models[0], code: `request_${requestErr.status}`, latencyMs: Date.now() - t0, attempts } };
+    }
+    const code = invalidCode || 'invalid';
+    return { ok: false, kind: 'invalid', code, summary: { status: 'invalid', model: models[0], code, latencyMs: Date.now() - t0, attempts } };
+  }
+
+  function rankOf(model) {
+    if (model === cfg.jev.model) return 0;
+    if (model === cfg.llm.model) return 1;
+    if (model === cfg.llm.backupModel) return 2;
+    if (model === 'rules') return 9;
+    return 5;
+  }
+
+  function success(run, usable) { run.failStreak = 0; run.successes++; if (usable) run.usable++; }
+
+  function candidateUnavailable(run, err) {
+    run.unavailable++;
+    run.failStreak++;
+    run.lastErr = err;
+    if (run.failStreak >= cfg.batch.breakerConsecutive) {
+      run.trip({
+        detail: `AI screening service failing: ${run.failStreak} consecutive candidates could not be screened. Last error: ${err.message}`,
+        reasonKey: reasonKeyOf(err),
+        status: err.status || null,
+      });
+    }
+  }
+
+  async function processInner(run, i) {
+    const prep = prepare(run, i);
+    const ckey = run.useCache ? DecisionCache.key({ sig, job: run.ctx.job, stage: run.stage, title: prep.title, text: prep.snippet }) : null;
+    if (ckey) {
+      const hit = cache.get(ckey);
+      if (hit) {
+        run.results[i] = decisionOf('cache', { approved: hit.a === 1, reasonCode: hit.rc, confidence: hit.cf, model: hit.m, job: run.ctx.job, ruleId: hit.r });
+        run.noteUsed(hit.m, rankOf(hit.m));
+        success(run, true);
+        return;
+      }
+    }
+
+    const row = newRow(run, prep);
+    run.rows.push(row);
+    const job = run.ctx.job;
+
+    if (eff === 'jev_shadow' && cfg.shadow.enabled && rng() < cfg.shadow.rate) {
+      run.compare(() => runJev(run, prep, true)).then(r => { row.jev = r; });
+    }
+
+    let used = null;
+    if (prep.rules.enforced) {
+      used = decisionOf('rule', { approved: prep.rules.enforced.decision === 'approve', reasonCode: prep.rules.enforced.reasonCode, model: 'rules', job, ruleId: prep.rules.enforced.id });
+    } else if (eff === 'jev') {
+      let jr;
+      if (prep.rules.flags.includes('injection')) jr = { status: 'skipped', why: 'injection' };
+      else jr = await runJev(run, prep, false);
+      row.jev = jr;
+      if (jr.status === 'ok' && jr.lane !== 'review') {
+        used = decisionOf('jev', { approved: jr.lane === 'approve', reasonCode: jr.reasonCode, confidence: jr.confidence, model: jr.model, job });
+      } else if (jr.status !== 'ok' && jr.status !== 'skipped') {
+        run.jevFailures++;
+      }
+    }
+
+    if (!used) {
+      const lr = await runLlm(run, prep, run.abort.signal, {});
+      row.llm = lr.summary;
+      if (lr.ok) {
+        used = decisionOf('llm', { ...lr.dec, job, escalated: eff === 'jev' });
+      } else if (lr.kind === 'hard') {
+        run.trip({ detail: lr.err.message, reasonKey: reasonKeyOf(lr.err), status: lr.err.status });
+        row.used = null;
+        return;
+      } else if (lr.kind === 'transient' || lr.kind === 'request') {
+        candidateUnavailable(run, lr.err);
+        return;
+      } else if (lr.kind === 'aborted') {
+        return;
+      } else {
+        run.invalid++;
+        used = decisionOf('system', { approved: run.failOpen, reasonCode: run.failOpen ? 'sys_fail_open' : 'sys_invalid_result', model: 'none', job });
+        errorLog({
+          ts: new Date().toISOString(), context: 'screening_invalid_result', severity: 'warn',
+          error: `Screening result unusable for candidate ${prep.id} (${lr.code}); ${run.failOpen ? 'approved' : 'rejected conservatively'}`,
+          detail: `job=${job} stage=${run.stage} models=${[cfg.llm.model, cfg.llm.backupModel].filter(Boolean).join(',')}`,
+        });
+      }
+    }
+
+    row.used = { engine: used.source, approved: used.approved, reasonCode: used.reasonCode, model: used.engineModel, escalated: used.escalated };
+    run.results[i] = used;
+    if (used.source !== 'system') {
+      run.noteUsed(used.engineModel, rankOf(used.engineModel));
+      if (ckey) cache.set(ckey, { a: used.approved ? 1 : 0, rc: used.reasonCode, cf: used.confidence, m: used.engineModel, r: used.ruleId || undefined });
+    }
+    success(run, used.source !== 'system');
+
+    // audit: a small share of Jev / rule decisions is re-checked by the LLM in the background
+    if (cfg.shadow.enabled && (used.source === 'jev' || used.source === 'rule') && rng() < cfg.shadow.auditRate) {
+      const sig2 = AbortSignal.any([run.abort.signal, run.shadowAbort.signal]);
+      run.compare(() => runLlm(run, prep, sig2, { maxAttempts: 1, timeoutMs: cfg.shadow.auditTimeoutMs })).then(r => { row.llm = r.summary; });
+    }
+  }
+
+  async function processOne(run, i) {
+    try {
+      await processInner(run, i);
+    } catch (e) {
+      if (e instanceof HttpFailure && e.kind === 'aborted') return;
+      // an unexpected bug for one candidate: unusable result, logged, never a crash of the whole run
+      run.invalid++;
+      const c = run.cands[i] || {};
+      run.results[i] = decisionOf('system', { approved: run.failOpen, reasonCode: run.failOpen ? 'sys_fail_open' : 'sys_invalid_result', model: 'none', job: run.ctx.job });
+      errorLog({
+        ts: new Date().toISOString(), context: 'screening_internal_error', severity: 'warn',
+        error: `Unexpected screening error for candidate ${String(c.id || '')}: ${env.redact(String(e && e.message)).slice(0, 120)}`,
+        detail: `job=${run.ctx.job} stage=${run.stage}`,
+      });
+    }
+  }
+
+  function labelOf(run) {
+    const entries = [...run.used.entries()].sort((a, b) => a[1] - b[1]).map(e => e[0]);
+    if (entries.length) return entries.join('+');
+    return run.attempted.size ? attemptedLabel(run) : 'unknown';
+  }
+
+  function attemptedLabel(run) {
+    const a = [...run.attempted];
+    return a.length ? a.join('+') : 'none';
+  }
+
+  function degrade(run) {
+    if (eff !== 'jev') return;
+    try {
+      if (run.jevFailures > 0) {
+        fsx.writeJsonAtomic(DEGRADED_FILE, { degraded: true, engine: 'jev', since: new Date().toISOString(), failures: run.jevFailures, of: run.cands.length, detail: 'Jev could not answer; the LLM is deciding those candidates' });
+      } else if (run.successes > 0) {
+        fsx.safeUnlink(DEGRADED_FILE);
+      }
+    } catch (e) { /* best effort */ }
+  }
+
+  async function execute(ctx, cands, stage, opts) {
+    const o = opts || {};
+    if (!cands.length) return { decisions: [], modelLabel: 'unknown', stats: { total: 0, bySource: {}, invalid: 0, jevFailures: 0, engine: eff } };
+    if (!env.get('AI_GATEWAY_API_KEY')) {
+      const err = new ScreeningUnavailable('AI_GATEWAY_API_KEY is not set', { reasonKey: 'auth' });
+      err.label = 'none';
+      throw err;
+    }
+    const run = new Run(cfg, cands, ctx, stage, d);
+    run.searchTier = getRoleTier(ctx.job, cfg.tierMode);
+    run.singleMode = stage === 'post_unlock';
+    // an unusable model answer: single mode fails open (credit spent); batch rejects unless configured to approve
+    run.failOpen = !!o.failOpen || cfg.batch.onInvalid === 'approve';
+    run.useCache = stage === 'pre_unlock' && cache.enabled;
+
+    const timer = setTimeout(() => run.trip({ detail: `AI screening deadline of ${Math.round(cfg.batch.deadlineMs / 1000)}s exceeded`, reasonKey: 'unreachable', status: null }), cfg.batch.deadlineMs);
+    try {
+      const concurrency = eff === 'jev' ? Math.max(cfg.jev.concurrency, cfg.llm.concurrency) : cfg.llm.concurrency;
+      await mapPool(cands.length, concurrency, i => processOne(run, i), () => !!run.fatal);
+
+      if (run.comparisons.length) {
+        await settleWithin(Promise.allSettled(run.comparisons), cfg.shadow.graceMs);
+        run.shadowAbort.abort();
+        await Promise.allSettled(run.comparisons);
+      }
+    } finally {
+      clearTimeout(timer);
+      run.shadowAbort.abort();
+      for (const row of run.rows) {
+        shadow.append(row);
+      }
+      cache.save();
+      degrade(run);
+    }
+
+    if (run.fatal) {
+      const err = new ScreeningUnavailable(run.fatal.detail, { reasonKey: run.fatal.reasonKey, status: run.fatal.status, engines: [...run.attempted] });
+      err.label = attemptedLabel(run);
+      throw err;
+    }
+    if (run.unavailable > 0) {
+      const err = new ScreeningUnavailable(`${run.unavailable} of ${cands.length} candidates could not be screened. Last error: ${run.lastErr ? run.lastErr.message : 'unknown'}`, { reasonKey: reasonKeyOf(run.lastErr), status: run.lastErr && run.lastErr.status, engines: [...run.attempted] });
+      err.label = attemptedLabel(run);
+      throw err;
+    }
+    if (!run.singleMode) {
+      const massive = run.invalid >= cfg.batch.invalidMassMin && run.invalid / cands.length >= cfg.batch.invalidMassShare;
+      // Pages are mostly 1-3 candidates: when nothing at all in a call was usable the fault is systemic, not one poison card.
+      const allInvalid = cands.length >= 2 && run.invalid === cands.length;
+      const st = streak.record({ invalid: run.invalid, successes: run.usable, max: cfg.batch.invalidStreakMax, ttlMs: cfg.batch.invalidStreakTtlSec * 1000 });
+      if (massive || allInvalid || st.trip) {
+        const why = st.trip && !massive && !allInvalid ? `${st.count} candidates in a row across calls` : `${run.invalid} of ${cands.length} candidates`;
+        const err = new ScreeningUnavailable(`AI screening produced unusable results for ${why} (systemic, not a single bad candidate)`, { reasonKey: 'error', engines: [...run.attempted] });
+        err.label = attemptedLabel(run);
+        throw err;
+      }
+    }
+
+    if (run.results.some(r => !r)) {
+      const err = new ScreeningUnavailable('internal error: a candidate ended without a decision', { reasonKey: 'error', engines: [...run.attempted] });
+      err.label = attemptedLabel(run);
+      throw err;
+    }
+
+    const bySource = {};
+    for (const r of run.results) if (r) bySource[r.source] = (bySource[r.source] || 0) + 1;
+    return {
+      decisions: run.results,
+      modelLabel: labelOf(run),
+      stats: { total: cands.length, bySource, invalid: run.invalid, jevFailures: run.jevFailures, engine: eff },
+    };
+  }
+
+  return {
+    engine: eff,
+    /**
+     * @param {{job:string, location?:string, distance?:number, source?:string, runId?:string}} ctx
+     * @param {Array<{id:any, snippet:string, name?:string}>} candidates
+     * @returns {Promise<{decisions:object[], modelLabel:string, stats:object}>}
+     * @throws {ScreeningUnavailable}
+     */
+    screenBatch(ctx, candidates) {
+      return execute(ctx, candidates, 'pre_unlock', { failOpen: false });
+    },
+    /**
+     * Post-unlock single screening. An unusable answer fails OPEN (approve, sys_fail_open): the credit
+     * is already spent. Unavailability still throws so the CLI reports API_UNAVAILABLE (the caller
+     * then approves, exactly as before).
+     */
+    async screenOne(ctx, candidate) {
+      const r = await execute(ctx, [candidate], 'post_unlock', { failOpen: true });
+      return { decision: r.decisions[0], modelLabel: r.modelLabel, stats: r.stats };
+    },
+  };
+}
+
+module.exports = { createEngine, parseDecision, ERRORS_LOG, DEGRADED_FILE };

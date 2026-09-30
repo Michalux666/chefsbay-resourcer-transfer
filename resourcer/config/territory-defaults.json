@@ -1,0 +1,15 @@
+{
+  "_comment": "Default values applied to all territory_searches entries. Change here to update globally.",
+  "distance": 20,
+  "activeWithin": "1 month",
+  "cvLimit": 20,
+  "priority": "low",
+  "hideViewed": 7,
+  "sources": "both",
+  "priorityDays": {
+    "high": 2,
+    "medium": 3,
+    "low": 7,
+    "_comment": "Days between scheduled re-runs per priority. Note: hide_viewed=7d means high/medium runs will see fewer CVs per run (only new candidates since last run). This is expected."
+  }
+}

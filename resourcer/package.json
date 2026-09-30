@@ -1,0 +1,20 @@
+{
+  "name": "resourcer",
+  "version": "2.0.0",
+  "description": "Chefs Bay resourcer pipeline (Caterer + Reed -> screening -> Zoho) for Hermes",
+  "private": true,
+  "type": "commonjs",
+  "main": "candidates-db.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"../tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.8.0",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
+    "ws": "^8.20.0"
+  }
+}

@@ -1,0 +1,291 @@
+{
+  "_readme": "Screening configuration. Keys starting with an underscore are notes and are ignored. Environment variables (SCREEN_*) override this file. Every decide.* threshold is a CALIBRATE placeholder: it is NOT fitted to Chefs Bay data. See docs/SCREENING.md for what each setting does, how to calibrate, and how to promote engine jev_shadow to jev.",
+  "version": 1,
+  "engine": "jev_shadow",
+  "tierMode": "legacy",
+  "gateway": {
+    "origin": "https://ai-gateway.vercel.sh"
+  },
+  "rubric": {
+    "staleProfileClause": false,
+    "insufficientEvidence": "legacy"
+  },
+  "redact": {
+    "enabled": true,
+    "maxSnippetChars": 4000
+  },
+  "llm": {
+    "model": "anthropic/claude-sonnet-5.5",
+    "backupModel": "anthropic/claude-sonnet-5",
+    "timeoutMs": 60000,
+    "maxAttempts": 3,
+    "maxInvalidAttempts": 2,
+    "maxTokens": 1500,
+    "concurrency": 4,
+    "reasoningEffort": null,
+    "zeroDataRetention": false
+  },
+  "jev": {
+    "model": "typesafe-ai/jev",
+    "timeoutMs": 15000,
+    "maxAttempts": 3,
+    "concurrency": 6,
+    "maxInvalidAttempts": 2,
+    "maxSnippetChars": 1500,
+    "zeroDataRetention": false
+  },
+  "retry": {
+    "baseMs": 1000,
+    "capMs": 20000,
+    "maxRetryAfterMs": 30000
+  },
+  "batch": {
+    "breakerConsecutive": 3,
+    "invalidMassMin": 5,
+    "invalidMassShare": 0.5,
+    "invalidStreakMax": 3,
+    "invalidStreakTtlSec": 1800,
+    "deadlineMs": 600000,
+    "onInvalid": "reject"
+  },
+  "cache": {
+    "ttlSec": 3600,
+    "maxEntries": 5000
+  },
+  "shadow": {
+    "enabled": true,
+    "storeText": true,
+    "rate": 1,
+    "graceMs": 5000,
+    "jevMaxAttempts": 2,
+    "auditRate": 0.05,
+    "auditTimeoutMs": 30000,
+    "retentionDays": 180
+  },
+  "stage1": {
+    "rules": {
+      "S1-NA-NONHOSP": "shadow",
+      "T-ENTRY-OVERQUAL-HEAD": "shadow",
+      "T-ENTRY-OVERQUAL-SOUS": "shadow",
+      "T-UNDER-GAP": "shadow"
+    }
+  },
+  "decide": {
+    "calibration": {
+      "calibrated": false,
+      "reportId": null,
+      "date": null
+    },
+    "stage1": {
+      "_CALIBRATE": "CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it.",
+      "rejectP": 0.9,
+      "approveP": 0.6,
+      "needCorroboration": true,
+      "notFitMin": 0.6,
+      "counterRoleMatch": 0.6,
+      "injectionP": 0.5,
+      "infoFloor": 0.5,
+      "notStatedP": 0.5,
+      "noInfoApproveHospP": 0.5,
+      "clearFitP": 0.6,
+      "clearFitHardMax": 0.5,
+      "approveNotFitMax": 0.5,
+      "titleConsistentMin": 0.3
+    },
+    "stage2": {
+      "_CALIBRATE": "CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it. Stage 2 is after the credit is spent, so the reject bar is higher and the approve bar lower.",
+      "rejectP": 0.95,
+      "approveP": 0.5,
+      "needCorroboration": true,
+      "notFitMin": 0.6,
+      "counterRoleMatch": 0.6,
+      "injectionP": 0.5,
+      "infoFloor": 0.5,
+      "notStatedP": 0.5,
+      "noInfoApproveHospP": 0.5,
+      "clearFitP": 0.6,
+      "clearFitHardMax": 0.5,
+      "approveNotFitMax": 0.5,
+      "titleConsistentMin": 0.3
+    },
+    "ladder": {
+      "tier0Titles": ["catering assistant", "kitchen hand", "food production"],
+      "_note": "Candidate title options the Jev tier question can return, grouped per search tier. inBand = acceptable. tooSenior and tooJunior = clear level mismatches. mismatch = other clear mismatches, by reason code. Anything not listed is an uncertain level and goes to review. A search tier is the legacy role tier of the search title (0 unknown/non-kitchen, 1 entry, 2 mid, 3 senior, 4 head).",
+      "bySearchTier": {
+        "0": {
+          "inBand": [
+            "entry_kp",
+            "commis",
+            "cdp_cook",
+            "front_of_house"
+          ],
+          "tooSenior": [
+            "sous",
+            "head",
+            "management_non_kitchen"
+          ],
+          "tooJunior": [],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ]
+          }
+        },
+        "1": {
+          "inBand": [
+            "entry_kp",
+            "commis",
+            "cdp_cook"
+          ],
+          "tooSenior": [
+            "sous",
+            "head",
+            "management_non_kitchen"
+          ],
+          "tooJunior": [],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ],
+            "reject_foh_only": [
+              "front_of_house"
+            ]
+          }
+        },
+        "2": {
+          "inBand": [
+            "commis",
+            "cdp_cook",
+            "sous",
+            "head"
+          ],
+          "tooSenior": [],
+          "tooJunior": [
+            "entry_kp"
+          ],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ],
+            "reject_foh_only": [
+              "front_of_house"
+            ],
+            "reject_management_only": [
+              "management_non_kitchen"
+            ]
+          }
+        },
+        "3": {
+          "inBand": [
+            "sous",
+            "head"
+          ],
+          "tooSenior": [],
+          "tooJunior": [
+            "entry_kp",
+            "commis"
+          ],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ],
+            "reject_foh_only": [
+              "front_of_house"
+            ],
+            "reject_management_only": [
+              "management_non_kitchen"
+            ]
+          }
+        },
+        "4": {
+          "inBand": [
+            "head"
+          ],
+          "tooSenior": [],
+          "tooJunior": [
+            "entry_kp",
+            "commis",
+            "cdp_cook"
+          ],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ],
+            "reject_foh_only": [
+              "front_of_house"
+            ],
+            "reject_management_only": [
+              "management_non_kitchen"
+            ]
+          }
+        }
+      },
+      "overrides": [
+        {
+          "name": "cdp-specific",
+          "tiers": [
+            2
+          ],
+          "matchAny": [
+            "chef de partie",
+            "cdp",
+            "line cook"
+          ],
+          "inBand": [
+            "cdp_cook",
+            "sous",
+            "head"
+          ],
+          "tooSenior": [],
+          "tooJunior": [
+            "entry_kp",
+            "commis"
+          ],
+          "mismatch": {
+            "reject_unrelated_industry": [
+              "unrelated"
+            ],
+            "reject_foh_only": [
+              "front_of_house"
+            ],
+            "reject_management_only": [
+              "management_non_kitchen"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "gate": {
+    "_note": "The promotion gate for switching engine from jev_shadow to jev. See docs/SCREENING.md.",
+    "minAgreement": 0.9,
+    "maxApprovalDeltaPoints": 3,
+    "minRowsPerSource": 500,
+    "minRowsPerRole": 50,
+    "maxJevApproveLlmReject": 0.05,
+    "maxJevRejectLlmApprove": 0.015,
+    "maxJevRejectOfLlmApproved": 0.05,
+    "minLaneAgreementLo": 0.93,
+    "minLaneCoverage": 0.25,
+    "requiredSources": ["caterer", "reed"],
+    "windowDays": 21,
+    "confidenceBands": [
+      0,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9,
+      0.95,
+      1.0001
+    ],
+    "ruleMinHits": 200,
+    "ruleMinAgreement": 0.98
+  },
+  "health": {
+    "probeTimeoutMs": 3000,
+    "canaryTimeoutMs": 25000,
+    "creditsPath": "/v1/credits"
+  },
+  "pageRetryPauseSec": 120
+}

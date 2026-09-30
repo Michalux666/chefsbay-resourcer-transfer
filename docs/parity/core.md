@@ -1,0 +1,111 @@
+# Parity: core (candidates DB, territory scheduling, run locks, queue gate, Zoho, small helpers)
+
+Package owner files (all under `resourcer/`): `candidates-db.js`, `config/postcode-cities.json`, `config/territory-defaults.json`, `scripts/extract-js.b64`, `scripts/{applying-for-role-map,build-caterer-results-url,caterer-fetch-results,caterer-keepalive,caterer-session-utils,constants,create-init-status,cull-ghost-phase1,fetch-with-timeout,fill-mandatory-fields,migrate-reed-schema,pending-gate,pipeline-halt-cli,pipeline-optimiser,postcode-lookup,query-territory,queue-due-territories,recover-stranded-phase1,run-lock,territory-manager,territory-scheduler,territory-utils,zoho-attach-resume,zoho-auth,zoho-create-candidate}.js`, `scripts/lib/{caterer-credentials,pipeline-halt,postcode-to-city}.js`, `tests/core/**`, this file.
+Contract: DESIGN 4, 5, 7, 9, 10. Legacy tree read from `C:\Users\micha\.openclaw\workspace-resourcer` (read-only).
+
+All logic is a copy of the legacy code. What changed is limited to: paths (`scripts/lib/paths.js`), secrets location, alerts (`notify`), process liveness (`fsx.pidAlive`), atomic writes, ASCII-only source, `--help` on every CLI, and the deviations listed in section 4.
+
+## 1. How parity was checked
+
+| Check | Result |
+|---|---|
+| Differential harness: the legacy scripts (copied into a scratch workspace so the legacy tree is never touched) and the ported scripts run on identical fixtures (same DB rows, same `runs/`, `pending-searches/`, `logs/`), comparing stdout, exit code and resulting state | 156 comparisons, 0 differences (after normalising timestamps, GUIDs, paths, and the documented deviations). Covered: every `candidates-db.js` subcommand (46 invocations plus 2 final table dumps), `run-lock`, `pending-gate` (locked, ready, mark-spawned, stale claim, all-corrupt, no dir), `create-init-status`, `cull-ghost-phase1`, every `territory-manager` command incl. `import-csv`, `query-territory`, `territory-scheduler`, `queue-due-territories` (incl. Reed budget), `territory-utils` pure functions, `applying-for-role-map` (60 titles, 11 skill sets), `build-caterer-results-url` (radius sweep 0..100 by 0.5, URLs, CLI), `postcode-lookup.normalise`, `fill-mandatory-fields` (extractors plus 16 end-to-end files), `pipeline-halt-cli` plus `errors.jsonl`, `pipeline-optimiser` (4 result files, history, perf log) |
+| `node --test` on Windows Node v25.6.1 | 271 tests, 0 failures at hand-off; 286 after the 2026-09-29 integration fixes (D13, D14: +6 in `db-journal.test.js`, +9 in `pdf-cv.test.js`), 0 failures |
+| `node --test` on WSL Ubuntu 24.04, Node 22.22.1 (copy in `~`, better-sqlite3 built there) | 271 tests, 0 failures at hand-off; 286 after the integration fixes, 0 failures (POSIX-only assertions such as 0600 file modes run here) |
+| Mutation sanity check: 16 one-line behavioural changes applied to a copy (thresholds, dedupe rules, retry conditions, SQL predicates, placeholder fallbacks) | all 16 caught by the suite |
+
+Run: `node --test tests/core` (works through `tests/core/index.js`; the explicit form is `node --test tests/core/*.test.js`). The tests need `better-sqlite3` resolvable (`cd resourcer && npm install`, or `NODE_PATH`). Zero network: every test process preloads `tests/core/helpers/netguard.js`, which throws for any host but loopback; Zoho and postcodes.io are answered by `tests/core/helpers/fake-services.js`. Secrets, credentials and candidates in fixtures are fake.
+
+Not covered by tests: anything that needs a live site, the real Zoho, real Hermes, or real `.docx`/`.pdf` CV files (see section 6).
+
+## 2. Legacy map (legacy file:line -> new file:function)
+
+| Legacy | New | Change |
+|---|---|---|
+| `candidates-db.js:12-64` `ensureSchema` | same | none (schema and SQL untouched) |
+| `candidates-db.js:66-96` singleton, `getDb`, `closeDb`, `withDb` | `openDb`, `getDb`, `closeDb`, `withDb` | `DB_PATH` = `paths.DB`; `PRAGMA busy_timeout = 5000`; no journal-mode switch: WAL is re-asserted only when the file is already in WAL (D13) |
+| `candidates-db.js:100-378` all query and write functions | same names | none |
+| `candidates-db.js:382-524` CLI | same | none; the help text now lists every subcommand (check-batch, check-batch-scoped, reject-title were missing) |
+| `scripts/constants.js:1-69` | `scripts/constants.js` | every path derives from `paths.js`; `SESSION_PATH` = `state/caterer-session.json`; `CREDS_PATH` = `secrets/zoho-credentials.json`; everything else identical |
+| `scripts/run-lock.js:33-211` | `scripts/run-lock.js` | thresholds unchanged (20/5/30/60/60/30/30/10); added `checkRunLockAgainst` and `STATUS_MAX_AGE` exports; `runs/` is listed once per call |
+| `scripts/pending-gate.js:29-166` | `scripts/pending-gate.js:main` | atomic writes; BOM stripped in `--mark-spawned` too; the duplicated second lock check and the dead `skippedDashboard` branch folded away (same output) |
+| `scripts/create-init-status.js:33-103` | `scripts/create-init-status.js:main` | London stamp through `lib/time.londonParts`; atomic write |
+| `scripts/cull-ghost-phase1.js:33-137` | `scripts/cull-ghost-phase1.js:cullGhosts,main` | thresholds unchanged (15/5/20/30/30); atomic write; `cullReason` records the real previous status |
+| `scripts/recover-stranded-phase1.js:40-173` | `scripts/recover-stranded-phase1.js:recoverStranded` | `fsx.pidAlive`; lock older than 60 min counts as stale; child stdout/stderr go to `logs/recover-<id>-<ts>.log` |
+| `scripts/queue-due-territories.js:41-180` | `scripts/queue-due-territories.js:main` | file-name time in Europe/London; atomic write; one `runs/` scan for the whole batch |
+| `scripts/territory-scheduler.js:28-173` | `scripts/territory-scheduler.js` | one `runs/` scan; ASCII source (output characters preserved by escapes) |
+| `scripts/territory-utils.js:1-477` | `scripts/territory-utils.js` | `DEFAULTS_PATH` from `paths.CONFIG`; `computeNextRunDate` in UTC |
+| `scripts/territory-manager.js:33-392`, `scripts/query-territory.js:1-68` | same | DB commands open the DB with `fileMustExist`; the help/defaults commands never open it |
+| `scripts/build-caterer-results-url.js:35-159`, `applying-for-role-map.js`, `fetch-with-timeout.js`, `caterer-session-utils.js:1-112` | same | none besides ASCII source (`caf\xe9` in a regex) |
+| `scripts/caterer-keepalive.js:17-73` | `caterer-keepalive.js:run` | cookie-jar helper loaded lazily and injectable; same outputs and exit codes |
+| `scripts/caterer-fetch-results.js:1-100` | `caterer-fetch-results.js:parseCandidates,fetchResults,main` | see deviation D8 |
+| `scripts/fill-mandatory-fields.js:31-325` | same | config from `paths.CONFIG`; candidate file written atomically, mode 0600; PDF text through the pdf-parse v2 `PDFParse` class (D14); the CLI prints recovered field names only (D14) |
+| `scripts/postcode-lookup.js:30-296`, `scripts/lib/postcode-to-city.js:11-94` | same | caches under `paths.p(...)` (workspace root, as before) written atomically |
+| `scripts/zoho-auth.js:1-90`, `zoho-attach-resume.js`, `zoho-create-candidate.js` | same | token refresh written atomically, mode 0600 (`secrets/zoho-credentials.json`); `ATTACH_BACKOFFS_MS` exported for tests |
+| `scripts/lib/caterer-credentials.js:16-74` | same | `CRED_PATH` = `secrets/caterer-credentials.json`; `jsLit` written without a double-backslash literal (same output) |
+| `scripts/lib/pipeline-halt.js:22-93`, `scripts/pipeline-halt-cli.js:13-35` | same | atomic state write; `notify()` on halt (critical) and resume (info), key `pipeline-halt`; detail/remedy passed through `env.redact` |
+| `scripts/pipeline-optimiser.js:31-528` | same | see deviation D6 |
+| `scripts/migrate-reed-schema.js:15-185` | same | `wal_checkpoint(TRUNCATE)` before the file-copy backup |
+| `scripts/extract-js.b64`, `config/postcode-cities.json`, `config/territory-defaults.json` | same | byte-identical (sha256 asserted in `tests/core/misc.test.js`) |
+
+## 3. Preserved behaviour worth naming
+
+- candidates-db: `add` never downgrades and `seen` never demotes an unlocked row; `check-batch-scoped` skips only unlocked candidates and rejections for the exact (case-sensitive) job title or the `*` sentinel, and falls back to the unscoped rule when `candidate_rejections` does not exist; `reject-title` uses `ON CONFLICT DO NOTHING` (deduplicates only where the migrated unique indexes exist), stores `*` for an empty title, and creates the table when absent; exit codes (`check` and `check-reed` 0 found / 1 not found, printing `NEW: <id>` / 2 error or bad id, since the review-fix pass D15; `get-zoho-id` 0/1); every printed line.
+- run-lock: derived lock (no lock file), per-status ages, `phase1_complete` released by a matching `run-*.json` with status `complete`, `--skip-file`, exit 2 when blocked.
+- pending-gate: oldest file first (alphabetical), hand-made files carry no `spawnedAt` and are READY at once, a claim under 10 minutes is respected, a stale claim with no active run is released and rewritten, BOM stripped, `sources` default (`caterer` for `territory-scheduler`, else `both`), `LOCKED:<id>` before any file is read, `ERROR:all_files_corrupt (n parse failures)` with exit 1. Output lines are exactly what `pipeline-watchdog.js` and `watchdog-runner.js` parse.
+- cull-ghost / recover-stranded: `CULL_OK culled=<n> kept=<n> [ids=...]`, `RECOVERY_OK n=<n> <id>(pid=<p>,mode=<m>)` (parsed by the watchdog), exit always 0, 7-day age cap, 15-minute staleness, sources=both goes through `run-pipeline.js --status-file`, sources=caterer through `process-approved-queue.js <queue>`.
+- territory schedule: biggest distance wins, merge of duplicate rows, auto-downgrade below 5 new, fixed cadence anchored to the due date, capacity cap 57/day with a bounded 365-day walk, "due" uses the UTC date.
+- queue-due-territories: idempotent by (title, location) read from file contents (BOM tolerated, corrupt files ignored), running territories skipped, Reed budget downgrade with `reedBudgetSkipped`, payload shape and key order, `--dry-run`, `--json`, `--quiet`, exit 0/1.
+- Zoho: field map, `Applying_for_role` mapping, HTML-entity decoding, postcode-in-job-title salvage, duplicate enrichment rules and protected statuses, throttle retry (4 attempts, 4/8/15 s), 401 refresh once, three refresh attempts (3 s, 6 s), 20 MB attach limit, all marker lines (`ZOHO_ID=`, `DUPLICATE ZOHO_ID=`, `DUPLICATE_ENRICHED`, `ENRICH_SKIP`, `PAYLOAD_FIX`, `ATTACHED:`, `ALREADY_HAS_RESUME`).
+- Halt: state shape `{halted, reason, detail, since, lastCheckedAt, blockedRuns, remedy}`, idempotent per reason, one `errors.jsonl` entry per halt and per recovery with the legacy text (including the em dash, kept as an escape in source), CLI `set|clear|get` and exit codes.
+
+## 4. Deviations (each is deliberate)
+
+| # | Deviation | Why |
+|---|---|---|
+| D1 | `computeNextRunDate` uses `setUTCDate`/`getUTCDate` | the legacy local-time `setDate` moved the result one day early across the spring clock change when the OS zone is Europe/London (e.g. 2027-03-25 + 7 gave 2027-03-31). UTC arithmetic equals the legacy result under `TZ=UTC` and no longer depends on the machine zone (DESIGN: code must not depend on TZ). Tested under four zones |
+| D2 | `queue-due-territories` file name uses the Europe/London `HHMM` (was OS-local) | DESIGN 4/7. Only the name changes; the date part stays the UTC date as before |
+| D3 | `cullReason` names the true previous status | legacy assigned the new status before building the text, so `phase1_active` was reported as `phase1_running`. Text only; nothing parses it |
+| D4 | `recover-stranded` treats a `.run-lock` older than 60 min as dead even if its pid answers, and sends the child's output to `logs/recover-<id>-<ts>.log` instead of `stdio: ignore` | after an instance restart a pid can be reused; 60 min is the rule `run-pipeline.js` applies when it takes a lock over. Redirecting to a file follows DESIGN 5.5 (children must not hold the parent's pipes) and keeps the recovery output |
+| D5 | `pipeline-halt` alerts through `notify()` and redacts detail/remedy | DESIGN brief. Idempotent repeats (same reason) do not alert again |
+| D6 | `pipeline-optimiser.js`: the zero-yield alert text no longer names the OpenClaw CLI (now "check the AI Gateway key or credits; see docs/OPERATIONS.md"); the history append goes through `fsx.appendLine`; the script exports its functions and only runs `main` when executed | the legacy optimiser never messaged anyone and never wrote `MEMORY.md` (that is `run-pipeline.js`, another package). What remains is the analysis, the JSON verdict on stdout and the append to `logs/pipeline-performance.jsonl`. Nothing was dropped |
+| D7 | Non-DB helper commands of `territory-manager` never open the database, and DB commands use `fileMustExist` | a missing `candidates.db` no longer leaves an empty file behind (which would hide a missing restore). `candidates-db.js` itself still creates an empty schema on a missing file, as before (see open issue 1) |
+| D8 | `caterer-fetch-results.js` is now a parameterised diagnostic: `--url`, `--ids`, `--out`; default output is a one-line count summary | the legacy file hard-coded a Windows path, one search URL and 25 specific candidate ids, and always wrote scraped names and locations to disk. Names are printed only for `--ids` and written only for `--out` (mode 0600). The default search URL is unchanged. Live behaviour needs the cookie jar from the browser package |
+| D9 | Atomic writes (temp file plus rename) for `pipeline-halt.json`, `pending-searches/*.json` rewrites, status files created or culled, `zoho-credentials.json`, the candidate JSON and the two postcode caches; candidate JSON and Zoho credentials are mode 0600 | DESIGN 9 (atomic state writes) and principle 3 |
+| D10 | Punctuation in some user-facing messages is ASCII (`-` for an em dash, `->` for an arrow) | ASCII-only source. Output characters that other code or the dashboard may show (halt/resume text, CLI arrows, box lines, status icons) are kept through `\u{...}` escapes and are byte-identical |
+| D11 | `--help` on every CLI (first argument) exits 0 before doing anything | DESIGN 9. Previously `--help` was treated as data by several scripts (`cull-ghost-phase1.js`, `queue-due-territories.js` and `migrate-reed-schema.js` would have run) |
+| D12 | `tests/core/index.js` | `node --test tests/core` (DESIGN 10) fails on Node 22 and 25 because a directory is handed to Node as a module; the shim runs the suite |
+| D13 | `openDb()` no longer runs `PRAGMA journal_mode = WAL` on every open; it re-asserts WAL only when the file is already in WAL, and leaves a rollback-journal file alone | the unconditional switch bypassed the volume-safety probe of `scripts/migrate-schema.js` (statfs verdict plus a two-connection probe), so a volume that refuses shared-memory WAL (9p, virtiofs, network shares) could be flipped by whichever script opened the DB first. `migrate-schema.js` is now the single decision point; `busy_timeout = 5000` is kept. Tested by `tests/core/db-journal.test.js` (6 tests, child processes: delete stays delete, WAL stays WAL, a new file starts in delete, migrate decides) |
+| D14 | `fill-mandatory-fields.js`: `.pdf` text is extracted with `const { PDFParse } = require('pdf-parse'); new PDFParse({ data }); getText(); destroy()` (destroy in a `finally`), inside the same try/catch, so a corrupt PDF still yields empty text; the CLI prints `Recovered: <field names>` instead of the recovered values | the legacy call `await pdfParse(buffer)` threw for every PDF (see section 5.1, now fixed), so Mobile/Email/name recovery always fell back to placeholders. This changes what reaches Zoho for PDF CVs, deliberately. The CLI printed phone numbers and e-mail addresses into terminals and session transcripts (DESIGN 1.3); `process-approved-queue.js` already logged names only. Tested by `tests/core/pdf-cv.test.js` (9 tests, a minimal PDF generated in the test, skipped cleanly when `pdf-parse` is not installed) |
+| D15 | `candidates-db.js check` and `check-reed` exit **2** (nothing on stdout, `check failed: <reason>` on stderr) when the database cannot answer: corrupt file, locked, or `better-sqlite3` not loadable (the CLI defers the driver `require` so it can report this; as a library the `require` still throws at load). Exit 1 now always comes with the `NEW: <id>` line. `reject-title` exits **1** when the rejection could not be written (it used to exit 0 because `rejectCandidateForTitle` swallows the error, which silently dropped the job-title scoping on a read-only or broken table) | finding "a dead, locked or read-only candidates.db is not detected" (phase1-parity-B) and supervision finding on the fitness gate: exit 1 for both a crash and a genuinely new candidate made every card look new, so a broken database ended in blind screening, credit spend and Zoho duplicates. The in-repo caller of `check` is `phase1/dedupe.js` (per-card fallback); it now treats only `exit 1 + NEW: <id>` as new and stops the page on anything else (`db-unavailable`, docs/parity/phase1.md). Every other subcommand keeps its contract (a failure still exits 1 through the top-level handler, with nothing on stdout). Tested by `tests/core/candidates-db.test.js` (corrupt file, healthy file, view instead of table, no driver) and `tests/phase1/e2e.realdb.test.js` |
+
+## 5. Legacy defects found and kept as they are (decision for the owner)
+
+1. FIXED (D14, 2026-09-29). `fill-mandatory-fields.js` PDF text extraction was dead in the legacy code. `package.json` pins `pdf-parse` ^2.4.5, whose `require('pdf-parse')` is an object with a `PDFParse` class, not a function; the legacy `await pdfParse(buffer)` throws inside a `try/catch`, so every `.pdf` CV yields empty text and Mobile/Email/Name recovery falls back to the placeholders (`07777777777`, `Candidate`, the Caterer id). `.docx` (mammoth) is unaffected. The fix is `const { PDFParse } = require('pdf-parse'); const p = new PDFParse({ data: buffer }); const t = (await p.getText()).text; await p.destroy();`; it changes what reaches Zoho, so it is listed as D14.
+2. `pipeline-optimiser.js` regression-versus-history detection never fires: `buildLogEntry` writes flat keys (`totalWallClockSecs`) but `checkRegression` reads `timing.totalWallClockSecs` from the same entries. Only the error-reliability observations work. The tests pin this (`legacy quirk kept`). Fix: read `h[lastPathSegment]` in `fieldAvg` for flat entries.
+3. `applying-for-role-map.js`: the rule `/caf\xe9?\s*(assist|attend)/` makes only the accented e optional, so "Cafe Assistant" without the accent is unmapped (returns null, the caller defaults to Chef).
+4. `lib/caterer-credentials.js`: the placeholder guard rejects any password containing `todo`, `xxxx`, `changeme`, `your password` or `password here` (case-insensitive). A real password containing "todo" would be refused with a placeholder error.
+5. `build-caterer-results-url.js`: distance `0`, `''` and `null` all resolve to radius 0 instead of erroring.
+
+## 6. UNVERIFIED-LIVE (acceptance checks)
+
+- `better-sqlite3` builds or installs on Debian 13 / Node 26 without root (verified only on Node 22 in WSL and Node 25 on Windows).
+- WAL mode on the persistent volume: `candidates-db.js` no longer switches the journal mode (D13). `node scripts/migrate-schema.js` decides; after it, `node scripts/preflight-db.js --json` prints `journalMode` `wal` if the volume passed the probe and `delete` (with a warning in the migrate output) if not. Either is correct; the dashboard reader works in both.
+- postcodes.io is reachable from the Hermes egress IP and answers as before (`/places`, `/postcodes/`, `/outcodes/`); Zoho EU token refresh and record/attachment endpoints with the real credentials (only fake responses tested).
+- `mammoth` on real `.docx` files under Linux (no fixtures), and `pdf-parse` 2.4.5 on real PDF CVs on Debian 13 / Node 26 (verified only on a generated one-page PDF, Node 22 and 25). A hostile or very complex PDF is bounded by the 5 MB read cap but not by a time limit.
+- Detached recovery children (`recover-stranded-phase1.js`) surviving the end of a bounded cron tick and being adopted by the watchdog (the pid and mode format is what the watchdog parses; the process-tree behaviour on Hermes is untested).
+- `caterer-keepalive.js` and `caterer-fetch-results.js` against the live site with a Linux browser session (they use plain HTTP with the saved cookies; the legacy User-Agent string is kept).
+- The Caterer search regexes in `caterer-fetch-results.js` against the current live page markup.
+
+## 7. Interface notes for other packages
+
+- `constants.js` keeps every legacy export. `SESSION_PATH` is `state/caterer-session.json`; the browser package and `phase1/session.js` already resolve the session file through it.
+- Credentials: `lib/caterer-credentials.js` -> `secrets/caterer-credentials.json`; `zoho-auth.js` -> `secrets/zoho-credentials.json`. Values are never logged.
+- Caches stay at the workspace root: `postcode-lookup-cache.json`, `postcode-to-city-cache.json` (the bundle restores them there).
+- CLI output formats consumed elsewhere are unchanged: `pending-gate.js`, `create-init-status.js` (`INIT_FILE:<path>`), `run-lock.js --global` (exit 2 = blocked), `cull-ghost-phase1.js`, `queue-due-territories.js --json`, `candidates-db.js`, `build-caterer-results-url.js` (`RESULTS_URL:` / `SEARCH_ID:`), `pipeline-halt-cli.js`.
+- The `run_results` table (dashboard research 4.5) is not created by `candidates-db.js` (schema changes are out of scope here); `scripts/migrate-schema.js` owns it.
+
+## Integration rehearsal changes (docs/parity/integration.md)
+
+- `lib/env.js` `redact()` / `secretValues()` also cover the secret-named values (`*key*`, `*token*`, `*secret*`, `*password*`, `*passphrase*`, `*cookie*`) of `secrets/*.json`, read lazily and re-read when the directory changes (at most every 30 s otherwise). The environment alone did not know the Caterer password or the Zoho client secret and refresh token, so an error body that echoed a request could reach a log. `zoho-auth.js` also names only the error (not the response body) when a token refresh fails.
+- `lib/time.js` `hourClock()`: the tests-only `RESOURCER_TEST_NOW` hook (see docs/parity/supervision.md 13).

@@ -1,0 +1,292 @@
+# Decisions and deliberate divergences
+
+This is the record of every choice that was made on purpose while moving the resourcer to Hermes: what the owner decided, and every place where
+the new system behaves differently from the old one. Everything else is parity (same behaviour, state files, exit codes). Detail and the legacy
+line numbers are in `docs/parity/<package>.md`; the contract is `docs/DESIGN.md`. All items are reversible by configuration or a small code change
+unless the last column says otherwise.
+
+Names: the old system means the laptop version (OpenClaw, PowerShell, WSL, PM2, WhatsApp). Ids in this file: `OD` owner decision, `SCR-D` screening,
+`SUP-D` supervision, `CORE-D` core, `LIFE-D` lifecycle, `REED-R` Reed, `P1-` phase 1, `BRW-` browser and Caterer login, `DASH-` dashboard, `BUN-` bundle,
+`INT-F` integration rehearsal. DESIGN section 8 quotes some ids from the research documents: its D1, D2 and D10 are `SCR-D4`, `SCR-D2` and `SCR-D10`
+below; its D3, D4, D5, D8 and D9 are `OD3`, `OD4`, `OD5`, `OD8` and `OD9`.
+
+## 1. Owner decisions
+
+### 1a. Stated by the owner
+
+| Id | Date | Decision | Reason / evidence | How to change |
+|---|---|---|---|---|
+| OD-A | 2026-09-29 | The owner accepted that candidate card text is sent (redacted) to Jev, a model hosted in the United States (TypeSafe AI, served through DigitalOcean), reached through the Vercel AI Gateway. The owner stated that Jev has zero data retention and does not train on inputs. | Jev costs about 0.004 US cents a candidate against about 0.2 cents for the language model, and the calibration plan needs it running in shadow. **Research could not independently confirm zero data retention:** the gateway catalogue lists Jev with `zdr: none` and its only endpoint with `has_zdr: false`; TypeSafe's terms say retention is "as long as reasonably necessary" (no fixed period), zero data retention is an enterprise feature, and clause 4.1 lets TypeSafe keep data in perpetuity to derive telemetry. Training is stated as "no" by TypeSafe and the catalogue (`no_training: all`). | `SCREEN_ENGINE=llm` (no traffic to Jev), or `SCREEN_SHADOW=off`. Turn on `SCREEN_ZDR=1` only when the install canary (docs/INSTALL.md, docs/ACCEPTANCE.md) proves the gateway can satisfy it for Jev. Get TypeSafe's zero-retention statement in writing (docs/SECURITY.md, section 8). |
+| OD-B | 2026-09-29 | The owner has a funded Vercel AI Gateway Pro account; one key (`AI_GATEWAY_API_KEY`, human-only) serves both the language model and Jev. | One vendor relationship, one balance, gateway-side observability; the key is the only screening secret. | Replace the key on the dashboard Keys page; `SCREEN_GATEWAY_ORIGIN` points elsewhere only in tests. |
+| OD-C | 2026-09-29 | Phase 1 and the Caterer login are ported to Node, not run under PowerShell 7 on Linux. | See section 2. | none planned |
+| OD-D | 2026-09-29 | `SCREEN_ENGINE` defaults to `jev_shadow`: the language model (Claude, through the same gateway key, recruiter prompts verbatim) decides; Jev answers in parallel and is only logged. Promotion to `jev` is one setting after `tools/screening-report.js` returns GO (docs/SCREENING.md section 9). | Parity on day one, evidence for the switch afterwards. The reviewers advised starting with `llm` until the data protection position was confirmed; the owner accepted the risk (OD-A). | `SCREEN_ENGINE=llm|jev_shadow|jev` in the profile `.env`. `jev` refuses to decide until `decide.calibration.calibrated` is true. |
+| OD-E | 2026-09-29 | Reed is off (`RESOURCER_SOURCES=caterer`) until the Reed canary passes; then `both`. (OD8 of the review.) | Reed login from a datacenter address is expected to meet Cloudflare Turnstile and needs a one-time human login; Caterer must not wait for it. Every territory row is `both`, so while Reed is off the Reed half of each territory's cycle is not owed and not caught up later (KNOWN-LIMITS, Reed). | Set `RESOURCER_SOURCES=both` after the canary. Do the Reed human login and canary before resuming `resourcer-tick` to avoid losing Reed cycles. |
+| OD-F | 2026-09-29 | Supervision is a bounded foreground cron tick (at most 55 minutes, fired every minute 05:00-23:59), not a daemon. Runs are detached processes adopted by PID. | Hermes Cloud scales to zero after about 120 s idle and only running cron jobs keep it awake; the global script timeout is 3600 s; a detached daemon does not count as work. | Change `RESOURCER_MAX_TICK_MIN` (55 is the cap) and the cron expression together; see `SUP-D1`. |
+| OD-G | 2026-09-29 | CV files and candidate JSON are deleted as soon as Zoho holds the candidate and the CV is attached (or the candidate is a duplicate). Failed attaches are kept 14 days. (OD9 of the review.) | Personal data minimisation (DESIGN principle 4); no reader touches a CV after a successful push. | `lib/cv-retention.js` rule; `retention-sweep.js --orphan-days`. |
+| OD-H | 2026-09-30 | Laptop hand-over. The laptop is handed over on 2026-09-30, so the cutover, the legacy shutdown and the secret rotations in docs/TEARDOWN.md must not wait. | Owner instruction. | n/a |
+
+### 1b. Defaults chosen in DESIGN section 8 for the open questions of the review (not yet confirmed by the owner; change any of them by configuration)
+
+| Id | Date | Default | Reason / evidence | How to change |
+|---|---|---|---|---|
+| OD1 | 2026-09-29 | Fix the Reed burn: when screening is unavailable Reed no longer marks candidates seen or rejected; the page is retried and the shared halt is raised after three failures (`SCR-D4`, `REED-R10`). Reed rows burned during the 2026-08-28..09-05 outage are **not** reopened by the port. | up to 2,843 Reed candidates were lost in 355 runs. | Deleting the Reed seen-only rows of that window from `candidates.db` re-screens them (owner action). |
+| OD2 | 2026-09-29 | The post-unlock prompt uses the same rubric block as the pre-unlock prompt (adds "a Commis Chef for a generic Chef search = APPROVE"). The Commis Chef tier quirk is kept (`SCREEN_TIER_MODE=legacy`). | The mismatch cost about 150 unlock credits in four months; the tier quirk changes who is rejected, so it is a business decision. | `SCREEN_TIER_MODE=fixed` makes Commis Chef tier 1. |
+| OD3 | 2026-09-29 | Shadow log content: redacted card text (first name, surname by heuristic, postcodes, e-mails, phones, URLs removed) plus platform candidate id, in `shadow/screening-YYYY-MM-DD.jsonl` mode 0600, deleted after 180 days. | Needed for the calibration report and a labelled sample. It is still personal data (docs/SECURITY.md). | `SCREEN_SHADOW_TEXT=0` keeps hashes only (then no labelled sample can be exported); `shadow.retentionDays`. |
+| OD4 | 2026-09-29 | Alerts go to an outbox (`outbox/alerts.jsonl`); a no-agent cron job prints new ones, deduplicated, non-critical held during quiet hours 22:00-06:00 London, an 18:00 digest and a 07:00 alive line. Delivery goes to the channel the owner names before the jobs are created (`--deliver` and `--failure-deliver` on all eight jobs, docs/INSTALL.md 9.4 and 9.5); `local` is never used for them. | Decouples code from channel. **`local` alone reaches nobody:** configuring a real channel and receiving a test alert is a required install step. | `hermes -p resourcer cron edit <name> --deliver <target> --failure-deliver <target>` (docs/INSTALL.md 9.6). |
+| OD5 | 2026-09-29 | Backups: nightly online SQLite copy, integrity check, gzip, AES-256-GCM to `backups/`, 14 daily and 8 weekly kept, weekly restore test, hook `BACKUP_UPLOAD_CMD` for an off-instance copy chosen by the owner. A same-volume backup does not survive loss of the instance. | (OD5 of the review.) | `BACKUP_UPLOAD_CMD`, `BACKUP_UPLOAD_ENV`; passphrase held off the instance too. |
+| OD6, OD7 | later | Recall-tilted policy for borderline evidence (`rubric.insufficientEvidence: lenient`) and mailbox access for the Caterer safe-list link. | Wait for the labelled sample; the safe-list link stays a human action. | config / a later decision |
+| OD8, OD9 | 2026-09-29 | Reed on Hermes only after the canary, and CV retention: both are stated by the owner, see OD-E and OD-G. | | |
+
+## 2. Why Node and not PowerShell 7 (OD-C)
+
+The research recommended, as the cheaper first step, running `phase1-scrape.ps1` and the login script under PowerShell 7.6 on Linux with about 65
+edited lines (10-16 hours), and a Node rewrite only if that failed a go/no-go gate (28-40 hours). Node was chosen; the reasons, taken from the research and the build and recorded so they can
+be judged later, are:
+
+- One runtime. 55 of the 59 files of the live closure were already Node; the operator (an LLM) then has to know one language, not two with different traps
+  (PowerShell 5.1 versus 7 differences in `Start-Process`, date coercion, error records and argument passing were measured or read from source; the
+  `Start-Process` output race alone would have silently corrupted page scrapes).
+- No extra install: PowerShell 7 is 76 MB to download, 178 MiB unpacked and 110-210 MB of RAM per run on a 4 GB box shared with another profile, and
+  needs libraries (ICU, OpenSSL) whose presence could not be verified.
+- The duplicated login code (a PowerShell script and a second copy inside the watchdog runner) diverged and broke self-healing on 2026-07-04. A Node port makes
+  one implementation (`caterer-login.js`) callable in-process by pre-flight, runner and phase 1.
+- Testability. Every unit is a function that can be tested on the laptop and in WSL with a fake browser, fake gateway and temp directories; the whole thing was
+  rehearsed end to end (12 scenarios) with no live site.
+- The risk the research named (losing weeks of hardening in a rewrite) was answered by porting unit by unit with the same exit codes, status-file schemas and
+  markers, by listing every legacy quirk as kept or changed (docs/parity/phase1.md sections 2-4), and by characterisation tests.
+
+Cost accepted: the port has no field history. Every live-site behaviour is labelled UNVERIFIED-LIVE and is an acceptance check (docs/ACCEPTANCE.md, docs/KNOWN-LIMITS.md).
+The differential harness that compared old and new scripts on identical fixtures lived in a scratch area and is not in the repository.
+
+## 3. Cross-cutting divergences from the old system (DESIGN section 7)
+
+| Id | Change | Why |
+|---|---|---|
+| X1 | Removed: OpenClaw gateway and model alias, the OpenClaw command-line tool, PM2, Scheduled Tasks and the Login Startup item, WSL, PowerShell, WhatsApp delivery and relink cron jobs, the Express dashboard and its tunnel, session pruning, gateway health check, the LLM watcher wake-up. | None of it exists on Hermes. Replaced by cron jobs, Node, a dashboard plugin, the outbox and `screening-health`. See docs/LEGACY-MAP.md. |
+| X2 | Fixed: the phase 1 empty-result probe had lost its backslashes on 2026-09-04, so the remote-territory "explicit zero" guard never fired. It is rewritten (`String.raw`) and tested. | Real fault in the old system. `P1-1`. |
+| X3 | Hour-of-day logic (operating window 06:00-22:00, quiet hours, digest) always uses Europe/London through `Intl`, never the OS zone. | Old code mixed local and UTC. |
+| X4 | Secrets are never hard-coded and never printed (the Reed password lived in two scripts); browser profile and session state live under `state/`, not `/tmp`. | Principle 3. |
+| X5 | Caterer and Reed browsers never run at the same time (`runtime/browser.lock`). Deviation from DESIGN 7 ("Chrome tree killed between runs"): the **Caterer** browser daemon is kept warm between runs (killing it costs a safe-list e-mail round trip, every incident note says so); only the Reed browser is stopped after each use. Memory is protected by a 700 MB floor before a run and a Chrome cache cap. | Memory versus safe-list churn; see KNOWN-LIMITS (resources). |
+| X6 | No cross-provider model fallback. The old chain ended at a different provider because a self-referential fallback hid the 2026-08-28..09-01 OAuth outage. Now the backup model is the same vendor through the same gateway, and **halt is the fallback**: when screening cannot answer the pipeline stops and holds territories, and nothing is consumed. | A halt loses time, not data; a silent fallback loses data. |
+| X7 | Dependencies: the contract said only `better-sqlite3`; `mammoth` (docx), `pdf-parse` (PDF text recovery) and `ws` (Chrome DevTools socket for Reed) are also required, as in the old system. Versions float within their caret ranges until a lockfile is committed (KNOWN-LIMITS, install). | Functions cannot be dropped. |
+| X8 | DESIGN 9 allows only one-line WHY comments; several ported Phase 2 and Reed files keep their long incident headers. Cosmetic, no behaviour. | Keep the incident history next to the code it explains. |
+| X9 | The test command in DESIGN 10 (`node --test tests/<pkg>`) fails on Node 22 and later (a directory is treated as a module). Use the quoted glob: `node --test "tests/<pkg>/*.test.js"`. | Node behaviour. |
+| X10 | The tick fires every minute from 05:00 to 23:59, so the instance never scales to zero in that period (and under the cron provider called chronos every fire is a wake). | A run started at 21:59 may last 70 minutes and must stay supervised; the frozen-instance ledger (`SUP-D13`) covers real suspends. |
+| X11 | The operator prompt says never to touch the default Hermes home, with one named exception: `hermes plugins enable resourcer` and `hermes plugins list --enabled` (no `-p`, docs/INSTALL.md 10.2, HUMAN-APPROVE), because dashboard plugins are enabled at machine level. The install also begins with a scratch-folder step (0.7) that probes whether Hermes prompts on `mv` and `rm` of one named file; if it does, the owner decides once in the chat and every `mv` and `rm` line then counts as HUMAN-APPROVE. | Found by a dry run of the runbook by a fresh operator: the rule and the commands contradicted each other, and the approval classifier's behaviour on deletes is UNVERIFIED-LIVE. |
+| X12 | Cron wrappers are copied into the profile and then set to mode 755 (INSTALL 9.2); preflight E10 FAILs when an installed wrapper is not executable; CUTOVER 5b stores every `.sh` as 100755 in git; `.gitattributes` forces LF. | Files published from Windows are stored as 100644, and Hermes starts a wrapper directly (`Permission denied`, exit 126, for all eight jobs). |
+
+## 4. Screening (docs/parity/screening.md; research/screening-contract.md 6.11)
+
+| Id | Change | Why | Risk / how to revert |
+|---|---|---|---|
+| SCR-D1 | One request per candidate instead of ten per call; `--batch-size` accepted and ignored. Timeouts 60 s per call (was 130 s per batch); circuit breaker after 3 consecutive candidates; 600 s deadline. | Jev takes one state per request; removes "missing from AI response" and neighbour effects. | none externally |
+| SCR-D2 | Strict boolean `approved` (the string "false" is invalid, it used to become true); the single-review prompt uses the batch rules block. | Fixes a latent approve-by-accident; aligns pre- and post-unlock (`OD2`). | none |
+| SCR-D3 | Malformed model output is retried, then the backup model, then a per-candidate `sys_invalid_result` (reject before the unlock, logged) or `sys_fail_open` (approve after the unlock); systemic invalid output (5 or more and half) is "unavailable" (exit 3). It never exits 1 for model output. | 433 historical stops. | A bad candidate is rejected and gets a `reject-title` row; on small pages the mass guard cannot fire (KNOWN-LIMITS, screening). `batch.onInvalid=approve` flips the fallback. |
+| SCR-D4 | Reed does not burn candidates on an outage (see `OD1`). | | |
+| SCR-D5 | `SCREENING_MODEL` label = the engines that decided (`typesafe-ai/jev+anthropic/claude-sonnet-5.5`, `rules`, `unknown`, `none`); sentinels `unavailable` and `error` kept. | The old label was config-derived and unreliable. | The dashboard shows a new string. |
+| SCR-D6 | Redaction of first name, surname (heuristic), postcodes, e-mails, phones, URLs before anything leaves the process and before the shadow log. | Third-party personal data. | Heuristic: surnames that are job words, middle names and non-UK identifiers can pass (KNOWN-LIMITS). `SCREEN_REDACT=off` is not advised. |
+| SCR-D7 | No snippet temp files (`review-tmp-*` are gone); candidates travel on stdin; a startup sweep deletes leftovers older than an hour. | Personal data on disk. | `SCREEN_INPUT_MODE=file` exists for tests. |
+| SCR-D8 | Health: a cheap TCP probe on every tick, a deep probe (credit balance plus one tiny canary call) at most once a minute while halted; fixed halt reason strings. | The old probe round-tripped an agent for 73-103 s. | more tiny API calls |
+| SCR-D9 | Rubric text in ASCII; the "profile clearly out of date" clause is **not** in the default rubric (opt-in `SCREEN_STALE_RULE`), as is the recall-tilted `SCREEN_INSUFFICIENT=lenient`. | The clause can act as an age filter; prompts stay verbatim. | Stale-profile rejections (about 3 percent) may fall. |
+| SCR-D10 | `SCREEN_TIER_MODE` switch, default `legacy` (the Commis Chef quirk is kept). | Owner decision `OD2`. | `fixed` |
+| SCR-D11 | Optional nullable `reason_code` column on `candidate_rejections`; Reed may later use scoped rejections. | Lets a Reed candidate rejected for one title be considered for another. | Additive; left off until asked. |
+| SCR-12 | Engines `llm`, `jev_shadow`, `jev`; `jev` decides only when `decide.calibration.calibrated` is true; escalation is in code (a second chat call), the gateway-native fallback mode (`SCREEN_ESCALATION=gateway`) is not implemented. | Safety; simpler. | |
+| SCR-13 | Jev is asked atomic typed questions and a code-side `decide()` returns approve, reject or review; one two-option "decision" question was rejected. | The design guide; auditable thresholds. | thresholds are CALIBRATE placeholders |
+| SCR-14 | Stage-1 rules: only validated ones, all in `shadow`; the empty-card rule defers to the judge; the Reed "no data" rule is a flag only. | Missing information is never a reason to reject. | promote a rule only when the report says so |
+| SCR-15 | Missing `AI_GATEWAY_API_KEY` is exit 3 (`API_UNAVAILABLE`, marker `none`), not exit 1. | Lets the halt logic engage. | |
+| SCR-16 | The CLI sets `process.exitCode` and lets the loop drain (a 3 s unref'd timer forces it). | `process.exit()` crashed libuv on Windows Node 25 with pending handles. | |
+
+## 5. Supervision (docs/parity/supervision.md)
+
+| Id | Change | Why |
+|---|---|---|
+| SUP-D1 | The daemon becomes a bounded tick; back-off, streaks and the handled run are persisted in `runtime/watchdog-state.json`; the run is a detached process adopted by PID. | `OD-F`. |
+| SUP-D2 | The `RESOURCER_SOURCES` gate is applied in the runner and the pending file is rewritten (`sources` effective, `sourcesRequested` original); enabling Reed later restores the request per file. | Keeps params, pending file, queue file and Phase 2 in agreement; closes a re-run loop. |
+| SUP-D3 | Alert policy: exit 11 with reason safelist, login or cvdb-module raises no tick alert (the login module alerts and rate-limits itself, 3-6 h re-notify); phase1-session-stale and session-timeout alert critically; 3 failed runs, a 70-minute kill, a runner crash, low memory, 5 gate failures, 3 "never screened" runs warn; no CV for 3 window hours is critical. | Avoids a 15-minute repeat of a 3-hour policy. |
+| SUP-D4 | Halt deep probe at most every 60 s (was 5 min); it takes about a second. | The interval existed because the probe cost 73-103 s. |
+| SUP-D5 | Phase 1 runs in its own process group with the console redirected to a file; leftovers of the group are ended after it exits; SIGTERM then SIGKILL after 5 s. | Zombie-proof exits; Hermes tree-kill semantics. |
+| SUP-D6 | cull-ghost (which starts stranded-run recovery) runs only when no run is in flight. | Caterer and Reed browsers never overlap. |
+| SUP-D7 | A hung Caterer sign-in (15 minutes) exits 11 `session-timeout`; a module-error answer exits 11 `cvdb-module` instead of proceeding. | A login must not overlap the scrape; the module error masqueraded as a stale session in 2026-08. |
+| SUP-D8 | A non-zero finished run releases its orphaned status files at once; periodic releases use a 2-minute guard. | Removes stale `phase1_initializing` files. |
+| SUP-D9 | Memory guard: a READY territory is held (warn, no halt) below 700 MB available. | 4 GB shared. Reviewers found 700 MB below one run's peak; see KNOWN-LIMITS. |
+| SUP-D10 | New `runtime/` files: tick.lock, tick.heartbeat, run.json, last-run.json, watchdog-state.json, adopted-procs.json, queue-due.lock/state, caterer-status.json, backup-state/status.json, alerts-state.json, maintenance-state.json, clock-jumps.json; `browser.lock` is defined by the Reed package. | Dashboard and supervision contracts. |
+| SUP-D11 | The legacy status `phase2_push` (which nothing writes) is kept in the non-terminal list as it was. | Parity. |
+| SUP-D12 | The retention sweep is its own cron job (04:20, output to `logs/retention-<date>.log`); maintenance (04:10) also removes `candidates.db.pre-migrate-*` copies after 7 days. | Visible schedule and exit code; an unencrypted safety copy must not outlive its purpose. |
+| SUP-D13 | Suspend/resume: a ledger of frozen intervals (`runtime/clock-jumps.json`) is subtracted from every age; before a kill the heartbeat is read twice; a tick that lost its lock neither launches nor writes. | Hermes freezes an idle instance; without this a healthy run was killed and doubled after resume. |
+| SUP-14 | After a failed run the pending file's claim is given back (the runner removes `spawnedAt` on every non-zero exit but 10; the tick does the same for a run that died). | Found in the rehearsal (`INT-F6`). Reviewers noted this can make one failing territory block the queue (KNOWN-LIMITS, supervision). |
+
+## 6. Core (docs/parity/core.md)
+
+| Id | Change | Why |
+|---|---|---|
+| CORE-D1 | `computeNextRunDate` uses UTC date arithmetic. | The old local-time `setDate` moved a result one day early across the spring clock change. |
+| CORE-D2 | The `queue-due-territories` file name uses the London `HHMM`. | Time rule; only the name changes. |
+| CORE-D3 | `cullReason` names the true previous status. | Text only. |
+| CORE-D4 | `recover-stranded` treats a `.run-lock` older than 60 minutes as dead even if its pid answers; its child output goes to `logs/recover-<id>-<ts>.log`. | Pid reuse after an instance restart; children must not hold the parent's pipes. |
+| CORE-D5 | Halts and resumes alert through `notify()`, detail and remedy are redacted. | No WhatsApp. |
+| CORE-D6 | `pipeline-optimiser.js` no longer names the OpenClaw CLI, exports its functions, appends through `fsx`. | Removed dependency. |
+| CORE-D7 | Non-database helper commands never open the database; database commands use `fileMustExist`. | A missing `candidates.db` no longer leaves an empty file that hides a missing restore. |
+| CORE-D8 | `caterer-fetch-results.js` is a parameterised diagnostic (`--url`, `--ids`, `--out`); names are printed only for `--ids` and written only for `--out` (0600). | The old file hard-coded a path, 25 ids and always wrote names to disk. |
+| CORE-D9 | Atomic writes for halt, pending, status, credentials, candidate JSON and caches; candidate JSON and Zoho credentials are mode 0600. | Principle and DESIGN 9. |
+| CORE-D10 | ASCII in messages; output characters other code may show are kept as `\u{...}` escapes. | DESIGN 9. |
+| CORE-D11 | `--help` on every CLI exits 0 before doing anything. | DESIGN 9 (before, `--help` was treated as data by three scripts). |
+| CORE-D12 | `tests/core/index.js` shim so a directory argument works. | `SCR`/`X9`. |
+| CORE-D13 | `openDb()` no longer runs `PRAGMA journal_mode = WAL`; only `migrate-schema.js` decides (filesystem verdict plus a two-connection probe); a rollback-journal file is left alone. | A volume that refuses shared-memory WAL (9p, virtiofs, network share) could be flipped by whichever script opened the database first. |
+| CORE-D14 | `fill-mandatory-fields.js` extracts PDF text with the pdf-parse v2 `PDFParse` class; the CLI prints recovered field names only. | The legacy call threw for every PDF, so phone, e-mail and name recovery always fell back to placeholders; this **changes what reaches Zoho for PDF CVs**, deliberately. |
+| CORE-K1..5 | Legacy defects **kept**: optimiser regression detection never fires (flat versus nested keys); "Cafe Assistant" without the accent is unmapped; the Caterer password guard rejects any password containing `todo`, `xxxx`, `changeme` and similar; distance 0, empty and null resolve to radius 0. | Parity; documented, harmless. |
+
+## 7. Lifecycle: Phase 2, schema, retention (docs/parity/lifecycle.md)
+
+| Id | Change | Why |
+|---|---|---|
+| LIFE-D1 | Thrown Caterer CV download errors are that candidate's error; the run continues. | The old run aborted and stranded every approved candidate. |
+| LIFE-D2 | Candidate ids must be numeric (`INVALID_ID` row otherwise); never reach a file path. | Path safety. |
+| LIFE-D3 | No names, e-mails, phones or CV field values in console output or `errors.jsonl`; ids and field names only. | Principle 3. |
+| LIFE-D4 | A downloaded CV is saved only under an extension the reader finds (pdf, docx, doc, rtf, txt). | Avoids orphaned files. Two other writers still trust the server's extension (KNOWN-LIMITS). |
+| LIFE-D5 | `fileMustExist`, 15 s busy timeout, atomic state writes, CV, candidate JSON and results 0600. | Safety. |
+| LIFE-D6 | The same candidate twice in one queue is recorded as a duplicate without a Zoho call. | The first push now deletes the JSON. |
+| LIFE-D7 | Alerts replace the WhatsApp report (Reed retry, push failure, attach failure, cleanup failure, results write failure, fatal). | No WhatsApp. |
+| LIFE-D8 | `pending-searches/*.json` removed by Phase 2 with the legacy rules, through a jail. | Required Phase 2 behaviour. |
+| LIFE-D9 | WAL only when verified safe (see `CORE-D13`). | Volume safety. |
+| LIFE-D10 | Phase 2 reads `RESOURCER_SOURCES`: with Reed off a pending file asking for Reed is deleted at the end and the result says `caterer`; with Reed on the keep rule is bounded to 2 retries (alert `pending-sources-mismatch-giveup`). | Closes a doom loop; the old system recorded `both` on 6,541 of 6,603 results although Reed was mostly off. |
+| LIFE-D11 | The retention sweep also removes `runtime/screening-input/*` after an hour, hard-kill `*.tmp` leftovers after an hour, `cv-reed-*.anon*` after 14 days, and old shadow logs through `pruneShadow`. | Data minimisation. |
+| LIFE-D12 | `run_results.sources` is coerced to `caterer|reed|both`. | Dashboard contract. |
+| LIFE-15 | `run_results` (dashboard contract) is written right after the results file; `downloads/` is not touched by the sweep until `run_results` is populated. | The dashboard reads counts from the database, not from result files. |
+| LIFE-16 | Incomplete runs (`phase1Stats.incomplete`) push the approved candidates but leave the territory unsearched and the pending search in place. | `INT-F1`: a screening outage must not consume a territory. |
+
+## 8. Reed (docs/parity/reed.md)
+
+| Id | Change |
+|---|---|
+| REED-R1 | Token capture uses `Network.requestWillBeSent` events; `Network.setRequestInterception` (gone in Chrome 153) is not used anywhere. |
+| REED-R2 | Credentials only from `secrets/reed-credentials.json`, embedded with `JSON.stringify`, never printed; the localStorage dump to stderr is gone. |
+| REED-R3 | The login polls with ceilings instead of fixed sleeps, supports a two-step form and an already-signed-in profile; the login gets a 90 s kill timeout (was 60 s). |
+| REED-R4 | No token on stdout (`REED_LOGIN_OK expires=<iso> ip=<claim>` only). |
+| REED-R5 | Turnstile: one critical alert per episode with the exact `--human` command, a block file that stops automatic retries for 12 h, never a loop. |
+| REED-R6 | Launcher: `chromium` under `xvfb-run -a` on a dedicated profile in `state/chrome-reed`, only its own processes are ever touched, no adoption of a foreign CDP endpoint. |
+| REED-R7 | Shutdown through CDP `Browser.close` first (plain SIGTERM loses the login), then a graceful tree stop. |
+| REED-R8 | `runtime/browser.lock` shared with the Caterer side; ancestors and `RESOURCER_BROWSER_LOCK_HOLDER_PID` borrow it. |
+| REED-R9 | Whoever acquired the lock stops the Reed browser; the runner does it for a Reed tail. |
+| REED-R10 | D4 extended: any screening attempt that is not a successful parse is "unavailable" (`OD1`). |
+| REED-R11 | No snippet or CV on disk in the screening path. |
+| REED-R12 | Candidate names, e-mails and phones are not logged; CDP errors never echo parameters. |
+| REED-R13 | `runtime/reed-status.json` `{state, updatedAt, detail}` for the dashboard. |
+| REED-R14 | HTTP 451 stops with a marker and one alert naming `--clean`. |
+| REED-R15 | One relaunch attempt when the browser vanished mid-run. |
+| REED-R16 | Deterministic tab choice shared by refresh and proxy. |
+| REED-R17 | `RESOURCER_SOURCES` gate in `run-pipeline.js`. |
+| REED-R18 | `run-pipeline.js` echoes child output, no `MEMORY.md` writes, exclusive lock file. |
+| REED-R19 | ASCII output, `--help`, `main()` returns exit codes. |
+| REED-R20 | A pending human login or fresh failure puts Reed on hold without spending retries (`REED_HELD:` log line). |
+| REED-R21 | One alert per episode with reminders (`reed-human-login`, `reed-credentials`, `reed-451`). |
+| REED-R22 | Anonymised CV names `cv-reed-<id>.anon<ext>` so a redacted CV can never be attached. |
+| REED-R23 | Launcher process matching pinned against Chromium's rewritten process title. |
+| REED-K | Legacy quirks kept: direct fetch after any browser-proxy error that is not a relogin/4xx; page 1 fetched twice; the daily date key is UTC; `run-pipeline.js` exits 0 even when Phase 2 failed. |
+
+## 9. Phase 1 (docs/parity/phase1.md)
+
+| Id | Change |
+|---|---|
+| P1-1 | Empty-result probe fixed (see `X2`), with a leading boundary so "150 candidates" cannot read as zero. |
+| P1-2 | Reed handling in the hand-off unchanged; the no-burn rule belongs to Reed (`OD1`). |
+| P1-3 | No `review-tmp-*` files; candidates on stdin; the unlock token never goes to the reviewer. |
+| P1-4 | Reviewer flags `--source caterer --run-id phase1-<ts>` on every call and `--name` on single reviews. |
+| P1-5 | Real exit codes; no 20 s polling floor. |
+| P1-6 | Timeouts on every child (lock 30 s, credits 180 s, database 60 s, unlock 180 s, batch review 1500 s, single 330 s, hand-off 3900 s, login 600 s). |
+| P1-7 | Halt raised through `lib/pipeline-halt`; remedy text no longer names the gateway. |
+| P1-8 | Console personal data minimised: outward codes only, masked e-mail, no names. |
+| P1-9 | Queue and checkpoint files 0600. |
+| P1-10 | Checkpoint `searchDate` is the London date; the first status carries zeros. |
+| P1-11 | Stricter parameter parsing (exit 7 for a missing params file; unknown flags exit 5). |
+| P1-12 | URL: `?PageNumber=n&x=y` keeps a valid query; percent-decoding never throws. |
+| P1-13 | Missing or empty `extract-js.b64` exits 1 before any side effect. |
+| P1-14 | Run id never adopts another run's files unless `PHASE1_RUN_TIMESTAMP` says so. |
+| P1-15 | Five consecutive failed pages stop the run. |
+| P1-16 | Unexpected exceptions in the page loop finalise with what is unlocked. |
+| P1-17 | SIGTERM/SIGINT/SIGHUP mark the status abandoned so the lock releases at once. |
+| P1-18 | The session is never saved from the device-verification page. |
+| P1-19 | Extra WARN lines for failed bookkeeping. |
+| P1-20 | Bridge files removed only when they differ from the run's own status file. |
+| P1-K | Legacy quirks kept on purpose: `Boolean(approved)`; Reed-only still scrapes Caterer; the bridge flip refreshes `updatedAt` (likely cause of 113 exit-3 runs in September; a known one-line fix). |
+
+## 10. Browser and Caterer login (docs/parity/browser-caterer.md)
+
+| Id | Change |
+|---|---|
+| BRW-1 | Cold-daemon rule: the saved state is loaded only into a browser with no page, never into a warm session. |
+| BRW-2 | The browser session check is the authority in the pre-flight; the HTTP check is a hint only. |
+| BRW-3 | The session is saved only after a confirmed sign-in, never from the safe-list page, never an empty state over a non-empty file. |
+| BRW-4 | The login result is verified by URL and by the search-page DOM. |
+| BRW-5 | Attempt limiter: 10 minutes after a failure, 60 minutes after a safe-list block, 3 failures pause automatic attempts for 3 hours; `--force` overrides. |
+| BRW-6 | New states `moduleerror` and a network branch. |
+| BRW-7 | `ERRORPAGE` and `ReturnUrl=` count as logged out. |
+| BRW-8 | An unlock timeout is reported as "not re-sent" and every in-page fetch has an abort timer. |
+| BRW-9 | Credits re-read once after 5 s before returning "stale"; redirect loop prints `CVDB_MODULE_ERROR`. |
+| BRW-10 | CV files written 0600 through a hidden temp name. |
+| BRW-11 | Session file at `state/caterer-session.json`, not bundled, recreated on the target. |
+| BRW-12 | Alerts replace WhatsApp text (keys caterer-safelist, caterer-safelist-cleared, caterer-login-failed, caterer-cred, caterer-cvdb-module, caterer-browser-missing, caterer-session-file, ab-version, ab-backends). |
+| BRW-13 | `check-session` treats a `ReturnUrl` redirect as expired. |
+| BRW-14 | Login fill and submit are two evals with a 300 ms gap, both single-attempt. |
+| BRW-15 | CV file names keep only `[A-Za-z0-9_-]` from the id. |
+| BRW-16 | The pre-flight Reed steps run only when Reed is enabled. |
+
+## 11. Dashboard (docs/parity/dashboard.md)
+
+| Id | Change |
+|---|---|
+| DASH-1 | Express, login, sessions, rate limits, SSE and the tunnel are gone; polling; the Hermes gate is the only authentication. |
+| DASH-2 | Territory create/edit/delete dropped from the UI (`territory-manager.js` stays the single writer). |
+| DASH-3 | History and totals come from `run_results`, week = 7 days, legacy caterer/reed pair merging not ported (about 60 old pairs show as two rows). |
+| DASH-4 | Missing `run_results` falls back to labelled database counts. |
+| DASH-5 | Search validation is server-authoritative and stricter (outward postcode, allowed distances, cv limit 10-50). |
+| DASH-6 | Full postcode or place name only with `location_mode: any`. |
+| DASH-7 | 409 `already_queued` for the same title and place, pending or in flight. |
+| DASH-8 | Atomic no-clobber uniquely named request files with an advisory lock shared with the CLI. |
+| DASH-9 | The wake of the LLM watcher is gone. |
+| DASH-10 | New `POST /search` response shape. |
+| DASH-11 | `GET /health` is behind the gate. |
+| DASH-12 | "Next auto-run 08:00" replaced by the operating window. |
+| DASH-13 | Business constants moved to `config/dashboard-settings.json` (targets 181/day, 1,269/week). |
+| DASH-14 | Operating window evaluated in Europe/London through `zoneinfo`. |
+| DASH-15 | Error feed redacts names, e-mails and phone-like numbers. |
+| DASH-16 | New read-only status blocks (Caterer, Reed, last push, backup, disk, stall, alerts). |
+| DASH-17 | `.held` files stay ignored; `runs/` is never modified. |
+
+## 12. Bundle (docs/parity/bundle.md) and integration (docs/parity/integration.md)
+
+| Id | Change |
+|---|---|
+| BUN-1 | The default legacy source path is assembled at run time so the banned-token scan stays clean. |
+| BUN-2 | The halt file is a fence marker, not proof of a live run; `--require-fence` is the strict option. (Reviewers found the old system clears such a halt by itself; the real fence is stopping the old supervisor, docs/CUTOVER.md.) |
+| BUN-3 | Missing required source files abort (exit 5). |
+| BUN-4 | Reed values are extracted from the two legacy source files by pattern at build time; plain string literals only. |
+| BUN-5 | `reed-credentials.json` carries `username` as an alias of `email`. |
+| BUN-6 | Liveness also scans `runs/run-*.json` and skips files not modified for 2 hours. |
+| BUN-7 | Wrong passphrase, tampering and reordering all report exactly "authentication failed". |
+| BUN-8 | Added: `--no-overwrite`, `--skip-migrate`, `--require-fence`, `--skip-db-check`, a restore lock, a build-time self-check, `state/bundle-restored.json`. |
+| INT-F1..F12 | Twelve cross-package faults found and fixed by the end-to-end rehearsal (screening outage consuming a territory; Phase 2 downloading through the blocked node path; unlocked candidates lost to a kill; backfill exit on a fresh install; personal data in the phase 1 console log; claims of failed runs; the Reed browser never stopped; a missing database not holding the queue; backups mis-counted; keep-alive overlap; secrets in error bodies; two Linux-only test faults). See docs/parity/integration.md section 4. |
+
+## 13. Decisions still open (owner)
+
+- The alert channel and a delivered test alert (`OD4`): required before any job is resumed.
+- Whether to accept the data protection position for Jev formally: data processing agreement, sub-processor list, privacy notice wording, impact assessment (docs/SECURITY.md section 8).
+- When to promote `jev_shadow` to `jev`, `SCREEN_TIER_MODE`, `insufficientEvidence` (docs/SCREENING.md).
+- When to enable Reed (`OD-E`), and whether Reed stays on this host if the human login does not survive.
+- The off-instance backup target and where the passphrase is escrowed (`OD5`).
+- Whether the data bundle travels through git or out of band (HANDOFF.md). A bundle committed to git is permanent in history and is protected only by its passphrase.
+
+## 14. Changes made after the adversarial review (2026-09-30)
+
+Eight reviewers read the finished build (112 findings, kept as `_findings.json` in the research folder; `F<n>` = entry n counted from 0). Most were fixed in the code the same day. This list records what changed
+in behaviour compared with the parity documents (which describe the state before the review) so that nobody re-introduces an old quirk; `docs/KNOWN-LIMITS.md` section 11 indexes the findings that were not fully fixed.
+
+| Area | What changed | F |
+|---|---|---|
+| Phase 1, early ends | A run that ends early keeps its territory and pending search instead of consuming it: five failed pages, a page-1 zero without an explicit zero statement, no page scraped, a screening error that is not an outage, five consecutive unlock failures (`PHASE1_UNLOCK_FAIL_LIMIT`), three failed candidates-db writes (`PHASE1_DB_FAIL_LIMIT`). The hold is bounded: the third early end of the same search completes normally and raises `phase1-incomplete-giveup` (`PHASE1_INCOMPLETE_MAX_RUNS`, counter in `runtime/phase1-incomplete-runs.json`). New alerts `phase1-unlock-failing`, `phase1-db-unavailable`. | F0, F7, F8, F9, F96, F97 |
+| Phase 1, correctness | Empty or blank eval output reads as zero cards; the safe-list URL fails session validation; the bridge flip keeps `updatedAt`; the encoding guard only rejects a real `%26name=` pattern; a dead or locked database stops the run and `reject-title` exits 1 when it cannot write; the unlock marks the database after the candidate is queued and checkpointed; the status file is refreshed inside the unlock loop and `phase2Status` is `pending` before `phase1_complete`; every queued card gets a database row; duplicates are skipped on resume; system-invalid screening results are not booked as rejections (`--with-codes`); single reviews send text on stdin; Reed passes `--source reed`. | F1, F2, F4, F5, F10-F15, F56, F58, F67, F106 |
+| Reed and Phase 2 | Reed approvals are marked seen only after the queue file reads back; recovery of a killed both-source Phase 2 finds the merged queue; a Reed screening halt in a both-source run keeps the territory; a Zoho DUPLICATE for a record this pipeline created keeps and attaches the CV (`_zohoCreatedId` evidence written before the attach); unlock replies and CV downloads use `cache: no-store` (`RESOURCER_FETCH_CACHE`); both CV writers accept only the five known extensions; the CV download child gets 150 s, downloads are gated, the direct fetch is a fallback and a timed-out download is retried once; the reprocess guard finds the results file by run id (`--force` re-runs a finished queue on purpose); field recovery per candidate has a time guard; the Reed budget is read before a run; merged and Reed queue files are 0600 and Reed CVs are written atomically; the Zoho alerts carry the recovery command and a `zoho-push-partial` alert exists. | F16-F22, F24, F26-F28 |
+| Supervision | The alert job reports a silent tick (`tick-silent`, dead-man ping only while the heartbeat is fresh) and runs all day; every job carries a delivery and a failure-delivery target chosen by the owner (`<DELIVER_TARGET>`, never `local`) and `alerts-deliver.js --test` proves the channel; a pending search that fails three runs in a row, or is malformed, is moved to `pending-searches/.quarantine/` with a critical alert and released with `--release-quarantine`; the database fitness gate holds the queue on anything but fit or locked; new alerts `runner-busy`, `sqlite-driver`, `log-flood`, `outbox-oversize`, `deadman-ping-failed`; streak alerts repeat (every 10 failures, critical after a long streak); alert delivery survives torn and oversized lines, orders by severity and takes a lock; console logs are capped (a runaway run is ended) and the tick wrapper sets a file-size limit; the pre-flight wrapper prints the real marker line; the pre-flight stands aside while a run is in flight; the tick wrapper takes `RESOURCER_MAX_TICK_MIN` from the cron environment only when set, so the profile `.env` value works; wrappers derive the profile from their own location. | F31-F39, F41, F81, F89, F94, F100 |
+| Screening | Request-level failures (4xx) and all-invalid pages count as "unavailable", also across calls; the promotion report gates false rejects, Jev-lane agreement and coverage and, by default, needs both sources; the tier-0 ladder sends unknown search titles to review; thin-information approvals need no objecting mismatch; redaction bounds its input first and covers more identifiers (handles, dates of birth, NI numbers, more particles and phone formats); the injection heuristic folds zero-width, look-alike and spaced letters; the hospitality regex includes front of house; configuration is normalised and validated; separate `SCREEN_LLM_ZDR` and `SCREEN_JEV_ZDR`; a test flake (audit sampling) is removed. | F44-F55 |
+| Security | Field recovery reads a bounded prefix of CV text; a repeated bundle restore keeps rotated credential files (`--replace-secrets` overrides), refuses symlinked parents and takes the passphrase from `secrets/bundle-passphrase` by default (`--save-passphrase` for a human at a terminal); `make-bundle.js` warns when the key derivation cost is below 2^17 and can carry the run history (`--backfill-run-history`); nightly backups use scrypt N = 2^17; manual searches are capped at 25 waiting (`queue_full`) and record who asked; the dashboard rejects cross-site POSTs (`Sec-Fetch-Site`) and refuses a machine-level `RESOURCER_HOME`; the gateway origin must be https (plain http only for loopback); the Caterer session cookie is only sent to the Caterer origin and a results URL must be an https address on caterer.com; card and unlock text stays out of logs; the bundle builder states that the real cutover fence is stopping the legacy supervisor, not the halt file. | F59, F61, F63, F64, F66, F72, F73, F75-F77, F98, F99 |
+| Hermes fit | One helper (`lib/browser-env.js`) chooses a short browser TMPDIR (`state/t`, `state/rt`, or `/tmp/rab-<hash>/...`), the browser binary (including the path the Hermes image records), the flags and the locale (`RESOURCER_BROWSER_TZ`, `RESOURCER_BROWSER_LANG`, `--lang`); `tools/preflight.sh` probes the instance; `plugin/resourcer/install-plugin.sh` installs the plugin without approval prompts; the cron wrappers replace an unusable `TMPDIR`. | F79-F84, F87, F91 |
+| Documents | The operator documents, the profile files, the code lockdown manifest and the secret hygiene checklist now exist (README, HANDOFF, INSTALL, OPERATIONS, CUTOVER, ROLLBACK, ACCEPTANCE, TEARDOWN, SECURITY, ENV, DECISIONS, KNOWN-LIMITS, LEGACY-MAP, `hermes/AGENTS.md`, `hermes/SOUL.md`, `hermes/.env.example`, the skill, `MANIFEST.sha256`); "no cross-provider fallback" and "Caterer daemon kept warm" are recorded (X5, X6). | F78, F95, F102, F104 |

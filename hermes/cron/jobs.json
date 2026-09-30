@@ -1,0 +1,247 @@
+{
+  "schema": 1,
+  "profile": "resourcer",
+  "purpose": "Machine-readable specs of the supervision cron jobs and of the one-time install commands that go with them. Each job is a Hermes no-agent script job: no model is involved, empty stdout is silent, a non-zero exit alerts. Ask the human for the delivery target first (see delivery), create each job from its cliPaused string with the target substituted, run the installSteps in order (the last steps resume the jobs), then run the acceptance checks.",
+  "delivery": {
+    "placeholder": "<DELIVER_TARGET>",
+    "why": "Whatever a job prints, and every job-failure notice, is delivered to the target of its cron job. 'local' only saves files under cron/output/ (the newest 50 per job) and suppresses failure pings, so a default install would tell nobody anything. All eight jobs therefore carry the same --deliver and --failure-deliver target and none may be created with local.",
+    "humanMustSet": "Before creating any job, ask the human which channel should receive alerts (a chat or email target already configured in Hermes, written as <platform> or <platform>:<chat> as accepted by hermes cron create --deliver). Stop and ask if there is none: do not fall back to local.",
+    "substitute": "Replace every occurrence of the placeholder in the cliPaused strings with that target before running them. Pasting a string with the placeholder unchanged fails in the shell on purpose.",
+    "verify": [
+      "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/alerts-deliver.js --test",
+      "hermes -p resourcer cron resume resourcer-alerts",
+      "hermes -p resourcer cron run resourcer-alerts"
+    ],
+    "verifyExpect": "The human receives one message starting '[CRITICAL' and containing 'TEST ALERT' on the chosen channel within a few minutes. Do not resume the tick until they confirm it arrived.",
+    "changeLater": "hermes -p resourcer cron edit <name> with the flags printed by its --help; do not edit the profile's cron/jobs.json by hand."
+  },
+  "paths": {
+    "profileHome": "/opt/data/profiles/resourcer",
+    "scriptsDir": "/opt/data/profiles/resourcer/scripts",
+    "resourcerHome": "/opt/data/profiles/resourcer/workspace/resourcer"
+  },
+  "prerequisites": [
+    {
+      "why": "Cron expressions run in the configured Hermes timezone. The tick, queue and alert schedules are correct for Europe/London and also for UTC (their hour ranges are supersets of the 06:00-22:00 London window in both), and the code decides the real window itself with Europe/London. The pre-flight (05:50) and keep-alive times are meant as London times, so set the timezone.",
+      "cli": "hermes -p resourcer config set timezone Europe/London"
+    },
+    {
+      "why": "Deliver the alert job's stdout as plain text instead of wrapping it in a 'Cronjob Response' header.",
+      "cli": "hermes -p resourcer config set cron.wrap_response false"
+    },
+    {
+      "why": "The script timeout is global (default 3600 s). Do not lower it below 3500: the tick is bounded to 55 minutes and needs the headroom.",
+      "cli": "hermes -p resourcer config get cron.script_timeout_seconds"
+    }
+  ],
+  "install": {
+    "copyScripts": "Copy hermes/scripts/resourcer-*.sh into /opt/data/profiles/resourcer/scripts/ as real files (Hermes rejects symlinks that resolve outside that directory).",
+    "createJobs": "Create all eight jobs paused, each from its cliPaused string with the delivery target substituted (see delivery), before installSteps 3 to 6 resume them.",
+    "enableOrder": [
+      "resourcer-alerts",
+      "resourcer-queue-due",
+      "resourcer-tick",
+      "resourcer-backup",
+      "resourcer-maintenance",
+      "resourcer-retention",
+      "resourcer-keepalive",
+      "resourcer-preflight"
+    ]
+  },
+  "installSteps": {
+    "note": "One-time commands, NOT cron jobs. Run them in this order on the instance after the data bundle is restored and while no pipeline run is in flight.",
+    "steps": [
+      {
+        "n": 1,
+        "name": "migrate-schema",
+        "run": "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/migrate-schema.js",
+        "why": "Adds the run_results table, the candidate timestamp columns and WAL mode to the restored candidates.db. Idempotent; takes one online copy into backups/ (candidates.db.pre-migrate-*, removed by maintenance after 7 days) when something structural changes.",
+        "expect": "Exit 0. A second run reports every step as present."
+      },
+      {
+        "n": 2,
+        "name": "backfill-run-results",
+        "run": "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/backfill-run-results.js --strict",
+        "why": "Rebuilds run_results from downloads/phase2-results-*.json. The retention sweep refuses to touch downloads/ until run_results is populated, so this must precede step 6.",
+        "expect": "PARITY OK and exit 0. Exit 3 is a per-day mismatch: fix it before resuming resourcer-retention."
+      },
+      {
+        "n": 3,
+        "name": "enable alerts",
+        "run": "hermes -p resourcer cron resume resourcer-alerts",
+        "why": "Alert delivery goes first so that anything the next jobs raise reaches the human. Prove the channel before going on.",
+        "verify": [
+          "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/alerts-deliver.js --test",
+          "hermes -p resourcer cron run resourcer-alerts"
+        ],
+        "expect": "The human receives one message starting '[CRITICAL' and containing 'TEST ALERT' on the chosen channel within a few minutes. Do not resume the tick until they confirm it arrived."
+      },
+      {
+        "n": 4,
+        "name": "enable queue-due",
+        "run": "hermes -p resourcer cron resume resourcer-queue-due",
+        "why": "Queues due territories; harmless without the tick because nothing consumes the files yet."
+      },
+      {
+        "n": 5,
+        "name": "enable tick",
+        "run": "hermes -p resourcer cron resume resourcer-tick",
+        "why": "The tick starts the pipeline, so it is enabled once delivery and queueing are live. Resume it within 10 minutes of the alert job: between 06:00 and 22:00 London the alert job raises a critical tick-silent alert when it has never seen a tick heartbeat for 10 minutes. That alert is expected if the install pauses here and clears itself once the tick runs."
+      },
+      {
+        "n": 6,
+        "name": "enable the nightly and overnight jobs",
+        "run": [
+          "hermes -p resourcer cron resume resourcer-backup",
+          "hermes -p resourcer cron resume resourcer-maintenance",
+          "hermes -p resourcer cron resume resourcer-retention",
+          "hermes -p resourcer cron resume resourcer-keepalive",
+          "hermes -p resourcer cron resume resourcer-preflight"
+        ],
+        "why": "They run outside the operating window and do not depend on each other. Set BACKUP_PASSPHRASE first (docs/OPERATIONS.md), or the backup job fails loudly from its first night."
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "name": "resourcer-tick",
+      "schedule": "* 5-23 * * *",
+      "script": "resourcer-tick.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "purpose": "Bounded supervision tick (at most 55 minutes, below the 3600 s cron timeout): takes a PID-liveness lock, adopts an in-flight run, launches the next territory as a detached runner, applies the 15-minute session back-off, the 70-minute run ceiling and the halt probe, and runs cull-ghost, recover-stranded and queue-due maintenance every 5 minutes. Exits at once outside 06:00-22:00 London when no run is in flight; an overlapping fire exits immediately.",
+      "silentOnSuccess": true,
+      "failureMeans": "The tick crashed or was killed by the timeout; the wrapper prints one line. The lock and run records recover on their own at the next fire.",
+      "cli": "hermes -p resourcer cron create \"* 5-23 * * *\" --no-agent --script resourcer-tick.sh --name resourcer-tick --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"* 5-23 * * *\" --no-agent --script resourcer-tick.sh --name resourcer-tick --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-queue-due",
+      "schedule": "*/5 5-21 * * *",
+      "script": "resourcer-queue-due.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "purpose": "Queues every due territory that is not already queued or running (replaces the daily territory scheduler). Idempotent; shares its lock and 5-minute pacing with the tick, so both together never create duplicate pending files.",
+      "silentOnSuccess": true,
+      "failureMeans": "queue-due-territories.js failed (database unreadable or a script error); newly due territories are not being queued.",
+      "cli": "hermes -p resourcer cron create \"*/5 5-21 * * *\" --no-agent --script resourcer-queue-due.sh --name resourcer-queue-due --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"*/5 5-21 * * *\" --no-agent --script resourcer-queue-due.sh --name resourcer-queue-due --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-preflight",
+      "schedule": "50 5 * * *",
+      "script": "resourcer-preflight.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "legacy": "Caterer Daily Pre-Flight, 50 5 * * *, Europe/London",
+      "command": "node scripts/caterer-preflight.js",
+      "purpose": "Daily Caterer pre-flight at 05:50 London, ten minutes before the operating window: browser tooling, session check, sign in if needed and, when Reed is enabled, the Reed token. It ends by stopping a Reed browser that nothing holds browser.lock for. A safe-list block found here is raised by the login module as a critical alert well before the first run.",
+      "silentOnSuccess": true,
+      "failureMeans": "Exit 2 safe-list block, 3 login failed, 4 CV Database module error, 5 Reed step failed, 1 tooling broken. The login module has already raised the matching alert.",
+      "cli": "hermes -p resourcer cron create \"50 5 * * *\" --no-agent --script resourcer-preflight.sh --name resourcer-preflight --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"50 5 * * *\" --no-agent --script resourcer-preflight.sh --name resourcer-preflight --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-keepalive",
+      "schedule": "0 23,2,5 * * *",
+      "script": "resourcer-keepalive.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "legacy": "Caterer Overnight Keep-Alive, 0 23,2,5 * * *, Europe/London",
+      "command": "node scripts/caterer-preflight.js --keepalive",
+      "purpose": "Overnight Caterer keep-alive at 23:00, 02:00 and 05:00 London: one authenticated request renews the sliding session cookie while the pipeline is idle. It never signs in; a lapsed session is healed by the pre-flight.",
+      "silentOnSuccess": true,
+      "failureMeans": "Only a broken browser toolchain makes it fail (a lapsed session still exits 0).",
+      "cli": "hermes -p resourcer cron create \"0 23,2,5 * * *\" --no-agent --script resourcer-keepalive.sh --name resourcer-keepalive --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"0 23,2,5 * * *\" --no-agent --script resourcer-keepalive.sh --name resourcer-keepalive --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-alerts",
+      "schedule": "*/5 * * * *",
+      "script": "resourcer-alerts.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "purpose": "Delivers new lines of outbox/alerts.jsonl as stdout (deduped per key and severity, non-critical held during quiet hours 22:00-06:00 London), the 18:00 daily digest, a once-a-day alive line at 07:00, the independent watch on the tick (a critical tick-silent alert when runtime/tick.heartbeat is older than 10 minutes inside 06:00-22:00 London) and the optional external dead-man ping (every 55 minutes, only while the tick heartbeat is fresh). It runs around the clock so a critical raised at night is delivered within 5 minutes.",
+      "silentOnSuccess": true,
+      "failureMeans": "alerts-deliver.js crashed; alerts stay in the outbox and are delivered at the next successful run. Exit 0 with a line is the normal delivery path.",
+      "cli": "hermes -p resourcer cron create \"*/5 * * * *\" --no-agent --script resourcer-alerts.sh --name resourcer-alerts --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"*/5 * * * *\" --no-agent --script resourcer-alerts.sh --name resourcer-alerts --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>",
+      "overnight": "Every 5 minutes, 24 hours a day. Between 22:00 and 06:00 London only critical alerts are printed (delivered within 5 minutes); warn and info alerts are held and delivered together at 06:00. The tick-silent check is off outside 06:00-22:00 because the tick is not scheduled for the whole night. Cost: the instance no longer scales to zero overnight."
+    },
+    {
+      "name": "resourcer-maintenance",
+      "schedule": "10 4 * * *",
+      "script": "resourcer-maintenance.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "purpose": "Nightly housekeeping: prune runs/ older than 7 days, rotate and compress logs, cap the Chrome cache, remove stray temp files, remove candidates.db.pre-migrate-* copies older than 7 days, trim the outbox, disk guard (critical above 85 percent) and a monthly VACUUM. It never touches secrets/, shadow/ or the sessions and profiles in state/. Idempotent.",
+      "silentOnSuccess": true,
+      "failureMeans": "Exit 3 means the disk is above the limit (a critical alert is also in the outbox); any other non-zero exit is a script error.",
+      "cli": "hermes -p resourcer cron create \"10 4 * * *\" --no-agent --script resourcer-maintenance.sh --name resourcer-maintenance --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"10 4 * * *\" --no-agent --script resourcer-maintenance.sh --name resourcer-maintenance --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-retention",
+      "schedule": "20 4 * * *",
+      "script": "resourcer-retention.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "command": "node scripts/retention-sweep.js",
+      "purpose": "Daily data-lifecycle sweep at 04:20 London, after the housekeeping and before the window opens: queue and result files after completion plus 3 days, orphan CVs after 14 days, runs/ and logs/ by age, the shadow screening log at 180 days, and the disk guard. It refuses to touch downloads/ until run_results is populated (installSteps 2). Its JSON summary goes to logs/retention-<date>.log, so a good night prints nothing.",
+      "silentOnSuccess": true,
+      "failureMeans": "Exit 1 is an unexpected failure of the sweep (details in logs/retention-<date>.log); exit 2 is a usage error in the wrapper. A refusal to sweep downloads/ exits 0 and raises a retention-refused alert instead.",
+      "cli": "hermes -p resourcer cron create \"20 4 * * *\" --no-agent --script resourcer-retention.sh --name resourcer-retention --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"20 4 * * *\" --no-agent --script resourcer-retention.sh --name resourcer-retention --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    },
+    {
+      "name": "resourcer-backup",
+      "schedule": "30 3 * * *",
+      "script": "resourcer-backup.sh",
+      "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
+      "deliver": "<DELIVER_TARGET>",
+      "noAgent": true,
+      "purpose": "Nightly encrypted snapshot of candidates.db (online backup, integrity check, gzip, AES-256-GCM), retention of 14 daily and 8 weekly copies, the optional BACKUP_UPLOAD_CMD off-instance copy and a weekly restore test. A same-volume backup does not survive loss of the instance, so set BACKUP_UPLOAD_CMD.",
+      "silentOnSuccess": true,
+      "failureMeans": "Exit 1 backup failed, 3 restore test failed, 5 upload failed (the local backup is fine). A critical alert is also written to the outbox.",
+      "cli": "hermes -p resourcer cron create \"30 3 * * *\" --no-agent --script resourcer-backup.sh --name resourcer-backup --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",
+      "cliPaused": "hermes -p resourcer cron create \"30 3 * * *\" --no-agent --script resourcer-backup.sh --name resourcer-backup --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer --paused",
+      "failureDeliver": "<DELIVER_TARGET>"
+    }
+  ],
+  "notes": [
+    "The tick fires every minute from 05:00 to 23:59 so a run started at 21:59 (at most 70 minutes long) is still supervised, which keeps the instance awake for it. Overlapping fires are skipped by Hermes while a tick is running and by the tick's own PID lock. Because the next fire is inside the 120 second idle window, the instance stays awake from 05:00 to 23:59; under the chronos cron provider every fire is a wake (about 1,140 relay calls a day). That is the price of supervising to the minute; state it in DECISIONS.",
+    "Overnight (00:00-05:00): the alert job keeps running every 5 minutes, so a critical raised by the backup, maintenance, retention or keep-alive jobs (or anything else) reaches the human within 5 minutes; warn and info alerts wait for 06:00. Job failures also arrive as failure notices on the same target (--failure-deliver). The trade-off is that the instance does not scale to zero at night; if that cost matters, move the alert schedule back to */5 5-23 and accept that night-time criticals then rely on the failure notices alone until 05:00.",
+    "The dead-man endpoint (RESOURCER_DEADMAN_URL) is pinged every 55 minutes and only while the tick heartbeat is fresh, so it expects a ping roughly every hour between 05:00 and 23:59 London and none overnight: configure the external monitor with that schedule (or a grace of at least 6 hours overnight).",
+    "Pause or resume one job with: hermes -p resourcer cron pause <name> and hermes -p resourcer cron resume <name>. Do not use the host-wide pause: it stops every profile.",
+    "To change a job's delivery target after a channel is configured, edit the job (hermes -p resourcer cron edit <name>, flags as printed by its --help) rather than editing the jobs file by hand.",
+    "The jobs marked legacy replace the two Caterer cron jobs of the old system with the same schedules (Europe/London); the territory scheduler became resourcer-queue-due."
+  ],
+  "acceptance": [
+    {
+      "check": "hermes -p resourcer cron list",
+      "expect": "Eight resourcer-* jobs, none paused, each with the chosen delivery target (not local)."
+    },
+    {
+      "check": "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/pipeline-watchdog.js --status",
+      "expect": "Between 05:00 and 23:59 London: lastTickAt within the last 2 minutes and quarantined is an empty list. If lastTickAt is old, resourcer-tick is paused or not firing; the alert job raises a critical tick-silent alert after 10 minutes inside 06:00-22:00."
+    },
+    {
+      "check": "cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/preflight-db.js",
+      "expect": "Exit 0 and OK. The tick refuses to start a run on anything else."
+    }
+  ]
+}
