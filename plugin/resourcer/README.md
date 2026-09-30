@@ -112,6 +112,13 @@ Whether the dashboard can be restarted from the box on Hermes Cloud is UNVERIFIE
   `operating_hours` {start 6, end 22, tz Europe/London}, `location_mode` `outward` (or `any` to also accept a
   full postcode or a place name), `show_candidate_names` false, `stall_minutes` 20, `backup_stale_hours` 26,
   `disk_warn_pct` 75, `disk_critical_pct` 85.
+* Status chips. Reed follows `RESOURCER_SOURCES`, read the way the pipeline reads it: the dashboard process environment, then
+  `RESOURCER_ENV_FILE` (only inside the profile or workspace), then `<profile>/.env`, then `<RESOURCER_HOME>/.env`. It reads
+  that ONE key from those files (never any other line) and only when `RESOURCER_HOME` is `<profile>/workspace/<name>`. `caterer`
+  (or an unset key, or an invalid value) shows "Disabled"; `reed` or `both` shows "Not logged in" until `runtime/reed-status.json`
+  records a successful login, then "Auth OK". When the `.env` cannot be read (different OS user, missing, not text) the chip
+  falls back to `runtime/reed-status.json`. Caterer shows `runtime/caterer-status.json`, which `scripts/caterer-login.js` and the
+  supervisor both write.
 
 ## Verify (acceptance checks, none needs a live site)
 

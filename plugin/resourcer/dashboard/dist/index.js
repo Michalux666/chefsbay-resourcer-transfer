@@ -295,7 +295,7 @@
     login_failed: ["bad", "Login failed"],
     unknown: ["muted", "Unknown"]
   };
-  var REED_TEXT = { ok: ["ok", "Auth OK"], auth_failed: ["bad", "Auth failed"], unknown: ["muted", "Unknown"], disabled: ["muted", "Disabled"] };
+  var REED_TEXT = { ok: ["ok", "Auth OK"], auth_failed: ["bad", "Auth failed"], not_logged_in: ["warn", "Not logged in"], unknown: ["muted", "Unknown"], disabled: ["muted", "Disabled"] };
 
   function StatusStrip(props) {
     var s = props.status;

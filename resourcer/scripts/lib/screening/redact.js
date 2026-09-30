@@ -1,7 +1,7 @@
 'use strict';
 // Best-effort redaction of personal data BEFORE anything leaves the process (LLM, Jev) and before
-// the shadow log. Removes: the card first name, the surname (heuristic: the capitalised token right
-// after it, unless it is a role word), full UK postcodes, e-mail addresses, phone numbers, URLs.
+// the shadow log. Removes: the card first name, the surname (heuristic: the name-like token right
+// after it, in any case, unless it is a role word), full UK postcodes, e-mail addresses, phone numbers, URLs.
 // Keeps everything the decision needs: titles, employers, dates, duties, city.
 //
 // Known limits (documented in docs/SCREENING.md): a surname that is also a role word ('Alex Cook
@@ -32,6 +32,9 @@ const PARTICLE = /^(de|van|von|der|den|di|da|del|della|le|la|el|al|bin|ibn|mac|m
 const MONTH = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*$/i;
 // Unicode-aware so accented names (Jose with an acute, Muller with an umlaut) are handled too.
 const NAME_TOKEN = /^\p{Lu}[\p{L}'-]+$/u;
+const LOWER_TOKEN = /^\p{Ll}[\p{L}'-]+$/u;
+// Result positions run past 999 (the historical sample has 4 digits); 6 leaves room.
+const RANK_RE = /^\d{1,6}\.\s+/;
 
 const POSTCODE_RE = /\b[A-Z]{1,2}\d[A-Z\d]?\s*[,.]?\s*\d[A-Z]{2}\b|\bGIR\s*0AA\b/gi;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g;
@@ -44,6 +47,13 @@ const AGE_RE = /\b(?:aged?|age:)\s*\d{2}\b/gi;
 
 function stripEdge(tok) {
   return String(tok || '').replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '');
+}
+
+// A name typed in lower case is still a name: a leading token is tested in capitalised form (the text is not re-cased).
+function nameForm(tok, idx, span) {
+  const t = stripEdge(tok);
+  if (idx < span && LOWER_TOKEN.test(t) && !ROLE_WORD.test(t)) return t.charAt(0).toUpperCase() + t.slice(1);
+  return t;
 }
 
 const BS = String.fromCharCode(92);
@@ -77,8 +87,8 @@ function redactSnippet(input, opts) {
   let s = String(input == null ? '' : input).slice(0, inputLimit(o.maxChars)).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (o.enabled === false) return { text: cap(s, o.maxChars), notes };
 
-  const hadRank = /^\d{1,3}\.\s+/.test(s);
-  s = s.replace(/^\d{1,3}\.\s+/, '');
+  const hadRank = RANK_RE.test(s);
+  s = s.replace(RANK_RE, '');
 
   const firstName = stripEdge(o.firstName);
   const fnTokens = firstName ? firstName.split(/\s+/).map(stripEdge).filter(Boolean) : [];
@@ -87,6 +97,7 @@ function redactSnippet(input, opts) {
 
   if (fnTokens.length || hadRank) {
     let toks = s.split(' ');
+    const span = fnTokens.length ? fnTokens.length + 1 : 2;
     let i = 0;
     if (fnTokens.length) {
       let k = 0;
@@ -95,7 +106,7 @@ function redactSnippet(input, opts) {
       else i = 0;
     }
     if (removedFirst === null && hadRank) {
-      const t0 = stripEdge(toks[0]);
+      const t0 = nameForm(toks[0], 0, span);
       if (NAME_TOKEN.test(t0) && !ROLE_WORD.test(t0)) { removedFirst = t0; i = 1; }
     }
     if (removedFirst !== null) {
@@ -103,7 +114,7 @@ function redactSnippet(input, opts) {
       let j = i;
       const parts = [];
       while (j < toks.length && parts.length < 3 && PARTICLE.test(stripEdge(toks[j]))) { parts.push(stripEdge(toks[j])); j++; }
-      const t1 = stripEdge(toks[j]);
+      const t1 = nameForm(toks[j], j, span + parts.length);
       if (t1 && NAME_TOKEN.test(t1) && !ROLE_WORD.test(t1)) {
         removedSurname = parts.concat(t1).join(' ');
         j += 1;

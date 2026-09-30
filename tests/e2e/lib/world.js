@@ -77,11 +77,15 @@ class World {
     fs.mkdirSync(this.privateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(this.abDir, { recursive: true });
     this.svc = await startServices(this.root, o.services);
+    // Scenarios 01 to 12 were written for the LLM-decides engine, so the world pins it (and opts in to it: the shipped code refuses every engine but jev_only
+    // otherwise); scenario 13 passes engine: null to run on the shipped default (jev_only), or allowLlm: false to keep a leftover engine without the opt-in.
     this.envFile = {
       AI_GATEWAY_API_KEY: D.SECRETS.aiKey,
       SCREEN_GATEWAY_ORIGIN: this.svc.gateway.origin,
       BACKUP_PASSPHRASE: D.SECRETS.backupPassphrase,
       RESOURCER_SOURCES: o.sources,
+      SCREEN_ENGINE: o.engine === undefined ? 'jev_shadow' : o.engine,
+      SCREEN_ALLOW_LLM: o.engine === null || o.allowLlm === false ? null : '1',
     };
     this.writeEnv();
     fs.writeFileSync(this.passFile, D.SECRETS.bundlePassphrase, { mode: 0o600 });

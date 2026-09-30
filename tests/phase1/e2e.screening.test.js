@@ -248,6 +248,13 @@ test('a 20-second-style heartbeat is printed while the screener runs, and the en
   assert.match(out, /HEARTBEAT: AI batch end page 1 \(exit=0, \d+s\)/);
 });
 
+test('the once-per-run "WARN screening:" line of the reviewer (jev_only, uncalibrated thresholds) is copied to the phase 1 console; other stderr is not', async (t) => {
+  const warn = 'WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds (test line)';
+  const { out } = await run(t, { pages: { 1: { cards: [card(341)] }, 2: { cards: [] } }, ai: { batch: [{ outcome: 'ok', warn }] } });
+  assert.strictEqual((out.match(/WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds \(test line\)/g) || []).length, 1, out);
+  assert.ok(!out.includes('[ai-review] Batch screening - model: fake'), 'ordinary reviewer log lines stay out of the console');
+});
+
 test('a snippet that starts with two dashes reaches the reviewer as a value, not as a flag', async (t) => {
   const { calls } = await run(t, { pages: { 1: { cards: [card(331, { snippet: '--weird snippet' })] }, 2: { cards: [] } } });
   const single = callsOf(calls, 'ai-review').find((c) => c.mode === 'single');

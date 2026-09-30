@@ -21,6 +21,12 @@ process.env.AI_GATEWAY_API_KEY = 'fake-test-key';
 process.env.SCREEN_BACKOFF_BASE_MS = '5';
 process.env.SCREEN_CACHE_TTL_SEC = '0';
 process.env.SCREEN_RETRY_AFTER_CAP_MS = '50';
+// The shipped default engine is jev_only and the LLM engines are refused unless allowLlm is set. The suites of the LLM engines were
+// written for jev_shadow, so they get both from a config file (overrides and SCREEN_ENGINE still win); tests of the default itself
+// pass getEnv or a file of their own.
+const LEGACY_CONFIG = path.join(HOME, 'legacy-default-config.json');
+fs.writeFileSync(LEGACY_CONFIG, JSON.stringify({ engine: 'jev_shadow', allowLlm: true }));
+process.env.SCREEN_CONFIG_FILE = LEGACY_CONFIG;
 
 const GUARD = path.join(REPO, 'tests', 'fake-gateway', 'fetch-guard.js');
 require(GUARD);
@@ -55,6 +61,7 @@ function baseEnv(extra) {
   env.SCREEN_BACKOFF_BASE_MS = '5';
   env.SCREEN_CACHE_TTL_SEC = '0';
   env.SCREEN_RETRY_AFTER_CAP_MS = '50';
+  env.SCREEN_CONFIG_FILE = LEGACY_CONFIG;
   env.NODE_OPTIONS = `--require ${GUARD}`;
   if (process.env.SCREEN_GATEWAY_ORIGIN) env.SCREEN_GATEWAY_ORIGIN = process.env.SCREEN_GATEWAY_ORIGIN;
   return { ...env, ...(extra || {}) };
@@ -120,10 +127,15 @@ function walk(dir) {
   return out;
 }
 
-function writeConfig(obj) {
-  const f = path.join(HOME, 'screening-test-config.json');
+function writeRawConfig(obj, name) {
+  const f = path.join(HOME, name || 'screening-test-config.json');
   fs.writeFileSync(f, JSON.stringify(obj));
   return f;
+}
+
+// engine defaults to jev_shadow here, like the process-wide default of these tests (see LEGACY_CONFIG)
+function writeConfig(obj) {
+  return writeRawConfig({ engine: 'jev_shadow', allowLlm: true, ...obj });
 }
 
 // a tiny seeded PRNG for deterministic sampling tests
@@ -134,5 +146,5 @@ function seeded(seed) {
 
 module.exports = {
   REPO, HOME, SCRIPTS, CLI, CLI_WRAPPER, GUARD, lib, newGateway, resetHome, baseEnv, runNode, runBatch, runSingle,
-  writeCandidates, card, readShadow, walk, writeConfig, seeded,
+  writeCandidates, card, readShadow, walk, writeConfig, writeRawConfig, seeded, LEGACY_CONFIG,
 };

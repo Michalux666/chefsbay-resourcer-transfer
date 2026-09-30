@@ -57,8 +57,9 @@ function helpText() {
     '  --run-id <id>              Optional run id for the shadow log',
     '  --batch-size <n>           Accepted and ignored: every candidate is screened individually',
     '',
-    'Environment: AI_GATEWAY_API_KEY (required), SCREEN_ENGINE llm|jev_shadow|jev (default jev_shadow),',
-    '  SCREEN_TIER_MODE legacy|fixed, SCREEN_LLM_MODEL, SCREEN_GATEWAY_ORIGIN. See docs/SCREENING.md.',
+    'Environment: AI_GATEWAY_API_KEY (required), SCREEN_ENGINE jev_only|llm|jev_shadow|jev (default jev_only: Jev only, no LLM),',
+    '  SCREEN_REVIEW_PRE reject|approve and SCREEN_REVIEW_POST approve|reject (what an uncertain Jev answer becomes),',
+    '  SCREEN_TIER_MODE legacy|fixed, SCREEN_GATEWAY_ORIGIN. SCREEN_LLM_* apply to the other engines only. See docs/SCREENING.md.',
     '',
     'Exit codes:',
     '  0  Success',
@@ -182,14 +183,15 @@ async function runBatch(args, io, cfg, engine) {
     if (!c || typeof c !== 'object') throw new Error(`Candidate at index ${i} is not an object`);
   });
 
-  io.log(`  [ai-review] Batch screening - engine: ${engine.engine} model: ${cfg.llm.model}`);
+  io.log(`  [ai-review] Batch screening - engine: ${engine.engine} model: ${engine.engine === 'jev_only' ? cfg.jev.model : cfg.llm.model}`);
   const cands = all.map(c => ({ id: String(c.id || ''), snippet: c.snippet, name: c.name }));
   const { decisions, modelLabel, stats } = await engine.screenBatch({ job, location, distance, source: sourceOf(args), runId: runIdOf(args) }, cands);
   const results = decisions.map((d, i) => (args['with-codes']
     ? { id: cands[i].id, approved: d.approved, reason: d.reason, reasonCode: d.reasonCode }
     : { id: cands[i].id, approved: d.approved, reason: d.reason }));
   await io.out(JSON.stringify(results));
-  io.log(`  [ai-review] engine=${stats.engine} screened=${stats.total} by=${JSON.stringify(stats.bySource)} invalid=${stats.invalid}`);
+  const policy = stats.engine === 'jev_only' ? ` policy=${stats.policy.total} (reject=${stats.policy.reject} approve=${stats.policy.approve} share=${stats.policy.share}) why=${JSON.stringify(stats.policy.byWhy)}` : '';
+  io.log(`  [ai-review] engine=${stats.engine} screened=${stats.total} by=${JSON.stringify(stats.bySource)} invalid=${stats.invalid}${policy}`);
   io.log(`SCREENING_MODEL: ${modelLabel}`);
 }
 
@@ -220,6 +222,7 @@ async function runSingle(args, io, cfg, engine) {
   await io.out(JSON.stringify(args['with-codes']
     ? { approved: decision.approved, reason: decision.reason, reasonCode: decision.reasonCode }
     : { approved: decision.approved, reason: decision.reason }));
+  if (decision.source === 'policy') io.log(`  [ai-review] engine=${engine.engine} single decided by the review policy (${decision.reasonCode})`);
   io.log(`SCREENING_MODEL: ${modelLabel}`);
 }
 

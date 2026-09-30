@@ -1,7 +1,7 @@
 # Resourcer on Hermes
 
 This repository is the CV-sourcing pipeline of Chefs Bay, moved from a Windows laptop (OpenClaw, PowerShell, WSL, PM2, WhatsApp) to a Hermes Cloud profile named `resourcer` on Linux. It finds candidates on
-Caterer.com and Reed.co.uk, screens them with AI (Claude through the Vercel AI Gateway, with the small model Jev running in shadow), unlocks and downloads the good ones and creates them in Zoho Recruit.
+Caterer.com and Reed.co.uk, screens them with AI (Jev, through the Vercel AI Gateway; no language model is used in screening), unlocks and downloads the good ones and creates them in Zoho Recruit.
 It runs from Hermes cron jobs with no human in the loop; an operator (an LLM following `hermes/AGENTS.md`) installs it, watches it and answers questions about it. The operator operates; it never edits code.
 
 The behaviour, state-file schemas, exit codes and reliability layers of the old system were kept; every deliberate change is listed in `docs/DECISIONS.md`. Nothing here contains a secret or real candidate data:
@@ -13,7 +13,7 @@ secrets travel only in an encrypted data bundle (`data/resourcer-bundle.enc`, ad
 2. `docs/INSTALL.md` - the install runbook the operator follows (preflight, code, bundle, cron jobs, plugin, first run). Then `docs/ACCEPTANCE.md` (checks that need the real instance) and `docs/CUTOVER.md`.
 3. `OPERATOR-PROMPT.md` - what to tell the operator agent to begin. Its standing instructions are `hermes/AGENTS.md`, `hermes/SOUL.md` and the skill `hermes/skills/resourcer-ops/SKILL.md`.
 4. Day to day: `docs/OPERATIONS.md` (routine, alerts, recovery), `docs/KNOWN-LIMITS.md` (what is unverified or imperfect, with the mitigation), `docs/ROLLBACK.md`, `docs/TEARDOWN.md` (retiring the laptop).
-5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged and how Jev is promoted), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
+5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged, Jev alone and the review policy), `docs/UPDATE-JEV-ONLY.md` (switching an already installed instance to Jev alone), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
    (owner decisions and every divergence from the old system), `docs/LEGACY-MAP.md` (old file to new file), `docs/DESIGN.md` (the binding contract), `docs/parity/*.md` (per-package detail with legacy line numbers, UNVERIFIED-LIVE lists).
 
 ## Layout
@@ -42,12 +42,12 @@ cd resourcer && npm install                                 # better-sqlite3, ma
 cd ..
 node --test "tests/core/*.test.js"                          # one package: core, lifecycle, phase1, screening, supervision, reed, browser, bundle, dashboard, docs
 NODE_PATH=$PWD/resourcer/node_modules RESOURCER_PYTHON=/path/to/venv/bin/python node --test "tests/**/*.test.js"    # everything
-bash tests/e2e-linux.sh                                     # the 12 end-to-end scenarios on Linux (about 16 minutes)
+bash tests/e2e-linux.sh                                     # the 13 end-to-end scenarios on Linux (about 18 minutes)
 ```
 
 Without `NODE_PATH` and a Python that has `fastapi`, `httpx` and `pytest`, about 36 tests skip themselves (backup, the real Phase 2, the dashboard plugin suites) because `better-sqlite3` sits in `resourcer/node_modules`; do
 not trust a green run that skipped them. Four real-browser Reed tests skip unless `REED_REAL_CHROMIUM=<chromium binary>` is set. `bash tests/browser/smoke-linux.sh` and `sh tools/preflight.sh` are read-only checks
-meant to be run on the instance itself. Last full run (2026-09-29, Linux, Node 22): about 1,600 tests, all passing apart from the 4 real-browser skips; 12 of 12 end-to-end scenarios passing. What the tests cannot prove
+meant to be run on the instance itself. Last full run (2026-09-30, after the go-live round, Linux, Node 22, a fresh copy with `npm install`): 1,983 tests, 1,978 pass, 0 fail, 5 skipped (the 4 real-browser tests and one test that needs the git history); all 13 end-to-end scenarios pass (scenario 08 was re-run on its own after a one-line fix of a stale expectation). What the tests cannot prove
 (live sites, the real Hermes host, Chromium 153, real Zoho) is listed as UNVERIFIED-LIVE in `docs/KNOWN-LIMITS.md` and turned into checks in `docs/ACCEPTANCE.md`.
 
 ## Rules for changing anything

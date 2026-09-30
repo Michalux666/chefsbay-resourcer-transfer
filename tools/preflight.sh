@@ -38,6 +38,8 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL %s\n' "$*"; }
 info() { printf 'INFO %s\n' "$*"; }
 sec() { printf '== %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# A multi-line value prints its continuation lines as lines of their own; only NAME=value lines carry a name, and only the name is printed.
+env_names() { env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | cut -d= -f1; }
 later() {
   step=$1; shift
   if [ "$FINAL" = 1 ]; then fail "$* [needs step $step]"; else warn "$* [needs step $step]"; fi
@@ -79,7 +81,7 @@ if [ "$MODE" = cron ]; then
   echo "ENVPROBE ulimit-n=$(ulimit -n 2>/dev/null || echo n/a) ulimit-u=$(ulimit -u 2>/dev/null || echo n/a)"
   echo "ENVPROBE profile-env-file=$([ -r "$ENVF" ] && echo readable || echo 'NOT READABLE') at $ENVF"
   echo "ENVPROBE variable NAMES matching KEY/TOKEN/SECRET/PASSWORD/RESOURCER/AGENT_BROWSER/HERMES/AI_GATEWAY/NODE/CHROM (names only):"
-  env | cut -d= -f1 | grep -Ei 'KEY|TOKEN|SECRET|PASSWORD|RESOURCER|AGENT_BROWSER|HERMES|AI_GATEWAY|NODE|CHROM' | sort | tr '\n' ' '
+  env_names | grep -Ei 'KEY|TOKEN|SECRET|PASSWORD|RESOURCER|AGENT_BROWSER|HERMES|AI_GATEWAY|NODE|CHROM' | sort | tr '\n' ' '
   echo
   echo "ENVPROBE AI_GATEWAY_API_KEY in the process environment: $([ -n "${AI_GATEWAY_API_KEY:-}" ] && echo PRESENT || echo 'absent (expected: node reads the profile .env itself)')"
   echo "ENVPROBE stdout=$(readlink /proc/$$/fd/1 2>/dev/null) stdin=$(readlink /proc/$$/fd/0 2>/dev/null)"
@@ -302,7 +304,7 @@ fi
 TZNOW=${TZ:-unset}
 info "C14 TZ=$TZNOW date=$(date '+%Z %z') LANG=${LANG:-unset}"
 [ -e /usr/share/zoneinfo/Europe/London ] && pass "C15 /usr/share/zoneinfo/Europe/London present" || warn "C15 /usr/share/zoneinfo/Europe/London is missing (the code uses Intl, not the OS, so this is informational)"
-env | grep -q '^AGENT_BROWSER_' && warn "C16 AGENT_BROWSER_* variables are set in this shell ($(env | grep -o '^AGENT_BROWSER_[A-Z_]*' | tr '\n' ' ')): the wrapper deletes them for its own calls, but do not export them anywhere" || pass "C16 no AGENT_BROWSER_* variables in the environment"
+env_names | grep -q '^AGENT_BROWSER_' && warn "C16 AGENT_BROWSER_* variables are set in this shell ($(env_names | grep '^AGENT_BROWSER_' | tr '\n' ' ')): the wrapper deletes them for its own calls, but do not export them anywhere" || pass "C16 no AGENT_BROWSER_* variables in the environment"
 
 sec "D. agent-browser, Chromium, virtual display"
 PIN_SHA=c89bf341a79abc28ce527a958833f6af24641d2f5e558ce54f2f583df76961ff

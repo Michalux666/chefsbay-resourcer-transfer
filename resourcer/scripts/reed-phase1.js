@@ -40,7 +40,7 @@ const AI_REVIEW_SCRIPT_ALT = path.join(paths.SCRIPTS, 'ai-review.js');
 const PAGE_SIZE = 25;
 const API_FAILURES_BEFORE_HALT = 3;
 const HALT_REASON = 'AI screening unavailable';
-const HALT_REMEDY = 'Check the screening gateway key and credits (AI_GATEWAY_API_KEY in the profile .env) and the gateway status page. The pipeline resumes by itself once screening answers; held territories are not consumed.';
+const HALT_REMEDY = 'Check the screening gateway key and credits (AI_GATEWAY_API_KEY in the profile .env), that the Vercel team allows the model typesafe-ai/jev, and the gateway status page. The pipeline resumes by itself once screening answers; held territories are not consumed.';
 
 const numEnv = (name, dflt) => {
   const n = Number(env.get(name, String(dflt)));

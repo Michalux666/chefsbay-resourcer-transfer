@@ -20,7 +20,7 @@ const argVal = (v) => {
 
 const INPUT_DIR = () => path.join(paths.RUNTIME, 'screening-input');
 const HALT_REASON = 'AI screening unavailable';
-const HALT_REMEDY = 'Check the screening gateway key and credits (AI_GATEWAY_API_KEY in the profile .env) and the provider status page. The watchdog clears this halt itself once screening is healthy.';
+const HALT_REMEDY = 'Check the screening gateway key and credits (AI_GATEWAY_API_KEY in the profile .env), that the Vercel team allows the model typesafe-ai/jev, and the provider status page. The watchdog clears this halt itself once screening is healthy.';
 
 // The reviewer only needs id and snippet (plus the first name for redaction); the unlock token stays out.
 function reviewRecord(c) {
@@ -133,6 +133,8 @@ async function screenPage(ctx, cands) {
   const secs = Math.round((Date.now() - startMs) / 1000);
   out(`HEARTBEAT: AI batch end page ${st.page} (exit=${aiExit === null || aiExit === undefined ? '' : aiExit}, ${secs}s)`);
   st.screeningModel = screeningModelFrom(raw, st.screeningModel);
+  // The reviewer warns about its settings ("WARN screening config:") and once per run about uncalibrated thresholds ("WARN screening:"): the run log is where the owner reads them.
+  for (const line of String(res.stderr || '').split('\n')) if (/^WARN screening\b/.test(line.trim())) out(line.trim());
 
   if (aiExit === 3) {
     st.apiFailureCount++;

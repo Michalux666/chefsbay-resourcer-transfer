@@ -42,6 +42,7 @@ const browser = require('./lib/browser');
 const { SITE, SESSION_FILE } = browser;
 const EXIT = Object.freeze({ OK: 0, ERROR: 1, SAFELIST: 2, FAILED: 3, MODULE: 4, USAGE: 64 });
 const STATE_FILE = path.join(paths.RUNTIME, 'caterer-login-state.json');
+const STATUS_FILE = path.join(paths.RUNTIME, 'caterer-status.json');
 
 const MIN_GAP_AFTER_FAILURE_MS = 10 * 60 * 1000;
 const FAIL_LIMIT = 3;
@@ -168,6 +169,23 @@ function notifyOnce(st, slot, everyMs, alert, nowMs) {
   cur.notifiedAt = new Date(nowMs).toISOString();
   notify(alert);
   return true;
+}
+
+// runtime/caterer-status.json {state, updatedAt, detail} is what the dashboard shows for the Caterer session (same shape watchdog-runner.js writes); advisory, never throws.
+function writeCatererStatus(d, state, detail) {
+  try {
+    fsx.writeJsonAtomic(STATUS_FILE, { state, updatedAt: isoNow(d), detail: env.redact(String(detail || '')).slice(0, 200) });
+  } catch { /* status is informational */ }
+}
+
+// An inconclusive check (network, error, unrecognised page) returns null: the last known state stays rather than a guess.
+function statusForOutcome(r, allowRelogin) {
+  if (r.state === 'ok') return ['ok', r.reloggedIn ? 'signed in again' : ''];
+  if (r.state === 'safelist') return ['safelist_blocked', 'SafeListLoginBlocked'];
+  if (r.state === 'moduleerror') return ['stale', 'CV Database module error'];
+  if (r.state !== 'login') return null;
+  if (!allowRelogin) return ['stale', 'not signed in (check only, no sign-in attempted)'];
+  return ['login_failed', r.suppressed ? `sign-in suppressed (${r.suppressed})` : (r.detail || 'sign-in failed')];
 }
 
 const SAFELIST_ALERT = 'Caterer sign-in is blocked by the device safe-list check, so no CV sourcing can run. ACTION: open the NEWEST verification email from Caterer sent to the Caterer login mailbox, copy the link (it contains TwoFaAuthRedirect) and run in the resourcer workspace: node scripts/caterer-login.js --open-link "<the link>" (or pipe it in: echo "<the link>" | node scripts/caterer-login.js --open-link -). Do not re-run the login repeatedly: every attempt emails a new link and invalidates the older ones. The pipeline keeps checking without signing in again.';
@@ -368,9 +386,11 @@ async function openVerificationLink(link, o) {
   }
   say(`URL after verification link: ${safeUrl(url)}`);
   if (!onCaterer(url) || browser.isLoginUrl(url) || isSafe(url) || browser.isModuleErrorUrl(url)) {
+    writeCatererStatus(d, 'safelist_blocked', 'the emailed link did not clear the block');
     return result('safelist', EXIT.SAFELIST, 'SAFELIST_BLOCKED', 'SAFELIST_BLOCKED: the link did not clear the block (an older link? use the NEWEST email; links are single use)', { url: safeUrl(url) });
   }
   const s = await d.browser.saveSession();
+  writeCatererStatus(d, 'ok', 'safe-list block cleared by the emailed link');
   const st = readState();
   const wasBlocked = !!st.safelist;
   Object.assign(st, { safelist: null, consecutiveFailures: 0, holdUntil: null, lastResult: 'ok', lastAttemptAt: isoNow(d) });
@@ -384,6 +404,13 @@ async function openVerificationLink(link, o) {
 async function ensureLoggedInDetailed(o) {
   const opts = Object.assign({ allowRelogin: true, force: false, restoreState: 'auto' }, o);
   const d = deps(opts);
+  const r = await ensureCore(opts, d);
+  const s = statusForOutcome(r, opts.allowRelogin);
+  if (s) writeCatererStatus(d, s[0], s[1]);
+  return r;
+}
+
+async function ensureCore(opts, d) {
   const notes = [];
   const say = (m) => { notes.push(m); if (opts.log) opts.log(m); };
   const st = readState();
@@ -439,6 +466,7 @@ async function ensureLoggedInDetailed(o) {
   st.lastAttemptAt = isoNow(d);
   st.lastResult = 'attempting';
   writeState(st);
+  writeCatererStatus(d, 'relogin', 'sign-in attempt started');
   const res = await login({ restoreState: 'never', save: false, log: say, _browser: d.browser, _sleep: d.sleep });
   st.lastAttemptAt = isoNow(d);
 

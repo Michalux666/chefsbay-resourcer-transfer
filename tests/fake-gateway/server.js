@@ -15,6 +15,8 @@
 //                       [[LLMJSON:<text>]] [[LLMLENGTH]] [[LLMREFUSAL]] [[L500PRIMARY]] [[LBADPRIMARY]]
 //   failure tokens    : [[HTTP500]] [[HTTP500x<n>]] [[HTTP429]] [[HTTP429x<n>]] [[HTTP422]] [[SLOW:<ms>]]
 //                       [[TIMEOUT]] [[MALFORMED]] [[BADCHOICE]] [[NOPROBS]] [[NOTJEV]]
+// Global modes per route (POST /__fake/mode {jev|llm: ...}): ok, down, slow, 401, 402, 403, 429, 500, 503,
+// restricted (403 "Your team has restricted access to this model"), no_providers (400 no_providers_available).
 
 const http = require('node:http');
 const crypto = require('node:crypto');
@@ -176,6 +178,14 @@ function startFakeGateway(options) {
   async function modeGate(kind, req, res, toks, seedText) {
     const m = S.mode[kind];
     if (m === 'down') { req.socket.destroy(); return true; }
+    if (m === 'restricted') {
+      send(res, 403, { message: 'Your team has restricted access to this model', error: { message: 'Your team has restricted access to this model', type: 'forbidden' } });
+      return true;
+    }
+    if (m === 'no_providers') {
+      send(res, 400, { message: 'no_providers_available', error: { message: 'no_providers_available: no provider can serve this request with zeroDataRetention', type: 'invalid_request_error', code: 'no_providers_available' } });
+      return true;
+    }
     if (['401', '402', '403', '429', '500', '503'].includes(m)) {
       const code = Number(m);
       send(res, code, kind === 'jev'

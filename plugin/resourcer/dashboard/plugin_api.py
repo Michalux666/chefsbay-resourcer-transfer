@@ -7,7 +7,8 @@ modules), must export a module-level ``router``, and auth is done by the dashboa
 Design rules (docs/DESIGN.md 5.8, docs/parity/dashboard.md):
   * stdlib + fastapi + pydantic only (no PyYAML, nothing pip-installed);
   * every filesystem path goes through jail_path(): it pins the plugin to RESOURCER_HOME and rejects
-    absolute paths, '..' segments, symlink escapes and secret-looking names;
+    absolute paths, '..' segments, symlink escapes and secret-looking names; the one exception is
+    reed_source_setting(), which reads the single key RESOURCER_SOURCES from the profile .env behind its own fence;
   * candidates.db is opened read-only (mode=ro + query_only) - this plugin never writes to it;
   * the only writes are: pending-searches/search-*.json (atomic, no-clobber), runtime/pipeline-halt.json
     removal + logs/errors.jsonl + outbox/alerts.jsonl appends (halt clear), logs/errors-acknowledged.json;
@@ -44,6 +45,7 @@ DEFAULT_HOME = "/opt/data/profiles/resourcer/workspace/resourcer"
 MAX_BODY_BYTES = 4096
 MAX_JSON_FILE_BYTES = 2 * 1024 * 1024
 PENDING_PARSE_CAP = 500
+ENV_FILE_MAX_BYTES = 64 * 1024
 SEARCH_QUEUE_CAP = 25  # manual searches (dashboard or CLI) waiting at once; each one spends paid Caterer credits
 MANUAL_SOURCES = ("dashboard", "request-search-cli")
 RUN_SCAN_CAP = 300
@@ -86,6 +88,7 @@ PHASE1_RUNNING = ("phase1_searching", "phase1_active", "phase1_running")
 PHASE2_ACTIVE = ("phase2_starting", "phase2_pushing")
 
 VALID_SOURCES = ("both", "caterer", "reed")
+_SOURCES_LINE_RE = re.compile(r"^(?:export\s+)?RESOURCER_SOURCES\s*=\s*(.*)$")
 VALID_PRIORITIES = ("high", "medium", "low")
 VALID_DISTANCES = (5, 10, 20, 30, 40, 60, 80)
 VALID_ACTIVE_WITHIN = ("14 days", "1 month", "2 months", "3 months", "6 months", "12 months", "18 months", "All")
@@ -799,8 +802,110 @@ def caterer_state(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     return derived
 
 
+def _env_candidates() -> List[Path]:
+    """env.js candidateEnvFiles() order (RESOURCER_ENV_FILE, profile .env, workspace .env), limited to the resourcer
+    profile and workspace: a machine-level or foreign file is never a candidate."""
+    home = get_home().resolve()
+    profile: Optional[Path] = home.parent.parent
+    roots = [home]
+    if home.parent.name == "workspace" and len(profile.parts) >= 2 and not (profile / "profiles").is_dir() and not (profile / "plugins").is_dir():
+        roots.append(profile)
+    else:
+        profile = None
+    raw: List[Path] = []
+    override = os.environ.get("RESOURCER_ENV_FILE")
+    if override:
+        raw.append(Path(override))
+    if profile is not None:
+        raw.append(profile / ".env")
+    raw.append(home / ".env")
+    out: List[Path] = []
+    for cand in raw:
+        real = Path(os.path.realpath(cand))
+        for root in roots:
+            try:
+                rel = real.relative_to(root)
+            except ValueError:
+                continue
+            if not any(part.lower() in _DENY_DIRS for part in rel.parts):
+                out.append(real)
+            break
+    return out
+
+
+def _read_env_setting(path: Path) -> Tuple[bool, Optional[str]]:
+    """(readable, RESOURCER_SOURCES as written or None). Only that one key is extracted; no other line is kept or returned.
+    Binary, non-UTF-8, over-size or non-regular files are unreadable, not 'no setting'."""
+    try:
+        if not os.path.isfile(path):
+            return False, None
+        with open(path, "rb") as fh:
+            data = fh.read(ENV_FILE_MAX_BYTES + 1)
+        if len(data) > ENV_FILE_MAX_BYTES or b"\x00" in data:
+            return False, None
+        text = data.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False, None
+    value: Optional[str] = None
+    for line in re.split(r"\r?\n", text):
+        m = _SOURCES_LINE_RE.match(line.strip())
+        if m:
+            value = m.group(1).strip()
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
+    return True, value
+
+
+def reed_source_setting() -> Optional[Dict[str, Any]]:
+    """Effective RESOURCER_SOURCES the way scripts/lib/env.js resolves it: a non-empty process variable, else the first env
+    file that defines it (an empty value means unset), else the pipeline default caterer.
+
+    -> {"value": caterer|reed|both, "valid": bool, "origin": process|file|default}; anything that is not caterer|reed|both
+    counts as caterer (reed-api-client.js sourcesGate). None when no source could be read at all (no process variable and
+    no readable env file), so the caller can fall back to what the pipeline recorded.
+    """
+    raw = os.environ.get("RESOURCER_SOURCES")
+    origin = "process"
+    if raw is None or raw == "":
+        raw, origin = None, "file"
+        try:
+            candidates = _env_candidates()
+        except (JailError, OSError, ValueError):
+            candidates = []
+        readable = False
+        for path in candidates:
+            ok, value = _read_env_setting(path)
+            if not ok:
+                continue
+            readable = True
+            if value is not None:
+                raw = value
+                break
+        if not readable:
+            return None
+        if not raw:
+            return {"value": "caterer", "valid": True, "origin": "default"}
+    norm = raw.strip().lower()
+    valid = norm in ("caterer", "reed", "both")
+    return {"value": norm if valid else "caterer", "valid": valid, "origin": origin}
+
+
 def reed_state(reed_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Reed auth: failure marker (runtime/ or root), explicit runtime/reed-status.json, else last run's reed stats."""
+    """Reed auth. RESOURCER_SOURCES decides first: a Reed that is switched off is 'disabled' whatever old runs say. Otherwise
+    failure marker (runtime/ or root), explicit runtime/reed-status.json, else last run's reed stats; a switched-on Reed with no
+    recorded successful login is 'not_logged_in', never 'ok' from imported run history."""
+    setting = reed_source_setting()
+    sources = setting["value"] if setting else None
+    enabled = None if setting is None else sources in ("reed", "both")
+    if enabled is False:
+        if setting["origin"] == "default":
+            detail = "RESOURCER_SOURCES is not set (default caterer): Reed is off"
+        elif not setting["valid"]:
+            detail = "RESOURCER_SOURCES is not caterer, reed or both: treated as caterer, Reed is off"
+        else:
+            detail = "RESOURCER_SOURCES=" + sources
+        return {"state": "disabled", "updatedAt": None, "detail": detail, "source": "RESOURCER_SOURCES", "ageMinutes": None,
+                "enabled": False, "sources": sources}
     marker, mstate = read_json_state("runtime", "reed-auth-failed.marker")
     if mstate == "missing":
         marker, mstate = read_json_state("reed-auth-failed.marker")
@@ -814,10 +919,13 @@ def reed_state(reed_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "source": "run_results",
         }
     explicit = read_json("runtime", "reed-status.json", default=None)
-    if isinstance(explicit, dict) and isinstance(explicit.get("state"), str):
+    explicit_state = explicit["state"] if isinstance(explicit, dict) and isinstance(explicit.get("state"), str) else None
+    if enabled and explicit_state == "disabled":
+        explicit_state = None  # written while Reed was off; Reed is on now
+    if explicit_state is not None:
         e_dt, s_dt = parse_iso(explicit.get("updatedAt")), parse_iso(state["updatedAt"])
         if state["state"] == "unknown" or (e_dt is not None and (s_dt is None or e_dt >= s_dt)):
-            state = {"state": scrub(explicit["state"], 40), "updatedAt": explicit.get("updatedAt"),
+            state = {"state": scrub(explicit_state, 40), "updatedAt": explicit.get("updatedAt"),
                      "detail": scrub(explicit.get("detail"), 200) or None, "source": "runtime/reed-status.json"}
     if mstate in ("ok", "unreadable"):
         m = marker if isinstance(marker, dict) else {}
@@ -825,7 +933,12 @@ def reed_state(reed_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if m_dt is None or s_dt is None or m_dt >= s_dt:
             state = {"state": "auth_failed", "updatedAt": m.get("failedAt") if isinstance(m.get("failedAt"), str) else None,
                      "detail": scrub(m.get("reason"), 120) or None, "source": "reed-auth-failed.marker"}
+    if enabled and state["state"] != "auth_failed" and explicit_state != "ok":
+        state = {"state": "not_logged_in", "updatedAt": None, "source": "none",
+                 "detail": "Reed is on (RESOURCER_SOURCES=%s) but no successful Reed login is recorded yet" % sources}
     state["ageMinutes"] = age_minutes(parse_iso(state["updatedAt"]))
+    state["enabled"] = enabled
+    state["sources"] = sources
     return state
 
 

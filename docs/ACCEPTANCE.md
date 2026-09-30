@@ -67,13 +67,14 @@ The pipeline is already running when you start (INSTALL step 9 switched it on). 
 
 | Result | ID | Class | Check | Expect |
 |---|---|---|---|---|
-| [ ] | SR01 | GATE | INSTALL 7.2 and 7.3 | the deep check is `"ok":true`; the batch canary approves the Chef de Partie and rejects the cashier; the single canary rejects with a `reject_` code; no `sys_fail_open` |
-| [ ] | SR02 | WATCH | day 1, 3, 7: command block CB2 (two counts) | the second count divided by the first is 0.95 or more (Jev answered ok in 95 percent of rows). Lower: report the codes printed by the third command; `http_403` may mean the account was restricted |
+| [ ] | SR01 | GATE | INSTALL 7.2 and 7.3 | the deep check is `"ok":true` with `"engines":{"jev":{"ok":true}}` (no `llm` entry); the batch canary approves the Chef de Partie and rejects the cashier; the single canary rejects with a `reject_` code, or is approved by the review policy (`sys_review_policy_approve`), which is recorded, not a failure; no chat-completions request was made |
+| [ ] | SR02 | WATCH | day 1, 3, 7: command block CB2 (two counts) | the second count divided by the first is 0.95 or more (Jev answered ok in 95 percent of rows). Lower: report the codes printed by the fourth command; `http_403` may mean the account or the Vercel team restricted the model |
 | [ ] | SR03 | GATE | preflight H3 | PASS, or INFO with a 404 for the credits endpoint (both acceptable); record which |
-| [ ] | SR04 | WATCH | day 7: `node W/tools/screening-report.js --since 7d` | approve rate by source and role; the owner compares with the old system's rate. A big drop or rise: report. Nothing is promoted (INSTALL 13) |
-| [ ] | SR05 | WATCH | day 1 and 3: command block CB3 (three counts) | `0` for e-mails and for phone numbers; `0` for postcodes (a few false hits are possible: report the count, never the text). This checks the redaction on real cards without printing any candidate text |
+| [ ] | SR04 | WATCH | day 7: `node W/tools/screening-report.js --since 7d` | approve rate by source and role; the owner compares with the old system's rate. A big drop or rise: report. There is no promotion gate in `jev_only`: the verdict reads "not applicable in jev_only mode" (INSTALL 13) |
+| [ ] | SR05 | WATCH | day 1 and 3: command block CB3 (four counts) | `0` for e-mails and for phone numbers; `0` for postcodes (a few false hits are possible: report the count, never the text); `0` for card texts that still start with a rank number (a 1 to 6 digit rank, then a dot: the redactor strips it, and with it the name after it, in any case; SCR-26). This checks the redaction on real cards without printing any candidate text. Names in lower case cannot be counted this way: the owner may look at a few rows with the reviewer present |
 | [ ] | SR06 | GATE | INSTALL 7.5 | the zero-data-retention result and the owner's decision are written down |
 | [ ] | SR07 | WATCH | `stat -c '%a' R/shadow/*.jsonl` | `600` |
+| [ ] | SR08 | WATCH | day 1, 3, 7: command block CB2 (the third count divided by the first) | the share of decisions taken by the review policy instead of a confident Jev answer (docs/SCREENING.md section 16.4). No target; the owner reads it. Above one half: report at once (Jev is unsure about most cards: the placeholder thresholds, or Jev). For the first territory whose search title is Waiter, Waitress, Server, Front Of House, Bartender or Dish Washer (on the tier-0 ladder since SCR-28) the policy share by role in section J of the report must be well below 100 percent; 100 percent means the title is not on the ladder (KNOWN-LIMITS K-SCR12). The instruction-to-an-AI flag fires at 0.7 (SCR-27): a policy share that stays high with reason `INJECTION_FLAG` is worth a report |
 
 ## 4b. Command blocks used by the tables
 
@@ -83,10 +84,10 @@ CB1 (CO04), prints one number, expect `0`:
 grep -c -i -E 'pdf-parse|extractCvText' /opt/data/profiles/resourcer/workspace/resourcer/logs/errors.jsonl
 ```
 
-CB2 (SR02): the number of rows, the number of rows where Jev answered ok, and (only if the ratio is low) the failure codes:
+CB2 (SR02, SR08): the number of rows, the number of rows where Jev answered ok, the number of rows decided by the review policy, and (only if the ratio is low) the failure codes:
 
 ```
-cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c '"mode":"jev_shadow"'
+cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c '"mode":"jev_only"'
 ```
 
 ```
@@ -94,12 +95,16 @@ cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | 
 ```
 
 ```
+cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c '"used":{"engine":"policy"'
+```
+
+```
 cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -o '"jev":{"status":"[a-z]*","kind":"[a-z]*","code":"[a-z_0-9]*"'
 ```
 
-The third command prints only the status, kind and code fields (no candidate text). Report how many of each.
+The fourth command prints only the status, kind and code fields (no candidate text). Report how many of each.
 
-CB3 (SR05), three numbers, each expected `0`:
+CB3 (SR05), four numbers, each expected `0`:
 
 ```
 cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+.[A-Za-z]{2,}'
@@ -113,6 +118,10 @@ cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | 
 cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c -E '[A-Z]{1,2}[0-9][0-9A-Z]? ?[0-9][A-Z]{2}'
 ```
 
+```
+cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c -E '"input":"[0-9]+[.] '
+```
+
 Never print the matching lines: they would be candidate text.
 
 ## 5. Supervision, alerts, backups
@@ -121,7 +130,7 @@ Never print the matching lines: they would be candidate text.
 |---|---|---|---|---|
 | [ ] | SU01 | GATE | `hermes -p resourcer cron runs resourcer-tick --limit 5` during a live run | runs about a minute apart, none stuck; while a 15 to 45 minute run is in flight the tick stays alive and `--status` shows one run only |
 | [ ] | SU02 | GATE | INSTALL 9.3 | the probe shows `HERMES_HOME` equal to the profile home (`match=yes`), a `tool` line for node, timeout and xvfb-run that is not `MISSING`, `temp-dir=... writable=yes` (an unset `TMPDIR` is fine when `/tmp` is writable; a set one is 61 characters or less), and the profile `.env` readable |
-| [ ] | SU03 | WATCH | INSTALL 9.3 second fire; any run longer than 55 minutes | the detached process survived the end of the cron run; a run that outlives one tick completes with exit 0 (not 13). If it did not survive: report; runs over about 50 minutes are at risk |
+| [ ] | SU03 | WATCH | INSTALL 9.3 second fire (the probe reports `DETACHED-SLEEPER ... GONE`: measured, a run does not outlive its cron run); then any run that crosses minute 55 of a tick | MITIGATED by the tick drain: the tick launches nothing after minute 38, waits out its own run and ends as soon as it is done (`tick end: launch-cutoff` in `logs/tick-*.log`), so a run that ends between minute 55 and 56 completes with exit 0 (not 13) and no `tick-hard-cap` alert appears. Still a known risk (KNOWN-LIMITS K-PLAT5) for a run that cannot finish by minute 56 of its tick, for example longer than 56 minutes: it is ended cleanly, recorded as exit 13 with reason `tick-hard-cap`, retried later, with one WARN alert. Report it if `tick-hard-cap` repeats |
 | [ ] | SU04 | WATCH | `--status` plus preflight B1, B2 | the process identity checks work (tick alive true) and the memory numbers make sense for the instance |
 | [ ] | SU05 | GATE | `node R/scripts/backup-db.js --auto` (`timeout=600`), then `--restore-test`, then `--list` | exit 0, exit 0, one encrypted file; done once by hand, ideally while a run is in flight (the online copy must work while the pipeline writes) |
 | [ ] | SU06 | GATE | HUMAN | an off-instance copy exists: `BACKUP_UPLOAD_CMD` is set, `backup-db.js --auto` exits 0 (not 5), and the owner has restored from that copy once with the passphrase held off the instance; OR the owner waives it in the waiver table, accepting that the backups die with the instance |

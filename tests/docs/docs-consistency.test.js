@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -105,6 +105,9 @@ function codeAlertKeys() {
       const rx = /(['"`])([a-z][a-z0-9-]*)(?=[:'"`$])/g;
       let k;
       while ((k = rx.exec(line))) if (kebab.test(k[2])) keys.add(k[2]);
+      const id = /^\s*([A-Z][A-Z0-9_]*)\s*[,}]/.exec(m[1]);
+      const lit = id && new RegExp(`const\\s+${id[1]}\\s*=\\s*'([a-z][a-z0-9-]*)'`).exec(src);
+      if (lit && kebab.test(lit[1])) keys.add(lit[1]);
     }
     const rc = /const\s+[A-Z_]*KEY[A-Z_]*\s*=\s*'([a-z-]+)'/g;
     let c;
@@ -343,4 +346,58 @@ test('documents are ASCII with LF line endings', () => {
     for (let i = 0; i < buf.length; i += 1) if (buf[i] > 127) { bad.push(`${f}: non-ASCII byte at ${i}`); break; }
   }
   assert.deepEqual(bad, []);
+});
+
+test('UPDATE-JEV-ONLY.md: only commands this operator may run, every Hermes command by its full path, code before settings, and a rollback that restores the old setting', () => {
+  const t = read('docs/UPDATE-JEV-ONLY.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 20, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    if (b.startsWith("'use strict'")) continue;
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(b), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!b.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(t.split('/opt/hermes/bin/hermes -p resourcer').join('')), 'a bare hermes command');
+  const at = (needle) => { const i = t.indexOf(needle); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const setting = at('/opt/hermes/bin/hermes -p resourcer config set SCREEN_ENGINE jev_only');
+  const deep = at('install-work/deep-check.js');
+  assert.ok(pull < verify && verify < setting && setting < deep, 'order: pull, verify, setting, deep check');
+  assert.match(t, /"engines":\{"jev":\{"ok":true\}\}/);
+  assert.match(t, /NO `llm` entry/);
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/deep-check\.js/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /config set SCREEN_ENGINE jev_shadow/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(t, /SCREEN_ALLOW_LLM/);
+  assert.ok(!/config set SCREEN_ALLOW_LLM (1|true|on)/.test(t), 'the note never turns the opt-in on');
+});
+
+function gitLines(args) {
+  const r = require('child_process').spawnSync('git', args, { cwd: REPO, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : null;
+}
+
+test('UPDATE-JEV-ONLY.md copies exactly the installed files that changed since the first release, and says nothing else changed', (t) => {
+  const changed = gitLines(['diff', '--name-only', '016b444']);
+  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+  if (!changed || !added) { t.skip('no git history with the first release here'); return; }
+  const files = changed.concat(added);
+  const note = read('docs/UPDATE-JEV-ONLY.md');
+  const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md');
+  assert.deepEqual(wrappers, [], 'a cron wrapper or SOUL.md changed: the note says they did not, and would have to copy them');
+  assert.match(note, /cron wrappers and `SOUL\.md` are unchanged/);
+  assert.ok(files.includes('hermes/AGENTS.md') && note.includes('workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md'));
+  assert.ok(files.some((f) => f.startsWith('hermes/skills/resourcer-ops/')) && note.includes('skills/ops/resourcer-ops/'));
+  const plugin = files.filter((f) => f.startsWith('plugin/resourcer/') && f !== 'plugin/resourcer/install-plugin.sh');
+  assert.ok(plugin.length > 0);
+  for (const f of plugin) {
+    const rel = f.slice('plugin/resourcer/'.length);
+    const cp = `cp /opt/data/profiles/resourcer/workspace/${f} /opt/data/plugins/resourcer/${rel}`;
+    assert.ok(note.split(cp).length >= 3, `the note must copy ${f} on update and again on rollback`);
+  }
+  assert.ok(!/dashboard plugin are unchanged/.test(note), 'the plugin changed: the note may not say it did not');
 });

@@ -55,7 +55,7 @@ You need, in front of you:
 - A password manager entry ready to hold three DIFFERENT passphrases (below).
 - Your GitHub login (username and how you sign in). Not a token.
 - The Hermes Portal login for the instance and access to its dashboard.
-- A Vercel AI Gateway key with credit on it (screening runs through it; roughly one dollar a day at most, see `docs/SCREENING.md`). Check the balance now.
+- A Vercel AI Gateway key with credit on it, on a Vercel team that allows the model `typesafe-ai/jev` (screening uses Jev only and runs through this key; a few hundredths of a cent per candidate, see `docs/SCREENING.md`). Check the balance and the model access now.
 - The mailbox that receives the Caterer login address's mail (the Caterer safe-list link arrives there, and the Caterer address forwards to your own mailbox). Be able to open it during step 7.
 - A decision on where alerts go (e-mail and/or Telegram) and where the off-instance encrypted database backup goes (an object-storage bucket in another provider account with a write-only key, or an e-mail address used only for backups). A backup on the same volume as the database does not survive loss of the instance (see `docs/DECISIONS.md` OD4, OD5).
 - Roughly 10 GB free on the laptop, and somewhere off the laptop to put files (step 4).
@@ -352,7 +352,7 @@ Decision table for the owner (INSTALL 8.3 is the operator's view; this is what i
 | `CRED_*` or `LOGIN_FAILED` (exit 3), or `caterer-login-failed` (attempts paused 3 hours) | Wrong or expired password, or the account is locked | NO-GO until fixed: check the password by logging in to Caterer in a normal browser; fix `secrets/caterer-credentials.json` on the instance; one `--force` only after that |
 | `CATERER_MODULE_ERROR` (exit 4), alert `caterer-cvdb-module` | Caterer's CV search is broken for the account; not a Hermes fault | WAIT: nothing can be proven until it clears; do not wipe |
 | Sign-in fine but every territory returns pool 0 with errors 1, or the browser gets an "Access Denied" or HTTP 403 page | The site answers differently to this address; its bot protection may block the datacenter address | NO-GO: keep the laptop. Retry no more than once an hour: bursts prolong a block |
-| Halt with `screening gateway auth failed` or `credits exhausted` | The AI Gateway key or balance | FIX and continue (minutes); the halt clears itself |
+| Halt with `screening gateway auth failed` or `credits exhausted` | The AI Gateway key, balance, or the Vercel team not allowing `typesafe-ai/jev` | FIX and continue (minutes); the halt clears itself |
 | `low-memory`, browser crashes, runs killed at 70 minutes | Not enough RAM next to the other profile | Reed stays off; retry off-peak; NO-GO for the wipe until one full run finishes clean |
 | Reed login blocked by the bot check (`reed-human-login`) | Expected on a datacenter address | Not a blocker for GO: Reed stays off. But every territory processed while Reed is off forgoes its Reed half for good (historically about a third of the Zoho-linked candidates came from Reed; about 8,100 new ones from April to September against about 11,100 from Caterer from June to September), so plan the human login soon (`docs/OPERATIONS.md` section 8) |
 

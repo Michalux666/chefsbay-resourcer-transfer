@@ -243,7 +243,7 @@ Remember the key for later pulls:
 git -C /opt/data/profiles/resourcer/workspace config core.sshCommand 'ssh -i /opt/data/profiles/resourcer/deploy/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/data/profiles/resourcer/deploy/known_hosts -o StrictHostKeyChecking=yes'
 ```
 
-Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8):
+Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the update that switches an installed instance to the Jev-only engine follow `docs/UPDATE-JEV-ONLY.md` instead):
 
 ```
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
@@ -583,7 +583,7 @@ hermes -p resourcer config set RESOURCER_SOURCES caterer
 ```
 
 ```
-hermes -p resourcer config set SCREEN_ENGINE jev_shadow
+hermes -p resourcer config set SCREEN_ENGINE jev_only
 ```
 
 Verify:
@@ -592,7 +592,11 @@ Verify:
 grep -c '^RESOURCER_SOURCES=caterer' /opt/data/profiles/resourcer/.env
 ```
 
-Expect `1`. (`RESOURCER_SOURCES=caterer` keeps Reed off until step 12. `SCREEN_ENGINE=jev_shadow` means the language model decides and the small model only takes notes.) If Hermes answers `Cannot set '...': it is managed by your administrator`: STOP.
+```
+grep -c '^SCREEN_ENGINE=jev_only' /opt/data/profiles/resourcer/.env
+```
+
+Expect `1` and `1`. (`RESOURCER_SOURCES=caterer` keeps Reed off until step 12. `SCREEN_ENGINE=jev_only` means Jev is the only model screening uses and no language model is ever called: the owner's Vercel team allows only Jev through the AI Gateway. Never set another engine, and never set `SCREEN_ALLOW_LLM`: without that switch the code turns any other engine into `jev_only` anyway.) If Hermes answers `Cannot set '...': it is managed by your administrator`: STOP.
 
 Set no other variable unless a step tells you to. The variables are listed in `docs/ENV.md`.
 
@@ -658,7 +662,7 @@ Idempotent: yes (all copies overwrite with identical content).
 
 ## 7. Screening canaries (real AI calls with invented text)
 
-Goal: prove the AI Gateway key works, the deciding language model answers in the expected shape, the small model (Jev) answers, and record whether zero data retention is available. All text sent in this step is invented. No candidate data is used. Total cost: a few cents. Precondition: step 6 done. Do not repeat these calls in a loop: send each one once, wait for the answer.
+Goal: prove the AI Gateway key works, the owner's Vercel team lets Jev through, Jev (the only model this system uses) answers in the expected shape through the screening tool, and record whether zero data retention is available. There is no language model in screening (engine `jev_only`, docs/SCREENING.md section 16): the team blocks every other model, so a canary of one would only answer HTTP 403, and none is part of this install. All text sent in this step is invented. No candidate data is used. Total cost: a fraction of a cent per call. Precondition: step 6 done. Do not repeat these calls in a loop: send each one once, wait for the answer.
 
 ### 7.1 Gateway auth and credits (OPERATOR)
 
@@ -687,11 +691,11 @@ Run (`timeout=300`):
 RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node /opt/data/profiles/resourcer/install-work/deep-check.js
 ```
 
-Expect: one JSON line beginning `{"ok":true,"reason":"","ms":` with `"level":"auth"` and `"engines":{"llm":{"ok":true,"model":"anthropic/claude-sonnet-5.5"}}`, exit 0. (The model is the primary one, or the backup `anthropic/claude-sonnet-5` if the primary failed: report which.) Then delete the file: `rm /opt/data/profiles/resourcer/install-work/deep-check.js`.
+Expect: one JSON line beginning `{"ok":true,"reason":"","ms":` with `"level":"auth"` and `"engines":{"jev":{"ok":true}}` (there is no `llm` entry: the deep check calls Jev only), exit 0. Then delete the file: `rm /opt/data/profiles/resourcer/install-work/deep-check.js`.
 
-If it fails: the `reason` is one of `screening gateway unreachable`, `screening gateway auth failed`, `screening credits exhausted`, `screening gateway error`, `AI screening unavailable`. Report it with its `detail`. Auth failed: the owner replaces the key. Credits exhausted: the owner tops up. `screening gateway error` with model text: the owner may set `SCREEN_LLM_MODEL` to the backup model `anthropic/claude-sonnet-5` (a HUMAN decision); repeat once.
+If it fails: the `reason` is one of `screening gateway unreachable`, `screening gateway auth failed`, `screening credits exhausted`, `screening gateway error`, `AI screening unavailable`. Report it with its `detail`. Auth failed: the owner replaces the key; if the `detail` says the team has restricted access to a model, the owner must allow `typesafe-ai/jev` on the Vercel team (AI Gateway model access settings), and the JSON then also carries a `remedy` field that says so. Credits exhausted: the owner tops up. `screening gateway error` with `no_providers_available` in the `detail`: a zero-data-retention request that no provider can serve (see 7.5; nothing in this step should have set `SCREEN_ZDR`). `screening gateway error` otherwise: Jev or the gateway is failing; repeat once, then report (there is no backup model; this is a HUMAN decision).
 
-### 7.3 One real call to the deciding model, both stages (OPERATOR)
+### 7.3 One real call through the screening tool, both stages (OPERATOR)
 
 First the before-unlock stage (batch), one suitable and one unsuitable invented candidate (`timeout=300`):
 
@@ -699,7 +703,7 @@ First the before-unlock stage (batch), one suitable and one unsuitable invented 
 cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/ai-review.js --mode batch --job Chef --location M1 --distance 20 --source caterer --run-id install-canary --with-codes --candidates '[{"id":"canary-yes","snippet":"Chef de Partie | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Chef de Partie Jan 2019 - Current Test Bistro Ltd Key Responsibilities Running the sauce section, daily prep, ordering, food safety"},{"id":"canary-no","snippet":"Retail Cashier | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Retail Cashier Jan 2021 - Current Test Store Ltd Key Responsibilities Till operation, stock replenishment"}]'
 ```
 
-Expect: exit 0; standard output is one line, a JSON array with `"id":"canary-yes"` having `"approved":true` and `"id":"canary-no"` having `"approved":false`, each with a `reason` and a `reasonCode`; standard error contains `SCREENING_MODEL:` followed by a model label.
+Expect: exit 0; standard output is one line, a JSON array with `"id":"canary-yes"` having `"approved":true` and `"id":"canary-no"` having `"approved":false`, each with a `reason` and a `reasonCode` (Jev's own `reject_...` code, or `sys_review_policy_reject` when Jev was not sure); standard error contains `SCREENING_MODEL: typesafe-ai/jev` (`typesafe-ai/jev+policy` when the review policy decided a card) and, once, a `WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds` line, which is expected until the owner has tuned the thresholds (docs/SCREENING.md section 16.6).
 
 Then the after-unlock stage (single):
 
@@ -707,20 +711,21 @@ Then the after-unlock stage (single):
 cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/ai-review.js --mode single --job Chef --title "Retail Cashier" --source caterer --run-id install-canary --with-codes --snippet "Retail Cashier | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Retail Cashier Jan 2021 - Current Test Store Ltd Key Responsibilities Till operation, stock replenishment"
 ```
 
-Expect: exit 0; one line `{"approved":false,"reason":"...","reasonCode":"reject_..."}`.
+Expect: exit 0; one line `{"approved":false,"reason":"...","reasonCode":"reject_..."}`. If it reads `"approved":true` with `"reasonCode":"sys_review_policy_approve"`, Jev was not sure enough after the unlock and the review policy (approve after the unlock) decided: that is not a failure, but record it and tell the owner.
 
 If it fails:
 
 | Symptom | Meaning | Action |
 |---|---|---|
-| exit 3, output begins `API_UNAVAILABLE:` | the service could not be reached or refused the key | report the text after the colon; do not repeat more than once |
-| batch: `canary-yes` not approved, or `canary-no` approved | the model is judging wrongly | STOP and report both lines |
-| single: `"reasonCode":"sys_fail_open"` | the model's answer was unusable and the fallback approved it | STOP and report |
+| exit 3, output begins `API_UNAVAILABLE:` | Jev could not be reached, or the gateway refused the key or the model | report the text after the colon (`restricted access to this model` means the owner must allow `typesafe-ai/jev` on the Vercel team); do not repeat more than once |
+| batch: `canary-yes` rejected with `sys_review_policy_reject` | Jev was not sure about an obvious candidate: the placeholder thresholds or Jev itself | STOP and report both lines |
+| batch: `canary-no` approved | Jev approved an unrelated candidate | STOP and report both lines |
+| batch: a canary card has `reasonCode` `sys_invalid_result` | Jev's answer for that card was unusable twice; the card is left undecided, not rejected | repeat the batch call once; if it comes back again STOP and report both lines |
 | exit 1 with `FATAL` | usage or input problem | report the text |
 
-### 7.4 One real call to Jev (OPERATOR)
+### 7.4 What Jev answered, from the private log (OPERATOR)
 
-Jev already answered in parallel to the calls in 7.3 (engine `jev_shadow`) and its answers are in the private shadow log. Read only the Jev status of the canary rows:
+The calls in 7.3 wrote one row each to the private shadow log. Read only the Jev status of the canary rows:
 
 ```
 grep -h '"runId":"install-canary"' /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -c '"jev":{"status":"ok"'
@@ -732,7 +737,13 @@ Expect: `3` (two batch rows and one single row). Anything from 1 to 2 is a parti
 grep -h '"runId":"install-canary"' /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -o '"jev":{[^}]*}'
 ```
 
-A Jev failure is NOT a blocker for going live (in `jev_shadow` it changes no decision), but record it and tell the owner: `http_403` may mean the AI Gateway account was restricted, `http_402` no credits, `timeout` slowness. Without working Jev answers the later calibration (step 13) has no data.
+Then, in every case, show who decided each row (an engine name and a code, no personal data):
+
+```
+grep -h '"runId":"install-canary"' /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -o '"used":{[^}]*}'
+```
+
+Expect three lines, each `"engine":"jev"` (Jev decided) or `"engine":"policy"` with a `sys_review_policy_` code (the review policy decided); report which. A line with `"engine":"system"` and a `sys_invalid_result` code means Jev's answer for that card was unusable (the card is left undecided, not rejected): report it. A Jev failure IS a blocker in this engine: without Jev nothing can be screened (the tool exits 3 and the pipeline halts). `http_403` means the AI Gateway account or the Vercel team restricts the model (the owner must allow `typesafe-ai/jev`), `http_402` no credits, `timeout` slowness.
 
 ### 7.5 Zero data retention canary (OPERATOR)
 
@@ -750,11 +761,11 @@ Read the result:
 
 | Result | Meaning | Recommendation to the owner |
 |---|---|---|
-| exit 0 and the second command shows `"status":"ok"` | zero data retention works for the language model and for Jev | the owner may set `SCREEN_ZDR=1` (see `docs/SCREENING.md` section 12) |
-| exit 0 but Jev shows `"status":"error"` with `http_400` | no zero-retention provider exists for Jev; the language model has one | leave `SCREEN_ZDR` unset: setting it would make every Jev call fail |
-| exit 3 (`API_UNAVAILABLE`) | no zero-retention provider for the language model on this account | leave `SCREEN_ZDR` unset and tell the owner data goes to US processors without a zero-retention promise |
+| exit 0 and the second command shows `"status":"ok"` | zero data retention works for Jev | the owner may set `SCREEN_JEV_ZDR=1` (or `SCREEN_ZDR=1`, the same thing here; see `docs/SCREENING.md` section 12) |
+| exit 3 (`API_UNAVAILABLE`) with `no_providers_available` or `HTTP 400` in the text, and the second command shows `"status":"error"` with `http_400` | no zero-retention provider exists for Jev | leave `SCREEN_ZDR` and `SCREEN_JEV_ZDR` unset: setting either would make every screening call fail (exit 3, halt) and tell the owner data goes to a US processor without a zero-retention promise |
+| exit 3 with any other text | Jev failed for another reason | report the text; do not draw a conclusion about zero data retention |
 
-This is a HUMAN decision (H9a). Do not set `SCREEN_ZDR` yourself. Record the result in the progress table.
+This is a HUMAN decision (H9a). Do not set `SCREEN_ZDR` or `SCREEN_JEV_ZDR` yourself. Record the result in the progress table.
 
 ### 7.6 Clean up
 
@@ -909,7 +920,7 @@ Take the first path listed (the newest) and print it with `cat`. Expect, among o
 - `ENVPROBE AI_GATEWAY_API_KEY in the process environment: absent` (correct: the code reads the profile file itself)
 - `ENVPROBE_DONE`
 
-Then run the job a second time (`hermes -p resourcer cron run resourcer-envprobe`), wait a minute, read the newest output the same way. Expect `DETACHED-SLEEPER pid=... SURVIVED the end of the previous run`. If it says `GONE`, a process started by one cron run does not outlive that run: the supervisor still works, but a run that outlasts one 55-minute tick would be killed. Report it to the owner as a known risk (`docs/ACCEPTANCE.md` item SU03).
+Then run the job a second time (`hermes -p resourcer cron run resourcer-envprobe`), wait a minute, read the newest output the same way. Expect `DETACHED-SLEEPER pid=... SURVIVED the end of the previous run`. If it says `GONE`, a process started by one cron run does not outlive that run (this was measured on the instance, and the supervisor is built for it): the tick launches no new run after minute 38 and waits for the run it launched, so a run that ends by minute 56 completes; only a run that cannot finish by minute 56 is ended cleanly and retried later (alert `tick-hard-cap`, `docs/OPERATIONS.md` section 2). Report it to the owner as a known risk (`docs/ACCEPTANCE.md` item SU03).
 
 STOP and report if `match=NO` (HERMES_HOME differs), if `temp-dir=... writable=NO`, or if `TMPDIR` is set and not writable. An unset `TMPDIR` is not a failure by itself.
 
@@ -1381,9 +1392,9 @@ Expect, after the run: `node /opt/data/profiles/resourcer/workspace/resourcer/sc
 
 Alerts you may see: `reed-human-login` (a bot check again: repeat 12.2), `reed-credentials` (owner fixes the file), `reed-451` (repeat 12.2 with `--clean`, and check the egress country).
 
-## 13. Promoting the small model (Jev) later
+## 13. Reading how Jev is doing (and what is not promoted)
 
-Not part of the install. The language model decides today; Jev only takes notes (`SCREEN_ENGINE=jev_shadow`). After a few weeks of data, the report in `docs/SCREENING.md` section 9 (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`) says GO, NO-GO or INSUFFICIENT DATA against a written gate. Switching is one setting and the owner's decision alone; the operator only produces the report. The canary rows written in step 7 carry the run ids `install-canary` and `install-canary-zdr` and can be ignored.
+Not part of the install. Jev decides alone (`SCREEN_ENGINE=jev_only`); there is no language model, so there is nothing to promote and no go/no-go gate: the report says "not applicable in jev_only mode". What the operator can produce after a few weeks is the Jev-only report of `docs/SCREENING.md` section 16.7 (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`): the lane distribution, the approval rate by role and source, and above all the share of decisions taken by the review policy instead of a confident Jev answer. Changing the two review-policy switches or the thresholds is the owner's decision alone. The canary rows written in step 7 carry the run ids `install-canary` and `install-canary-zdr` and can be ignored.
 
 ## Appendix A. What this install changes on the instance
 

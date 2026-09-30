@@ -91,7 +91,7 @@ database. Alert `low-memory`: another profile is using the memory, it clears its
 The pipeline stops starting runs when AI screening cannot answer, and holds territories so nothing is consumed. A red banner
 shows on the dashboard. It clears by itself within about a minute of the gateway answering. Read it with
 `node scripts/pipeline-halt-cli.js get`. Causes and owner actions: gateway unreachable (wait, check the Vercel status page),
-`screening gateway auth failed` (the key was revoked or is wrong: the owner replaces `AI_GATEWAY_API_KEY`), `credits exhausted`
+`screening gateway auth failed` (the key was revoked or is wrong: the owner replaces `AI_GATEWAY_API_KEY`; if the detail says the team has restricted access to a model, the owner allows `typesafe-ai/jev` on the Vercel team), `credits exhausted`
 (the owner tops up the AI Gateway balance). Clear by hand with `node scripts/pipeline-halt-cli.js clear` only after the cause is
 fixed; if it comes back within two minutes, leave it and report.
 
@@ -132,6 +132,7 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | runner-busy | the runner answered "busy" for half an hour while the queue was ready | look for a stale `runtime/browser.lock` or `runs/*.run-lock` after `--status` shows no run; report before deleting anything |
 | log-flood | a log grew past its cap; the run was cut and will retry | read the tail of the named log; report the pattern; never delete logs by hand |
 | run-failures, run-killed, runner-crashed | runs failing, killed at 70 min, or dying | read the last 40 lines of `logs/watchdog-runner.jsonl`; report the pattern; do not edit |
+| tick-hard-cap | a run was still going at minute 56 of its tick and was ended cleanly; its territory is retried | one alone is harmless; if it repeats, report it (the owner may lower `RESOURCER_LAUNCH_CUTOFF_MIN`); do not edit |
 | db-unfit | candidates.db missing, empty or corrupt; nothing starts | HUMAN decides the restore: `node scripts/backup-db.js --list`, restore per the skill |
 | sqlite-driver | the database driver cannot load | HUMAN/owner: the install must be repaired |
 | low-memory | not enough free memory to start a run | wait |
@@ -151,7 +152,7 @@ Any key not in this table: read its text, report it, and only run a command that
 ## What only the owner can do
 
 Enter or rotate any secret; approve a dangerous command prompt; read the Caterer verification e-mail; do the Reed human login;
-change `RESOURCER_SOURCES` (Reed on), `SCREEN_ENGINE` or `SCREEN_CALIBRATED` (screening promotion); set the alert channel; press restart
+change `RESOURCER_SOURCES` (Reed on), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
 in the portal; buy credits; accept the privacy and data protection steps in docs/SECURITY.md; change code; tear down the old system.
 
 ## What you may do on your own

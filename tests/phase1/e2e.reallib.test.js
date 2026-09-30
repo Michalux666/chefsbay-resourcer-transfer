@@ -14,7 +14,6 @@ const callsOf = (calls, tool) => calls.filter((c) => c.tool === tool);
 const GATEWAY_ENV = (g) => ({
   SCREEN_GATEWAY_ORIGIN: g.origin,
   AI_GATEWAY_API_KEY: 'fake-test-key',
-  SCREEN_ENGINE: 'llm',
   SCREEN_BACKOFF_BASE_MS: '5',
   SCREEN_CACHE_TTL_SEC: '0',
   SCREEN_RETRY_AFTER_CAP_MS: '50',
@@ -114,4 +113,39 @@ test('real ai-review: a recovering gateway (two failures then success) goes thro
   assert.strictEqual(r.code, 0, r.stdout + r.stderr);
   assert.ok(!r.stdout.includes('STOPPING Phase 1'));
   assert.deepStrictEqual(h.queueOf(home).candidates.map((c) => c.id), ['31']);
+});
+
+const SOUS = (n, tail) => card(n, { snippet: `1. Alex Sample Sous Chef | Ilkley, LS29 8AB Unlock candidate Never unlocked Recent experience Other CV snippets Sous Chef Jan 2021 - Current Test Kitchen Ltd Key Responsibilities cooking ${tail}` });
+
+test('real ai-review, default engine: a card whose Jev answer stays unusable is NOT DECIDED (screened again later, never booked as a rejection); the others go on', async (t) => {
+  const g = await startFakeGateway();
+  t.after(() => g.close());
+  g.setMode({ llm: 'restricted' });
+  const sc = { pages: { 1: { cards: [SOUS(41, '[[APPROVE]]'), SOUS(42, '[[APPROVE]]'), SOUS(43, '[[APPROVE]]'), SOUS(44, '[[J:MALFORMED]]'), SOUS(45, '[[J:MALFORMED]]')] }, 2: { cards: [] } } };
+  const home = h.makeHome(sc, { real: ['ai-review', 'browser'] });
+  t.after(() => h.cleanup(home));
+  const r = await h.runPhase1(home, h.baseArgs(), { env: Object.assign({}, GATEWAY_ENV(g), browserEnv(home)), timeoutMs: 120000 });
+  assert.strictEqual(r.code, 0, r.stdout + r.stderr);
+  assert.strictEqual(r.stdout.split('\n').filter((l) => l.includes('NOT DECIDED')).length, 2, r.stdout);
+  assert.ok(!r.stdout.includes('REJECTED pre-unlock'), r.stdout);
+  const dbCalls = callsOf(r.calls, 'candidates-db').map((c) => [c.cmd].concat(c.args).join(' '));
+  assert.ok(!dbCalls.some((l) => /^(seen|add|reject-title) 4[45]( |$)/.test(l)), 'the two undecided cards were not booked: ' + dbCalls.join(' | '));
+  assert.strictEqual(callsOf(r.calls, 'caterer-unlock').map((c) => c.id).join(','), '41,42,43');
+  assert.strictEqual(g.stats().calls['POST /v1/chat/completions'] || 0, 0, 'no chat-completions request');
+});
+
+test('real ai-review: settings warnings (a leftover engine, a mistyped policy switch) reach the phase 1 run log, and nothing but Jev is called', async (t) => {
+  const g = await startFakeGateway();
+  t.after(() => g.close());
+  g.setMode({ llm: 'restricted' });
+  const home = h.makeHome({ pages: { 1: { cards: [SOUS(51, '[[APPROVE]]')] }, 2: { cards: [] } } }, { real: ['ai-review', 'browser'] });
+  t.after(() => h.cleanup(home));
+  const env = Object.assign({}, GATEWAY_ENV(g), browserEnv(home), { SCREEN_ENGINE: 'jev_shadow', SCREEN_REVIEW_PRE: 'aprove' });
+  const r = await h.runPhase1(home, h.baseArgs(), { env, timeoutMs: 120000 });
+  assert.strictEqual(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /WARN screening config: engine 'jev_shadow' calls a language model/);
+  assert.match(r.stdout, /WARN screening config: decide\.reviewPolicy\.preUnlock must be reject or approve; using reject/);
+  assert.match(r.stdout, /WARN screening: engine jev_only is running on UNCALIBRATED/);
+  assert.deepStrictEqual(h.queueOf(home).candidates.map((c) => c.id), ['51']);
+  assert.strictEqual(g.stats().calls['POST /v1/chat/completions'] || 0, 0, 'no chat-completions request');
 });

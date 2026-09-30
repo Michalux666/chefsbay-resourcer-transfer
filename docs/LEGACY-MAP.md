@@ -77,7 +77,7 @@ Same name under `resourcer/` unless noted: `candidates-db.js`; `scripts/applying
 | Old layer or rule | Where it lives now |
 |---|---|
 | 1. Watchdog timeout bump for the model CLI subprocess (58 minutes) | Gone with the model CLI. Replaced by explicit bounds: the 55-minute tick, the 70-minute run ceiling (runner timer + tick backstop), per-child timeouts in phase 1 (`PHASE1_*_TIMEOUT_SEC`), per-call screening timeouts (60 s language model, 15 s Jev, 600 s batch deadline). |
-| 2. Cross-provider fallback chain | Not carried; **halt is the fallback** (docs/DECISIONS.md X6). Backup model `SCREEN_LLM_BACKUP_MODEL` on the same gateway; Jev failure never blocks in shadow mode. |
+| 2. Cross-provider fallback chain | Not carried; **halt is the fallback** (docs/DECISIONS.md X6). In `jev_only` (the default since 2026-09-30) there is no second model at all: a Jev failure is unavailable, so it halts. The older engines keep a backup model `SCREEN_LLM_BACKUP_MODEL` on the same gateway, and a Jev failure never blocks in shadow mode. |
 | 3. Heartbeat wrap around AI screening (20 s poll, file-redirected output) | `phase1/screen.js`: `HEARTBEAT:` lines every `PHASE1_HEARTBEAT_SEC` (20 s), child output not piped, batch timeout counted as "screening unavailable". |
 | 4. `Invoke-AgentBrowserCmd` WSL timeout wrapper | `lib/browser.js` `run()`: argument array, hard timeout that kills the process group, FIFO, cross-process 5 s navigation gap, single-attempt clamp for state-changing commands; phase 1 per-call budgets 90/90/60/20/60 s. |
 | 5. Networkidle settle sleep and silent-zero guard | `phase1/extract.js` and `run.js`: `PHASE1_SETTLE_MS` sleep after a networkidle timeout, silent-zero abort on page 1, corrected empty-result probe. |

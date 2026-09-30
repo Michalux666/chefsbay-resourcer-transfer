@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/e2e-linux.sh - the end-to-end rehearsal of the whole resourcer on Linux, fakes only. ONE command runs everything:
 #
-#     bash tests/e2e-linux.sh                 all scenarios (about 16 minutes), then a summary table
+#     bash tests/e2e-linux.sh                 all scenarios (about 18 minutes), then a summary table
 #     bash tests/e2e-linux.sh --only 02,05    just those scenarios
 #     bash tests/e2e-linux.sh --unit          also the whole unit suite afterwards (node --test "tests/**/*.test.js"; better-sqlite3 and E2E_PYTHON are made visible so only the real-Chromium tests skip)
 #     bash tests/e2e-linux.sh --keep          keep every simulated profile under $E2E_ROOT/worlds for inspection
@@ -21,7 +21,7 @@
 #
 # Scenarios (tests/e2e/NN-*.e2e.js): 01 install path, 02 happy path, 03 screening outage, 04 Caterer session paths,
 # 05 kill -9 recovery, 06 suspend/resume, 07 Reed off/on, 08 dashboard, 09 backup, 10 retention and maintenance,
-# 11 secrets hygiene, 12 missing database guard.
+# 11 secrets hygiene, 12 missing database guard, 13 the Jev-only default engine.
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
 # at $E2E_VENV, default ~/hermes-sim-venv, and filled with pip), E2E_SEED (random-kill seed, default 20260929),

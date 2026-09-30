@@ -70,6 +70,8 @@ class LlmClient {
    * @param {{cfg:object, log?:(line:string)=>void, rng?:()=>number}} deps
    */
   constructor(deps) {
+    // the one place every chat-completions request goes through: config.load already forces jev_only, this is the second lock
+    if (!deps.cfg || !deps.cfg.allowLlm) throw new Error('a language model is not allowed through the AI Gateway (SCREEN_ALLOW_LLM is not set)');
     this.cfg = deps.cfg;
     this.log = deps.log || (() => {});
     this.rng = deps.rng;

@@ -1,7 +1,13 @@
 'use strict';
-// The screening engine. Three selectable engines (config engine / SCREEN_ENGINE):
+// The screening engine. Four selectable engines (config engine / SCREEN_ENGINE):
+//   jev_only    (default) Jev is the only model, and no request to any chat-completions endpoint is ever
+//               made. approve and reject lanes are final; the review lane, an injection flag and an empty card
+//               are resolved by decide.reviewPolicy (reasonCode sys_review_policy_*). An answer that stays unusable
+//               is sys_invalid_result before the unlock (left undecided by the caller) and the policy after it.
+//               A Jev outage is ScreeningUnavailable, never a fallback and never a reject.
+//               The other three engines need allowLlm (SCREEN_ALLOW_LLM=1); config.load forces jev_only without it.
 //   llm         the normal LLM decides, using the legacy recruiter prompt (shared rubric).
-//   jev_shadow  (default) the LLM decides exactly as in llm; Jev answers in parallel and is ONLY
+//   jev_shadow  the LLM decides exactly as in llm; Jev answers in parallel and is ONLY
 //               LOGGED (shadow/screening-*.jsonl). Jev can never change a decision, an exit code or
 //               (beyond a small bounded grace wait) the run time.
 //   jev         Jev first: atomic questions -> decide() lanes. approve and reject are final; review,
@@ -38,9 +44,11 @@ const { DecisionCache } = require('./cache');
 const { ShadowLog } = require('./shadow');
 const { Limiter, mapPool, settleWithin } = require('./pool');
 const streak = require('./streak');
+const { validateProvider, consult: consultSecondOpinion } = require('./second-opinion');
 
 const ERRORS_LOG = path.join(paths.LOGS, 'errors.jsonl');
 const DEGRADED_FILE = path.join(paths.RUNTIME, 'screening-degraded.json');
+const UNCALIBRATED_FILE = path.join(paths.RUNTIME, 'screening-uncalibrated-warned.json');
 
 function isNum(x) { return typeof x === 'number' && Number.isFinite(x); }
 function clamp01(x) { return Math.min(1, Math.max(0, x)); }
@@ -85,6 +93,8 @@ class Run {
     this.jevFailures = 0;
     this.primaryRequestErrors = 0;
     this.jevAttempts = 0;
+    this.policyCount = 0;
+    this.policy = { reject: 0, approve: 0, byWhy: {} };
     this.lastErr = null;
     this.attempted = new Set();
     this.used = new Map();
@@ -112,8 +122,11 @@ function createEngine(cfg, deps) {
   const log = d.log || (() => {});
   const rng = d.rng || Math.random;
   const eff = cfg.engineEffective;
-  const llmClient = d.llm || new LlmClient({ cfg, log, rng });
-  const jevClient = d.jev || new JevClient({ cfg, log: eff === 'jev' ? log : () => {}, rng });
+  const only = eff === 'jev_only';
+  const llmClient = only ? null : (d.llm || new LlmClient({ cfg, log, rng }));
+  const jevClient = d.jev || new JevClient({ cfg, log: eff === 'jev' || only ? log : () => {}, rng });
+  const secondOpinion = only ? validateProvider(d.secondOpinion) : null;
+  let uncalibratedWarned = false;
   const cache = d.cache || new DecisionCache({ ttlSec: cfg.cache.ttlSec, maxEntries: cfg.cache.maxEntries });
   const shadow = d.shadow || new ShadowLog({ enabled: cfg.shadow.enabled });
   const errorLog = d.errorLog || appendError;
@@ -121,7 +134,7 @@ function createEngine(cfg, deps) {
   const rubricOpts = { tierMode: cfg.tierMode, staleProfileClause: cfg.rubric.staleProfileClause, insufficientEvidence: cfg.rubric.insufficientEvidence };
 
   const sig = sha16([
-    eff, cfg.llm.model, cfg.llm.backupModel || '', cfg.jev.model, rubric.variantOf(rubricOpts), cfg.tierMode,
+    eff, only ? '' : cfg.llm.model, only ? '' : (cfg.llm.backupModel || ''), cfg.jev.model, secondOpinion ? secondOpinion.name : '', rubric.variantOf(rubricOpts), cfg.tierMode,
     Q.QUESTIONS_VERSION, JSON.stringify(cfg.decide), JSON.stringify(cfg.stage1.rules),
     cfg.redact.enabled ? 'r1' : 'r0',
   ].join('|'));
@@ -163,6 +176,7 @@ function createEngine(cfg, deps) {
       rv: rubric.variantOf(rubricOpts),
       qv: Q.QUESTIONS_VERSION,
       tm: cfg.tierMode,
+      ...(only ? { cal: !!cfg.decide.calibration.calibrated } : {}),
     };
   }
 
@@ -219,7 +233,10 @@ function createEngine(cfg, deps) {
       last = r;
       if (r.kind !== 'invalid') break;
     }
-    return { status: last.kind === 'invalid' ? 'invalid' : 'error', kind: last.kind, code: last.code, latencyMs: Date.now() - t0, attempts: last.attempts || 1 };
+    const failed = { status: last.kind === 'invalid' ? 'invalid' : 'error', kind: last.kind, code: last.code, latencyMs: Date.now() - t0, attempts: last.attempts || 1 };
+    // not enumerable: the caller needs the error, the shadow row must never carry a gateway message
+    if (last.kind !== 'invalid') Object.defineProperty(failed, 'err', { value: new HttpFailure(last.kind, last.message, { status: last.status, attempts: last.attempts }) });
+    return failed;
   }
 
   function llmMessages(run, prep) {
@@ -232,6 +249,7 @@ function createEngine(cfg, deps) {
 
   // LLM decision for one candidate: primary model (retrying unusable output), then the backup model.
   async function runLlm(run, prep, signal, opts) {
+    if (only) throw new Error('internal: the LLM path is disabled in jev_only');
     const o = opts || {};
     // a primary model the gateway keeps refusing as a bad request (retired or misspelt slug) is skipped
     // for the rest of the run once it has failed twice in a row, so every candidate does not pay for it
@@ -289,11 +307,97 @@ function createEngine(cfg, deps) {
     if (model === cfg.jev.model) return 0;
     if (model === cfg.llm.model) return 1;
     if (model === cfg.llm.backupModel) return 2;
+    if (secondOpinion && model === secondOpinion.name) return 6;
+    if (model === 'policy') return 8;
     if (model === 'rules') return 9;
     return 5;
   }
 
   function success(run, usable) { run.failStreak = 0; run.successes++; if (usable) run.usable++; }
+
+  function tally(run, dec) {
+    if (!reasons.isPolicyCode(dec.reasonCode)) return;
+    const side = dec.approved ? 'approve' : 'reject';
+    const why = dec.policyWhy || 'cached';
+    run.policyCount++;
+    run.policy[side]++;
+    run.policy.byWhy[why] = (run.policy.byWhy[why] || 0) + 1;
+  }
+
+  function warnUncalibrated(ctx) {
+    if (!only || uncalibratedWarned || cfg.decide.calibration.calibrated) return;
+    uncalibratedWarned = true;
+    const runId = ctx.runId ? String(ctx.runId).slice(0, 80) : '';
+    try {
+      if (runId) {
+        const prev = fsx.readJson(UNCALIBRATED_FILE, null);
+        if (prev && prev.runId === runId) return;
+        fsx.writeJsonAtomic(UNCALIBRATED_FILE, { runId, at: new Date().toISOString() }, 0o600);
+      }
+    } catch (e) { /* the warning is still worth more than the de-duplication */ }
+    log('WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds (decide.stage1 and decide.stage2 are not fitted to Chefs Bay data); watch the policy share in the summary line and see docs/SCREENING.md section 16.');
+  }
+
+  // Second opinion (extension point, no provider ships): only for a valid but uncertain Jev answer or an unusable one.
+  async function askSecondOpinion(run, prep, row, why, jr) {
+    const req = { job: run.ctx.job, stage: run.stage, searchTier: run.searchTier, snippet: prep.snippet, title: prep.title, reviewReason: (jr && jr.reviewReason) || null, candidateId: prep.id };
+    const r = await consultSecondOpinion(secondOpinion, req, { signal: run.abort.signal });
+    row.second = { provider: secondOpinion.name, status: r.status };
+    if (r.status !== 'ok') return null;
+    run.noteUsed(secondOpinion.name, 6);
+    return decisionOf('second_opinion', { approved: r.answer.approved, reasonCode: reasons.normaliseCode(r.answer.reasonCode, r.answer.approved), confidence: r.answer.confidence, model: secondOpinion.name, job: run.ctx.job });
+  }
+
+  // An unusable answer is a fault, not an unsure card: before the unlock it is left undecided (the caller screens it again), after it the policy applies.
+  async function resolveByPolicy(run, prep, row, why, jr) {
+    if (secondOpinion && (why === 'review' || why === 'invalid')) {
+      const so = await askSecondOpinion(run, prep, row, why, jr);
+      if (so) return so;
+    }
+    if (why === 'invalid' && run.stage === 'pre_unlock') {
+      return decisionOf('system', { approved: run.failOpen, reasonCode: run.failOpen ? 'sys_fail_open' : 'sys_invalid_result', model: 'none', job: run.ctx.job });
+    }
+    const side = run.stage === 'post_unlock' ? cfg.decide.reviewPolicy.postUnlock : cfg.decide.reviewPolicy.preUnlock;
+    const approved = side === 'approve';
+    row.policy = { why, side, ...(jr && jr.reviewReason ? { reviewReason: jr.reviewReason } : {}) };
+    const dec = decisionOf('policy', { approved, reasonCode: approved ? 'sys_review_policy_approve' : 'sys_review_policy_reject', model: 'policy', job: run.ctx.job });
+    dec.policyWhy = why;
+    return dec;
+  }
+
+  // jev_only: Jev decides approve and reject; everything else goes to resolveByPolicy. Jev unavailable trips or fails the run, it never decides anything.
+  async function decideJevOnly(run, prep, row) {
+    const jr = prep.rules.flags.includes('injection') ? { status: 'skipped', why: 'injection' } : await runJev(run, prep, false);
+    row.jev = jr;
+    // decide() reports any exception (a bad ladder in the settings, a missing number) as ANSWER_UNUSABLE: a fault, so it feeds the guards
+    const unusable = jr.status === 'invalid' || (jr.status === 'ok' && jr.reviewReason === 'ANSWER_UNUSABLE');
+    let why;
+    if (jr.status === 'ok' && !unusable) {
+      run.noteUsed(jr.model, rankOf(jr.model));
+      if (jr.lane !== 'review') return decisionOf('jev', { approved: jr.lane === 'approve', reasonCode: jr.reasonCode, confidence: jr.confidence, model: jr.model, job: run.ctx.job });
+      why = jr.reviewReason === 'INJECTION_FLAG' ? 'injection' : 'review';
+    } else if (jr.status === 'skipped') {
+      why = jr.why;
+    } else if (unusable) {
+      why = 'invalid';
+      run.invalid++;
+      run.jevFailures++;
+      errorLog({
+        ts: new Date().toISOString(), context: 'screening_invalid_result', severity: 'warn',
+        error: `Jev answer unusable for candidate ${prep.id} (${jr.code || 'decide'}); ${run.stage === 'pre_unlock' ? 'left undecided, screened again next time' : 'decided by the review policy'}`,
+        detail: `job=${run.ctx.job} stage=${run.stage} model=${cfg.jev.model}`,
+      });
+    } else if (jr.status === 'timeout') {
+      return null;
+    } else {
+      run.jevFailures++;
+      const err = jr.err || new HttpFailure('transient', 'Jev request failed');
+      if (err.hard) run.trip({ detail: err.message, reasonKey: reasonKeyOf(err), status: err.status });
+      else candidateUnavailable(run, err);
+      return null;
+    }
+    return resolveByPolicy(run, prep, row, why, jr);
+  }
 
   function candidateUnavailable(run, err) {
     run.unavailable++;
@@ -316,6 +420,7 @@ function createEngine(cfg, deps) {
       if (hit) {
         run.results[i] = decisionOf('cache', { approved: hit.a === 1, reasonCode: hit.rc, confidence: hit.cf, model: hit.m, job: run.ctx.job, ruleId: hit.r });
         run.noteUsed(hit.m, rankOf(hit.m));
+        tally(run, run.results[i]);
         success(run, true);
         return;
       }
@@ -332,6 +437,9 @@ function createEngine(cfg, deps) {
     let used = null;
     if (prep.rules.enforced) {
       used = decisionOf('rule', { approved: prep.rules.enforced.decision === 'approve', reasonCode: prep.rules.enforced.reasonCode, model: 'rules', job, ruleId: prep.rules.enforced.id });
+    } else if (only) {
+      used = await decideJevOnly(run, prep, row);
+      if (!used) return;
     } else if (eff === 'jev') {
       let jr;
       if (prep.rules.flags.includes('injection')) jr = { status: 'skipped', why: 'injection' };
@@ -344,7 +452,7 @@ function createEngine(cfg, deps) {
       }
     }
 
-    if (!used) {
+    if (!used && !only) {
       const lr = await runLlm(run, prep, run.abort.signal, {});
       row.llm = lr.summary;
       if (lr.ok) {
@@ -371,14 +479,17 @@ function createEngine(cfg, deps) {
 
     row.used = { engine: used.source, approved: used.approved, reasonCode: used.reasonCode, model: used.engineModel, escalated: used.escalated };
     run.results[i] = used;
-    if (used.source !== 'system') {
+    tally(run, used);
+    // an unusable Jev answer decided by the policy is not evidence: it is neither cached nor counted as a usable answer
+    const usable = used.source !== 'system' && used.policyWhy !== 'invalid';
+    if (usable) {
       run.noteUsed(used.engineModel, rankOf(used.engineModel));
       if (ckey) cache.set(ckey, { a: used.approved ? 1 : 0, rc: used.reasonCode, cf: used.confidence, m: used.engineModel, r: used.ruleId || undefined });
     }
-    success(run, used.source !== 'system');
+    success(run, usable);
 
     // audit: a small share of Jev / rule decisions is re-checked by the LLM in the background
-    if (cfg.shadow.enabled && (used.source === 'jev' || used.source === 'rule') && rng() < cfg.shadow.auditRate) {
+    if (!only && cfg.shadow.enabled && (used.source === 'jev' || used.source === 'rule') && rng() < cfg.shadow.auditRate) {
       const sig2 = AbortSignal.any([run.abort.signal, run.shadowAbort.signal]);
       run.compare(() => runLlm(run, prep, sig2, { maxAttempts: 1, timeoutMs: cfg.shadow.auditTimeoutMs })).then(r => { row.llm = r.summary; });
     }
@@ -403,6 +514,10 @@ function createEngine(cfg, deps) {
 
   function labelOf(run) {
     const entries = [...run.used.entries()].sort((a, b) => a[1] - b[1]).map(e => e[0]);
+    if (only) {
+      if (run.attempted.has(cfg.jev.model) && !entries.includes(cfg.jev.model)) entries.unshift(cfg.jev.model);
+      if (run.policyCount > 0 && !entries.includes('policy')) entries.push('policy');
+    }
     if (entries.length) return entries.join('+');
     return run.attempted.size ? attemptedLabel(run) : 'unknown';
   }
@@ -425,12 +540,13 @@ function createEngine(cfg, deps) {
 
   async function execute(ctx, cands, stage, opts) {
     const o = opts || {};
-    if (!cands.length) return { decisions: [], modelLabel: 'unknown', stats: { total: 0, bySource: {}, invalid: 0, jevFailures: 0, engine: eff } };
+    if (!cands.length) return { decisions: [], modelLabel: 'unknown', stats: { total: 0, bySource: {}, invalid: 0, jevFailures: 0, policy: { total: 0, reject: 0, approve: 0, byWhy: {}, share: 0 }, engine: eff } };
     if (!env.get('AI_GATEWAY_API_KEY')) {
       const err = new ScreeningUnavailable('AI_GATEWAY_API_KEY is not set', { reasonKey: 'auth' });
       err.label = 'none';
       throw err;
     }
+    warnUncalibrated(ctx);
     const run = new Run(cfg, cands, ctx, stage, d);
     run.searchTier = getRoleTier(ctx.job, cfg.tierMode);
     run.singleMode = stage === 'post_unlock';
@@ -440,7 +556,7 @@ function createEngine(cfg, deps) {
 
     const timer = setTimeout(() => run.trip({ detail: `AI screening deadline of ${Math.round(cfg.batch.deadlineMs / 1000)}s exceeded`, reasonKey: 'unreachable', status: null }), cfg.batch.deadlineMs);
     try {
-      const concurrency = eff === 'jev' ? Math.max(cfg.jev.concurrency, cfg.llm.concurrency) : cfg.llm.concurrency;
+      const concurrency = only ? cfg.jev.concurrency : (eff === 'jev' ? Math.max(cfg.jev.concurrency, cfg.llm.concurrency) : cfg.llm.concurrency);
       await mapPool(cands.length, concurrency, i => processOne(run, i), () => !!run.fatal);
 
       if (run.comparisons.length) {
@@ -492,7 +608,10 @@ function createEngine(cfg, deps) {
     return {
       decisions: run.results,
       modelLabel: labelOf(run),
-      stats: { total: cands.length, bySource, invalid: run.invalid, jevFailures: run.jevFailures, engine: eff },
+      stats: {
+        total: cands.length, bySource, invalid: run.invalid, jevFailures: run.jevFailures, engine: eff,
+        policy: { total: run.policyCount, reject: run.policy.reject, approve: run.policy.approve, byWhy: run.policy.byWhy, share: Math.round(run.policyCount / cands.length * 1000) / 1000 },
+      },
     };
   }
 

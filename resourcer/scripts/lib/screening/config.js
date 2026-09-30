@@ -8,14 +8,16 @@ const path = require('path');
 const paths = require('../paths');
 const env = require('../env');
 
-const ENGINES = ['llm', 'jev_shadow', 'jev'];
+const ENGINES = ['llm', 'jev_shadow', 'jev', 'jev_only'];
+const REVIEW_SIDES = ['reject', 'approve'];
 const TIER_MODES = ['legacy', 'fixed'];
 
 const CAL = 'CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it.';
 
 const DEFAULTS = {
   version: 1,
-  engine: 'jev_shadow',
+  engine: 'jev_only',
+  allowLlm: false,
   tierMode: 'legacy',
   gateway: { origin: 'https://ai-gateway.vercel.sh' },
   rubric: { staleProfileClause: false, insufficientEvidence: 'legacy' },
@@ -54,6 +56,7 @@ const DEFAULTS = {
   },
   decide: {
     calibration: { calibrated: false, reportId: null, date: null },
+    reviewPolicy: { preUnlock: 'reject', postUnlock: 'approve' },
     stage1: {
       _CALIBRATE: CAL,
       rejectP: 0.9,
@@ -61,7 +64,7 @@ const DEFAULTS = {
       needCorroboration: true,
       notFitMin: 0.6,
       counterRoleMatch: 0.6,
-      injectionP: 0.5,
+      injectionP: 0.7,
       infoFloor: 0.5,
       notStatedP: 0.5,
       noInfoApproveHospP: 0.5,
@@ -77,7 +80,7 @@ const DEFAULTS = {
       needCorroboration: true,
       notFitMin: 0.6,
       counterRoleMatch: 0.6,
-      injectionP: 0.5,
+      injectionP: 0.7,
       infoFloor: 0.5,
       notStatedP: 0.5,
       noInfoApproveHospP: 0.5,
@@ -87,7 +90,7 @@ const DEFAULTS = {
       titleConsistentMin: 0.3,
     },
     ladder: {
-      tier0Titles: ['catering assistant', 'kitchen hand', 'food production'],
+      tier0Titles: ['catering assistant', 'kitchen hand', 'food production', 'waiter', 'waitress', 'server', 'front of house', 'bartender', 'dish washer'],
       _note: 'Candidate title options the Jev tier question can return, grouped per search tier. inBand = acceptable. tooSenior and tooJunior = clear level mismatches. mismatch = other clear mismatches, by reason code. Anything not listed is an uncertain level and goes to review. A search tier is the legacy role tier of the search title (0 unknown/non-kitchen, 1 entry, 2 mid, 3 senior, 4 head).',
       bySearchTier: {
         '0': {
@@ -135,7 +138,7 @@ const DEFAULTS = {
     },
   },
   gate: {
-    _note: 'The promotion gate for switching engine from jev_shadow to jev. See docs/SCREENING.md.',
+    _note: 'The promotion gate for switching engine from jev_shadow to jev (not used by engine jev_only). See docs/SCREENING.md.',
     minAgreement: 0.9,
     maxApprovalDeltaPoints: 3,
     minRowsPerSource: 500,
@@ -219,6 +222,52 @@ function repairSections(cfg, defaults, prefix, warnings) {
   }
 }
 
+const LADDER_SETS = ['inBand', 'tooSenior', 'tooJunior'];
+
+function strList(v) { return Array.isArray(v) && v.every(x => typeof x === 'string'); }
+
+function ladderEntryOk(e) {
+  if (!isPlain(e)) return false;
+  if (!LADDER_SETS.every(k => e[k] === undefined || strList(e[k]))) return false;
+  return e.mismatch === undefined || (isPlain(e.mismatch) && Object.values(e.mismatch).every(strList));
+}
+
+// decide() turns any exception into "answer unusable", so a wrong-typed ladder would send every card of a tier to the review policy.
+function repairLadder(cfg, warnings) {
+  const def = DEFAULTS.decide.ladder;
+  if (!isPlain(cfg.decide.ladder)) {
+    warnings.push('decide.ladder has the wrong type; using the defaults');
+    cfg.decide.ladder = clone(def);
+    return;
+  }
+  const L = cfg.decide.ladder;
+  if (!strList(L.tier0Titles)) {
+    warnings.push('decide.ladder.tier0Titles must be a list of strings; using the defaults');
+    L.tier0Titles = clone(def.tier0Titles);
+  }
+  if (!isPlain(L.bySearchTier)) {
+    warnings.push('decide.ladder.bySearchTier has the wrong type; using the defaults');
+    L.bySearchTier = clone(def.bySearchTier);
+  } else {
+    for (const k of Object.keys(def.bySearchTier)) {
+      if (!ladderEntryOk(L.bySearchTier[k])) {
+        warnings.push(`decide.ladder.bySearchTier.${k} has the wrong shape; using the default for that tier`);
+        L.bySearchTier[k] = clone(def.bySearchTier[k]);
+      }
+    }
+  }
+  if (L.overrides !== undefined && !Array.isArray(L.overrides)) {
+    warnings.push('decide.ladder.overrides must be a list; using the defaults');
+    L.overrides = clone(def.overrides);
+  } else if (Array.isArray(L.overrides)) {
+    L.overrides = L.overrides.filter((ov, i) => {
+      const ok = ladderEntryOk(ov) && (ov.tiers === undefined || Array.isArray(ov.tiers)) && (ov.matchAny === undefined || strList(ov.matchAny));
+      if (!ok) warnings.push(`decide.ladder.overrides[${i}] has the wrong shape; ignored`);
+      return ok;
+    });
+  }
+}
+
 function configFile(getEnv) {
   return getEnv('SCREEN_CONFIG_FILE') || path.join(paths.CONFIG, 'screening.json');
 }
@@ -249,6 +298,7 @@ function load(opts) {
 
   const E = n => getEnv(n);
   if (E('SCREEN_ENGINE')) cfg.engine = String(E('SCREEN_ENGINE')).trim().toLowerCase();
+  if (E('SCREEN_ALLOW_LLM')) cfg.allowLlm = E('SCREEN_ALLOW_LLM');
   if (E('SCREEN_TIER_MODE')) cfg.tierMode = String(E('SCREEN_TIER_MODE')).trim().toLowerCase();
   if (E('SCREEN_GATEWAY_ORIGIN')) cfg.gateway.origin = String(E('SCREEN_GATEWAY_ORIGIN')).trim();
   if (E('SCREEN_LLM_MODEL')) cfg.llm.model = String(E('SCREEN_LLM_MODEL')).trim();
@@ -273,6 +323,8 @@ function load(opts) {
   if (E('SCREEN_LLM_ZDR')) cfg.llm.zeroDataRetention = E('SCREEN_LLM_ZDR');
   if (E('SCREEN_JEV_ZDR')) cfg.jev.zeroDataRetention = E('SCREEN_JEV_ZDR');
   if (E('SCREEN_CALIBRATED')) cfg.decide.calibration.calibrated = E('SCREEN_CALIBRATED');
+  if (E('SCREEN_REVIEW_PRE')) cfg.decide.reviewPolicy.preUnlock = String(E('SCREEN_REVIEW_PRE')).trim().toLowerCase();
+  if (E('SCREEN_REVIEW_POST')) cfg.decide.reviewPolicy.postUnlock = String(E('SCREEN_REVIEW_POST')).trim().toLowerCase();
 
   // validation and coercion: a bad value never crashes screening, it falls back to a safe default
   cfg.engine = String(cfg.engine === undefined || cfg.engine === null ? '' : cfg.engine).trim().toLowerCase();
@@ -280,6 +332,12 @@ function load(opts) {
   if (!ENGINES.includes(cfg.engine)) {
     warnings.push(`unknown engine '${String(cfg.engine).slice(0, 30)}'; using ${DEFAULTS.engine}`);
     cfg.engine = DEFAULTS.engine;
+  }
+  cfg.allowLlm = bool(cfg.allowLlm, false);
+  // The AI Gateway carries Jev only (docs/DECISIONS.md OD-I): a leftover or mistyped engine must not send a chat request there.
+  if (cfg.engine !== 'jev_only' && !cfg.allowLlm) {
+    warnings.push(`engine '${cfg.engine}' calls a language model, which the AI Gateway does not carry here (Jev only); using jev_only. Only SCREEN_ALLOW_LLM=1 lifts this, and only if the Vercel team allows that model.`);
+    cfg.engine = 'jev_only';
   }
   if (!TIER_MODES.includes(cfg.tierMode)) {
     warnings.push(`unknown tierMode '${String(cfg.tierMode).slice(0, 30)}'; using ${DEFAULTS.tierMode}`);
@@ -362,6 +420,14 @@ function load(opts) {
   S.retentionDays = Math.round(num(S.retentionDays, 180, 1, 3650));
 
   cfg.decide.calibration.calibrated = bool(cfg.decide.calibration.calibrated, false);
+  const RP = cfg.decide.reviewPolicy;
+  for (const [k, def] of [['preUnlock', 'reject'], ['postUnlock', 'approve']]) {
+    const v = String(RP[k] === undefined || RP[k] === null ? '' : RP[k]).trim().toLowerCase();
+    if (!REVIEW_SIDES.includes(v)) {
+      warnings.push(`decide.reviewPolicy.${k} must be reject or approve; using ${def}`);
+      RP[k] = def;
+    } else RP[k] = v;
+  }
   for (const stage of ['stage1', 'stage2']) {
     const D = cfg.decide[stage];
     for (const [k, def] of Object.entries(DEFAULTS.decide[stage])) {
@@ -374,6 +440,7 @@ function load(opts) {
       } else D[k] = n;
     }
   }
+  repairLadder(cfg, warnings);
   const G = cfg.gate;
   for (const k of ['maxJevApproveLlmReject', 'maxJevRejectLlmApprove', 'maxJevRejectOfLlmApproved', 'minLaneAgreementLo', 'minLaneCoverage', 'minAgreement']) G[k] = num(G[k], DEFAULTS.gate[k], 0, 1);
   G.requiredSources = Array.isArray(G.requiredSources) ? G.requiredSources.filter(x => x === 'caterer' || x === 'reed') : [];
@@ -390,7 +457,14 @@ function load(opts) {
     }
   }
 
+  // The gateway carries Jev only in this engine: a model name that is not Jev's must never reach it.
+  if (cfg.engine === 'jev_only' && !/jev/i.test(cfg.jev.model)) {
+    warnings.push(`jev.model '${cfg.jev.model.slice(0, 40)}' is not a Jev model; engine jev_only calls ${DEFAULTS.jev.model} only`);
+    cfg.jev.model = DEFAULTS.jev.model;
+  }
+
   // Safety: the Jev-first engine only decides once the thresholds are marked calibrated.
+  // jev_only is the owner's explicit choice and never downgrades: the engine logs one warning per run instead.
   cfg.engineRequested = cfg.engine;
   cfg.engineEffective = cfg.engine;
   if (cfg.engine === 'jev' && !cfg.decide.calibration.calibrated) {
@@ -404,4 +478,4 @@ function load(opts) {
   return cfg;
 }
 
-module.exports = { DEFAULTS, ENGINES, TIER_MODES, load, merge, stripUnderscore, num, bool };
+module.exports = { DEFAULTS, ENGINES, REVIEW_SIDES, TIER_MODES, load, merge, stripUnderscore, num, bool };

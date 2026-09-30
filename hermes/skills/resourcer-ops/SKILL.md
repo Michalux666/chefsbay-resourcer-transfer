@@ -70,8 +70,8 @@ node /opt/data/profiles/resourcer/workspace/tools/screening-report.js --strict
 node /opt/data/profiles/resourcer/workspace/tools/screening-report.js --json
 ```
 
-Reads `R/shadow/screening-*.jsonl` and prints how often the small model (Jev) agrees with the language model, and whether it may be promoted.
-`--strict` exits 0 GO, 1 NO-GO, 2 INSUFFICIENT DATA. Promotion to `SCREEN_ENGINE=jev` is the owner's decision (docs/SCREENING.md); you only report
+Reads `R/shadow/screening-*.jsonl`. In the default engine `jev_only` (Jev alone, no language model) it prints the Jev lane distribution, approval rate by role and source, and the share of decisions taken by the review policy; the promotion verdict is "not applicable in jev_only mode".
+`--strict` exits 3 (not applicable) in `jev_only`, and 0 GO, 1 NO-GO, 2 INSUFFICIENT DATA for the older engines. Changing the engine or the review policy (`SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST`) is the owner's decision (docs/SCREENING.md section 16); you only report
 the numbers and the verdict. Do not use `--export-sample` unless the owner asks: it writes redacted candidate cards to a file.
 
 ## 5. Backups

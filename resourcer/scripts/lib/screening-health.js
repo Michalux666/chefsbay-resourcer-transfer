@@ -3,9 +3,11 @@
 //   check({ deep:false })  cheap: is the AI Gateway origin reachable (DNS + TCP, milliseconds) and is
 //                          a key configured. Safe to run on every tick.
 //   check({ deep:true })   a real check: GET /v1/credits (auth + balance, no tokens), then one tiny
-//                          canary call to the ENGINE THAT DECIDES (the LLM; also Jev when the engine
-//                          is 'jev'). Costs a fraction of a cent and takes about a second (the legacy
-//                          probe took 73-103 s). Run it only while halted, at most once a minute.
+//                          canary call to the ENGINE THAT DECIDES: in jev_only (the default) ONLY Jev
+//                          (the LLM canary is skipped and no chat-completions request is made); otherwise
+//                          the LLM, plus Jev when the engine is 'jev'. Costs a fraction of a cent and takes
+//                          about a second (the legacy probe took 73-103 s). Run it only while halted, at
+//                          most once a minute.
 //
 // Returns { ok, reason, ms, level, key, detail, engines, degraded }. reason is '' when ok, otherwise
 // one of the FIXED strings in REASONS (put status codes and bodies in `detail`, never in `reason`, so
@@ -34,11 +36,17 @@ const REASONS = {
 
 const REMEDIES = {
   unreachable: 'Check the instance network and DNS, and the AI Gateway status page. Screening resumes automatically once the gateway is reachable.',
-  auth: 'Check AI_GATEWAY_API_KEY in the profile .env; create a new key in the Vercel AI Gateway dashboard if it was revoked. Screening resumes automatically.',
+  auth: 'Check AI_GATEWAY_API_KEY in the profile .env; create a new key in the Vercel AI Gateway dashboard if it was revoked. If the detail says the team has restricted access to a model, allow typesafe-ai/jev on the Vercel team (AI Gateway model access); the gateway carries only that model. Screening resumes automatically.',
   credits: 'Top up the Vercel AI Gateway credits (or raise the key budget). Screening resumes automatically.',
-  error: 'The AI Gateway or the model is failing. Check the AI Gateway status page; if it persists, set SCREEN_LLM_MODEL to the backup model. Screening resumes automatically.',
+  error: 'The AI Gateway or the model is failing. Check the AI Gateway status page; if it persists, tell the owner (SCREEN_LLM_MODEL only matters for the engines llm, jev_shadow and jev; the default jev_only calls Jev alone). Screening resumes automatically.',
   unavailable: 'AI screening failed on several consecutive pages. Check the halt detail; it clears itself when the deep check passes.',
 };
+
+// A 403 that names a restricted model is the owner's Vercel team refusing the model, not a bad key.
+const RESTRICTED_REMEDY = 'The Vercel team has restricted access to this model. Allow typesafe-ai/jev on the Vercel team (AI Gateway model access settings); Jev is the only model this system sends through the gateway. Screening resumes automatically once it is allowed.';
+const RESTRICTED_RE = /restricted/i;
+// Only reachable with SCREEN_ALLOW_LLM on: without it the engine is always jev_only and no chat model is called.
+const LLM_RESTRICTED_REMEDY = 'The Vercel team has restricted access to the language model this engine calls, and the gateway carries Jev only. Run: hermes -p resourcer config set SCREEN_ALLOW_LLM 0 and hermes -p resourcer config set SCREEN_ENGINE jev_only (or allow the model on the Vercel team). Screening resumes automatically.';
 
 // Legacy sentinel values other code matches on.
 const SENTINELS = {
@@ -161,6 +169,14 @@ async function check(opts) {
     const canaryMs = o.timeoutMs && o.timeoutMs > probeMs ? o.timeoutMs : cfg.health.canaryTimeoutMs;
     const eff = cfg.engineEffective;
     const engines = {};
+    if (eff === 'jev_only') {
+      // the LLM is never contacted in this engine: not for the canary either
+      const jevOnly = await jevCanary(cfg, canaryMs);
+      engines.jev = jevOnly.ok ? { ok: true } : { ok: false, ...failFrom(jevOnly.err) };
+      if (jevOnly.ok) return res(true, null, '', { engines, degraded: false });
+      const restricted = engines.jev.key === 'auth' && engines.jev.status === 403 && RESTRICTED_RE.test(engines.jev.detail);
+      return res(false, engines.jev.key, `jev canary failed: ${engines.jev.detail}`, { engines, ...(restricted ? { remedy: RESTRICTED_REMEDY } : {}) });
+    }
     // both canaries at once: the supervisor gives the deep check 90 s in total
     const [llm, jev] = await Promise.all([
       llmCanary(cfg, () => {}, canaryMs),
@@ -178,7 +194,8 @@ async function check(opts) {
 
     if (decideOk) return res(true, null, '', { engines, degraded });
     const bad = !llm.ok ? engines.llm : engines.jev;
-    return res(false, bad.key, `${eff === 'jev' ? 'jev and llm' : 'llm'} canary failed: ${bad.detail}`, { engines });
+    const llmRestricted = !llm.ok && bad.key === 'auth' && bad.status === 403 && RESTRICTED_RE.test(bad.detail);
+    return res(false, bad.key, `${eff === 'jev' ? 'jev and llm' : 'llm'} canary failed: ${bad.detail}`, { engines, ...(llmRestricted ? { remedy: LLM_RESTRICTED_REMEDY } : {}) });
   } catch (e) {
     return res(false, 'error', `health check crashed: ${env.redact(String(e && e.message)).slice(0, 200)}`);
   }
@@ -192,4 +209,4 @@ async function checkScreening(opts) {
   return { ok: r.ok, level: r.level === 'network' ? 'port' : 'auth', reason: r.ok ? null : r.reason, detail: r.ok ? null : r.detail };
 }
 
-module.exports = { check, checkScreening, portOpen, REASONS, REMEDIES, SENTINELS, CANARY_SNIPPET, DEGRADED_FILE };
+module.exports = { check, checkScreening, portOpen, REASONS, REMEDIES, RESTRICTED_REMEDY, LLM_RESTRICTED_REMEDY, SENTINELS, CANARY_SNIPPET, DEGRADED_FILE };

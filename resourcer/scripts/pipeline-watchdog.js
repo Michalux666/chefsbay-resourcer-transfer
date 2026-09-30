@@ -7,7 +7,9 @@
  * (--max-minutes, at most 55) so it never meets the 3600 s cron timeout, holds a PID-liveness lock
  * so an overlapping fire exits at once, and keeps only small persisted state so it is safe to be
  * killed at any instant. While a run is in flight it stays in the foreground (that keeps the
- * instance awake); when nothing is left to do it exits so the instance can idle.
+ * instance awake); when nothing is left to do it exits so the instance can idle. A run cannot
+ * outlive its tick, so the tick stops launching at RESOURCER_LAUNCH_CUTOFF_MIN, waits out the run
+ * it launched and ends a run still going at RESOURCER_TICK_HARD_CAP_MIN.
  *
  * Preserved from the legacy daemon: operating window (Europe/London), one runner at a time,
  * 15-minute back-off after a session-stale exit (11), 70-minute run ceiling, halt probe and
@@ -38,6 +40,15 @@ const C = {
   OPEN_HOUR: 6,
   CLOSE_HOUR: 22,
   MAX_TICK_MIN_CAP: 55,
+  // The tick drains: no launch after the cutoff, its own run is waited out up to the hard cap, which plus the kill stays under the wrapper's 3450 s timeout.
+  DRAIN_MIN_TICK_MIN: 20,
+  LAUNCH_CUTOFF_DEFAULT_MIN: 38,
+  LAUNCH_CUTOFF_FLOOR_MIN: 10,
+  LAUNCH_CUTOFF_MARGIN_MIN: 10,
+  TICK_HARD_CAP_DEFAULT_MIN: 56,
+  TICK_HARD_CAP_MAX_MIN: 56,
+  HARD_CAP_RUNNER_EXIT_MS: 10000,
+  HARD_CAP_ALERT_GAP_MS: 6 * 3600000,
   POLL_MS: 60000,
   SUPERVISE_MS: 10000,
   STALE_COOLDOWN_MS: 15 * 60000,
@@ -195,7 +206,11 @@ function defaultState() {
   };
 }
 
-const CLAMP_KEYS = ['staleCooldownUntil', 'launchNotBefore', 'haltProbeAt', 'lastMaintenanceAt', 'lastSlowCheckAt', 'lastHeartbeatWarnAt', 'lastTickAt', 'dbAlertAt', 'superviseSince', 'runFailAlertAt', 'failStreakSince', 'exit10AlertAt'];
+const CLAMP_KEYS = ['staleCooldownUntil', 'launchNotBefore', 'haltProbeAt', 'lastMaintenanceAt', 'lastSlowCheckAt', 'lastHeartbeatWarnAt', 'lastTickAt', 'dbAlertAt', 'superviseSince', 'runFailAlertAt', 'failStreakSince', 'exit10AlertAt', 'hardCapAlertAt'];
+
+// Reason recorded for a run the tick ended at its hard cap; like an overrun it keeps its claim, and it is not the territory's fault.
+const TICK_HARD_CAP = 'tick-hard-cap';
+const territoryFault = (code, reason) => !runnerLib.faultless(code, reason) && reason !== TICK_HARD_CAP;
 
 function loadState(ctx) {
   const s = fsx.readJson(ctx.files.state, null);
@@ -514,7 +529,7 @@ function handleResult(ctx, state, res) {
   state.consecutiveFailures = (state.consecutiveFailures || 0) + 1;
   if (state.consecutiveFailures === 1) state.failStreakSince = endedMs;
   ctx.log(`runner exited code ${code}${res.reason ? ` (${res.reason})` : ''} - will resume on next poll`);
-  if (code === 13) {
+  if (code === 13 && res.reason !== TICK_HARD_CAP) {
     ctx.notify({ severity: 'warn', key: 'run-killed', text: `A run for ${res.file || 'a territory'} exceeded 70 minutes and was killed; its territory is retried. Repeated kills point at a wedged browser (docs/OPERATIONS.md).` });
   }
   recordTerritoryFailure(ctx, state, res, code);
@@ -552,12 +567,12 @@ function clearTerritoryFailures(ctx, file) {
 // neither do failures while several different territories are failing: that is the system, not one file.
 function recordTerritoryFailure(ctx, state, res, code) {
   try {
-    if (runnerLib.faultless(code, res.reason)) return;
+    if (!territoryFault(code, res.reason)) return;
     const p = readPendingObject(ctx, res.file);
     if (!p) return;
     const name = path.basename(p.fp);
     const recent = state.recentRuns.slice(-C.SYSTEMIC_WINDOW);
-    const failing = new Set(recent.filter((r) => Number(r.exitCode) !== 0 && Number(r.exitCode) !== 10 && r.file && !runnerLib.faultless(Number(r.exitCode), r.reason)).map((r) => r.file));
+    const failing = new Set(recent.filter((r) => Number(r.exitCode) !== 0 && Number(r.exitCode) !== 10 && r.file && territoryFault(Number(r.exitCode), r.reason)).map((r) => r.file));
     if (failing.size >= C.SYSTEMIC_DISTINCT) {
       ctx.log(`${failing.size} different territories failed among the last ${recent.length} runs: not counting this failure against ${name} (a system fault, see the run-failures alert)`, 'error');
       return;
@@ -643,7 +658,11 @@ function applyRunnerExits(ctx, state) {
 function reconcileRun(ctx, state) {
   const insp = tick.inspectRun(ctx.files.run, ctx.now());
   if (insp && insp.alive) return { busy: true, insp };
-  const last = fsx.readJson(ctx.files.lastRun, null);
+  let last = fsx.readJson(ctx.files.lastRun, null);
+  // The runner reports the death of the child the tick ended as a plain phase1 failure; the tick knows why it ended it.
+  if (last && last.nonce && state.killedNonces[last.nonce] === TICK_HARD_CAP && Number(last.exitCode) !== 0 && Number(last.exitCode) !== 10) {
+    last = Object.assign({}, last, { exitCode: 13, reason: TICK_HARD_CAP });
+  }
   const lastNew = last && last.nonce && last.nonce !== state.handledRunNonce ? last : null;
   const finished = [];
   if (lastNew) {
@@ -657,7 +676,7 @@ function reconcileRun(ctx, state) {
       const overrun = nonce && state.killedNonces[nonce];
       const crash = {
         nonce: nonce || `crash-${ctx.now()}`, exitCode: overrun ? 13 : 1,
-        reason: overrun === 'logflood' ? 'log-flood-killed' : (overrun ? 'overrun-killed' : 'runner-crashed'),
+        reason: overrun === 'logflood' ? 'log-flood-killed' : (overrun === TICK_HARD_CAP ? TICK_HARD_CAP : (overrun ? 'overrun-killed' : 'runner-crashed')),
         startedAt: insp.rec && insp.rec.startedAt, endedAt: new Date(ctx.now()).toISOString(),
         file: insp.rec && insp.rec.file,
       };
@@ -740,6 +759,34 @@ async function superviseRun(ctx, state, insp) {
     state.lastHeartbeatWarnAt = ctx.now();
     ctx.log(`runner ${rec.pid} heartbeat is ${Math.round(insp.heartbeatAgeMs / 60000)} min old (still alive; the ${Math.round(ctx.maxRunMs / 60000)}-minute ceiling applies)`, 'error');
   }
+}
+
+// A run this tick launched cannot outlive it: one still in flight at the hard cap is ended like an overrun (child first, claim kept) and accounted for now.
+async function endAtHardCap(ctx, state, o) {
+  const insp = tick.inspectRun(ctx.files.run, ctx.now());
+  const rec = insp && insp.alive ? insp.rec : null;
+  if (!rec || !o.launchedPids.has(rec.pid)) return false;
+  state.killedNonces[rec.nonce] = TICK_HARD_CAP;
+  ctx.log(`CRITICAL run ${rec.nonce} is still in flight at the ${Math.round(o.hardCapMs / 60000)}-minute tick limit - ending it cleanly`, 'error');
+  if (rec.childPid) await ctx.killTree(rec.childPid, { token: rec.childToken });
+  const until = ctx.now() + C.HARD_CAP_RUNNER_EXIT_MS;
+  let cur = tick.inspectRun(ctx.files.run, ctx.now());
+  while (cur && cur.runnerAlive && ctx.now() < until) {
+    await ctx.sleep(250);
+    cur = tick.inspectRun(ctx.files.run, ctx.now());
+  }
+  if (cur && cur.runnerAlive) await ctx.killTree(rec.pid, { token: rec.token });
+  if (!state.hardCapAlertAt || ctx.now() - state.hardCapAlertAt >= C.HARD_CAP_ALERT_GAP_MS) {
+    state.hardCapAlertAt = ctx.now();
+    ctx.notify({
+      severity: 'warn', key: TICK_HARD_CAP,
+      text: `A run${rec.file ? ` (${rec.file})` : ''} was still in flight when the tick reached its ${Math.round(o.hardCapMs / 60000)}-minute limit and was ended cleanly; its territory is retried later. A run must finish before the limit or it cannot survive the end of the tick: if this repeats, lower RESOURCER_LAUNCH_CUTOFF_MIN (docs/OPERATIONS.md).`,
+      meta: { file: rec.file || null, nonce: rec.nonce },
+    });
+  }
+  applyRunnerExits(ctx, state);
+  reconcileRun(ctx, state);
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -909,7 +956,7 @@ async function iterate(ctx, state, o) {
   if (rec.busy) {
     await superviseRun(ctx, state, rec.insp);
     await maybeMaintenance(ctx, state, { busy: true });
-    return { sleepMs: o.superviseMs };
+    return { sleepMs: o.superviseMs, ownRun: !!(o.launchedPids && rec.insp.rec && o.launchedPids.has(rec.insp.rec.pid)) };
   }
   applyRunnerExits(ctx, state);
 
@@ -930,6 +977,13 @@ async function iterate(ctx, state, o) {
   }
 
   await maybeMaintenance(ctx, state, { busy: false });
+
+  // Past the launch cutoff nothing new starts (it could not finish before the tick ends); the tick only waits out what is running.
+  if (o.launchCutoffMs !== undefined && o.elapsedMs && o.elapsedMs() >= o.launchCutoffMs) {
+    const late = ctx.busy ? ctx.busy() : tick.busyState({ home: ctx.home, now: ctx.now() });
+    if (late.busy) return { sleepMs: o.superviseMs };
+    return { exit: true, reason: 'launch-cutoff' };
+  }
 
   const inWindow = ctx.inWindow ? ctx.inWindow(ctx.now()) : inOperatingHours(new Date(ctx.now()));
   if (!inWindow) return { exit: true, reason: 'outside-window' };
@@ -964,7 +1018,8 @@ async function iterate(ctx, state, o) {
   const l = await launchRunner(ctx, state, gate, pf);
   if (!l.launched) return { exit: true, reason: l.reason };
   o.launched = (o.launched || 0) + 1;
-  return { sleepMs: 1000 };
+  if (o.launchedPids) o.launchedPids.add(l.pid);
+  return { sleepMs: 1000, ownRun: true };
 }
 
 // Sleeps in one-second steps so a signal is honoured quickly; a step that took far longer than asked
@@ -990,11 +1045,28 @@ async function holderProvesAlive(ctx) {
   return !stale(tick.readRecord(ctx.files.tickLock));
 }
 
+const positiveMin = (v, dflt) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : dflt);
+
+// Cutoff in [floor, maxMin - margin], hard cap in [maxMin, max]; a tick under DRAIN_MIN_TICK_MIN (tests, smoke checks) has no room for either and ends at its bound.
+function tickLimits(maxMin, o) {
+  if (maxMin < C.DRAIN_MIN_TICK_MIN) return { cutoffMs: undefined, hardCapMs: maxMin * 60000 };
+  const cutoff = Math.max(C.LAUNCH_CUTOFF_FLOOR_MIN, Math.min(positiveMin(o.launchCutoffMin, C.LAUNCH_CUTOFF_DEFAULT_MIN), maxMin - C.LAUNCH_CUTOFF_MARGIN_MIN));
+  const hardCap = Math.max(maxMin, Math.min(positiveMin(o.hardCapMin, C.TICK_HARD_CAP_DEFAULT_MIN), C.TICK_HARD_CAP_MAX_MIN));
+  return { cutoffMs: cutoff * 60000, hardCapMs: hardCap * 60000 };
+}
+
 async function runTick(ctx, opts) {
   const o = Object.assign({ maxMinutes: C.MAX_TICK_MIN_CAP, once: false, superviseMs: C.SUPERVISE_MS, pollMs: C.POLL_MS, launched: 0 }, opts);
   const maxMin = Math.max(1, Math.min(Number(o.maxMinutes) || C.MAX_TICK_MIN_CAP, C.MAX_TICK_MIN_CAP));
   const startedAt = ctx.now();
   const deadline = startedAt + maxMin * 60000;
+  const limits = tickLimits(maxMin, o);
+  // Frozen time is excluded, so a resumed instance is not taken for a tick that ran its whole length.
+  const elapsedMs = () => tick.effectiveAgeMs(ctx.files.suspensions, startedAt, ctx.now());
+  o.launchCutoffMs = limits.cutoffMs;
+  o.hardCapMs = limits.hardCapMs;
+  o.elapsedMs = elapsedMs;
+  o.launchedPids = new Set();
   const contended = await holderProvesAlive(ctx);
   const lock = contended ? { ok: false, holder: (tick.readRecord(ctx.files.tickLock) || {}).rec } : tick.acquireLock(ctx.files.tickLock, { info: { role: 'tick' }, staleMs: C.TICK_LOCK_STALE_MS, now: Date.now, suspensionFile: ctx.files.suspensions });
   if (!lock.ok) {
@@ -1005,6 +1077,9 @@ async function runTick(ctx, opts) {
   state.lastTickStartedAt = startedAt;
   if (!state.superviseSince) state.superviseSince = startedAt;
   touchHeartbeat(ctx);
+  const min = (ms) => Math.round(ms / 60000);
+  const limitsText = limits.cutoffMs === undefined ? `no launch cutoff or drain (a tick under ${C.DRAIN_MIN_TICK_MIN} min)` : `launch cutoff ${min(limits.cutoffMs)} min, hard cap ${min(limits.hardCapMs)} min`;
+  ctx.log(`tick start: bound ${maxMin} min, ${limitsText}`);
   const out = { exitCode: 0, reason: null, iterations: 0, state };
   const guard = tick.makeClockGuard({ wall: ctx.now, mono: ctx.mono, thresholdMs: ctx.clockJumpMs });
   o.lock = lock;
@@ -1028,8 +1103,17 @@ async function runTick(ctx, opts) {
       if (lock.stillOwner()) saveState(ctx, state);
       if (step.exit) { out.reason = step.reason; break; }
       if (o.once) { out.reason = 'once'; break; }
-      if (ctx.now() >= deadline) { out.reason = 'bound'; break; }
-      await sleepStoppable(ctx, Math.max(0, Math.min(step.sleepMs, deadline - ctx.now())), guard, onJump);
+      // Past the bound the tick stays only for the run it launched itself (a run adopted from an earlier tick is left, as always).
+      const draining = limits.cutoffMs !== undefined && ctx.now() >= deadline && !!step.ownRun;
+      if (ctx.now() >= deadline && !draining) { out.reason = 'bound'; break; }
+      if (draining && elapsedMs() >= o.hardCapMs) {
+        if (!lock.stillOwner()) { out.reason = 'lock-lost'; break; }
+        out.reason = (await endAtHardCap(ctx, state, o)) ? TICK_HARD_CAP : 'bound';
+        if (lock.stillOwner()) saveState(ctx, state);
+        break;
+      }
+      const room = draining ? o.hardCapMs - elapsedMs() : deadline - ctx.now();
+      await sleepStoppable(ctx, Math.max(0, Math.min(step.sleepMs, room)), guard, onJump);
     }
   } finally {
     if (lock.stillOwner()) {
@@ -1048,7 +1132,9 @@ async function runTick(ctx, opts) {
 
 const USAGE = [
   'Usage: node scripts/pipeline-watchdog.js <mode>',
-  '  --tick [--max-minutes N]   supervision tick (N <= 55; default 55)',
+  '  --tick [--max-minutes N]   supervision tick (N <= 55; default 55). From 20 minutes up it stops launching runs at',
+  '                             RESOURCER_LAUNCH_CUTOFF_MIN (default 38), waits out the run it launched and ends it at',
+  '                             RESOURCER_TICK_HARD_CAP_MIN (default 56, at most 56)',
   '  --once                     run a single iteration',
   '  --queue-due                queue due territories (idempotent, safe to run any time)',
   '  --status [--scan]          print supervision state as JSON',
@@ -1142,14 +1228,18 @@ async function main(argv) {
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
   const configured = Number(val('--max-minutes') || env.get('RESOURCER_MAX_TICK_MIN', C.MAX_TICK_MIN_CAP));
-  const r = await runTick(ctx, { maxMinutes: configured, once: has('--once') });
+  const r = await runTick(ctx, {
+    maxMinutes: configured, once: has('--once'),
+    launchCutoffMin: env.get('RESOURCER_LAUNCH_CUTOFF_MIN', C.LAUNCH_CUTOFF_DEFAULT_MIN),
+    hardCapMin: env.get('RESOURCER_TICK_HARD_CAP_MIN', C.TICK_HARD_CAP_DEFAULT_MIN),
+  });
   ctx.log(`tick end: ${r.reason} (iterations ${r.iterations}, launched ${r.launched || 0})`);
   return r.exitCode || (ctx.criticalLost ? 1 : 0);
 }
 
 module.exports = {
   C, NONTERMINAL_STATUSES, PIPELINE_PROC_RE: runnerLib.PIPELINE_PROC_RE,
-  inOperatingHours, makeCtx, dbFitCheck, streakDue, recordTerritoryFailure, guardRunLogs, releaseClaim, clearStaleBrowserLock, loadState, saveState, defaultState, checkGate, releaseOrphanedLocks, cullGhost, runQueueDue,
+  inOperatingHours, tickLimits, makeCtx, dbFitCheck, streakDue, recordTerritoryFailure, guardRunLogs, releaseClaim, clearStaleBrowserLock, loadState, saveState, defaultState, checkGate, releaseOrphanedLocks, cullGhost, runQueueDue,
   checkPushDrought, slowChecks, handleResult, reconcileRun, superviseRun, settleAfterResume, noteClockJump, preflight, launchRunner, iterate, runTick, statusReport,
 };
 

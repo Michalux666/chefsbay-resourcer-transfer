@@ -155,6 +155,8 @@ def ws(tmp_path, monkeypatch):
     root = tmp_path / "profile" / "workspace" / "resourcer"
     root.mkdir(parents=True)
     monkeypatch.setenv("RESOURCER_HOME", str(root))
+    monkeypatch.delenv("RESOURCER_SOURCES", raising=False)
+    monkeypatch.delenv("RESOURCER_ENV_FILE", raising=False)
     return Workspace(root)
 
 

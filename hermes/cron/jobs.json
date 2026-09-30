@@ -110,7 +110,7 @@
       "workdir": "/opt/data/profiles/resourcer/workspace/resourcer",
       "deliver": "<DELIVER_TARGET>",
       "noAgent": true,
-      "purpose": "Bounded supervision tick (at most 55 minutes, below the 3600 s cron timeout): takes a PID-liveness lock, adopts an in-flight run, launches the next territory as a detached runner, applies the 15-minute session back-off, the 70-minute run ceiling and the halt probe, and runs cull-ghost, recover-stranded and queue-due maintenance every 5 minutes. Exits at once outside 06:00-22:00 London when no run is in flight; an overlapping fire exits immediately.",
+      "purpose": "Bounded supervision tick (55 minutes; it launches nothing after minute 38 and waits for the run it launched, to minute 56 at most, all below the 3600 s cron timeout): takes a PID-liveness lock, adopts an in-flight run, launches the next territory as a detached runner, applies the 15-minute session back-off, the 70-minute run ceiling and the halt probe, and runs cull-ghost, recover-stranded and queue-due maintenance every 5 minutes. Exits at once outside 06:00-22:00 London when no run is in flight; an overlapping fire exits immediately.",
       "silentOnSuccess": true,
       "failureMeans": "The tick crashed or was killed by the timeout; the wrapper prints one line. The lock and run records recover on their own at the next fire.",
       "cli": "hermes -p resourcer cron create \"* 5-23 * * *\" --no-agent --script resourcer-tick.sh --name resourcer-tick --deliver <DELIVER_TARGET> --failure-deliver <DELIVER_TARGET> --workdir /opt/data/profiles/resourcer/workspace/resourcer",

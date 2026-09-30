@@ -127,7 +127,7 @@ Remaining risks (OPEN, docs/KNOWN-LIMITS.md): anyone who can log in to the dashb
 
 | Destination | For | Personal data sent |
 |---|---|---|
-| `ai-gateway.vercel.sh` (Vercel AI Gateway), then Anthropic and its cloud hosts (language model) or TypeSafe AI's Jev served through DigitalOcean (United States) | screening | redacted card text; for the language model also the search title, town and radius; Reed also the first 1,500 characters of the anonymised CV |
+| `ai-gateway.vercel.sh` (Vercel AI Gateway), then TypeSafe AI's Jev served through DigitalOcean (United States); the owner's Vercel team allows no other model (the older engines would also reach Anthropic and its cloud hosts) | screening | redacted card text and the search title (not the town or the radius); Reed also the first 1,500 characters of the anonymised CV |
 | `recruiter.caterer.com` | search, unlock, CV download | search terms; the pipeline acts as the owner's logged-in user |
 | `www.reed.co.uk`, `secure-recruiter.reed.co.uk`, `api.reed.co.uk`, `reed-recruiter-prod.eu.auth0.com` | search, profile and CV download, login | as above |
 | `recruit.zoho.eu`, `accounts.zoho.eu` | create candidate, attach CV, token refresh | full candidate record and CV |
@@ -160,7 +160,7 @@ Untrusted text (a CV, a log line, an alert, a web page) can carry instructions: 
 
 Facts as built, for the owner and counsel:
 
-- Roles (to confirm): Chefs Bay decides why and how candidate data is sourced and screened (controller). Vercel (gateway), Anthropic (language model), TypeSafe AI with DigitalOcean (Jev),
+- Roles (to confirm): Chefs Bay decides why and how candidate data is sourced and screened (controller). Vercel (gateway), TypeSafe AI with DigitalOcean (Jev), and Anthropic only if a language-model engine is ever enabled,
   postcodes.io and Zoho act on its behalf (processors or sub-processors). Caterer and Reed supply the data under their own terms.
 - Legitimate interest (to confirm): the sourcing of candidates for temporary hospitality work is the presumed lawful basis. A legitimate-interests assessment should exist and the candidate privacy
   notice should say what happens (sourcing from job boards, automated screening, transfer to the United States, retention).

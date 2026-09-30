@@ -48,6 +48,7 @@ async function main() {
     });
     const s = step(ai.batch, n, { outcome: 'ok' });
     process.stderr.write('  [ai-review] Batch screening - model: fake\n');
+    if (s.warn) process.stderr.write(`${s.warn}\n`);
     if (s.outcome === 'api_down') apiDown(s.model);
     if (s.outcome === 'exit1') { process.stderr.write('FATAL something broke\n'); process.exit(1); }
     if (s.outcome === 'garbage') { process.stdout.write(s.text || 'this is not json'); process.exit(0); }

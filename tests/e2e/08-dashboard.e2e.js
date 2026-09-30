@@ -134,7 +134,7 @@ test('8.3 after the run the numbers agree with the fake world: runs, stats, terr
   assert.equal(status.json.queue.depth, 0);
   assert.equal(status.json.halt.halted, false);
   assert.deepEqual(status.json.activeRuns, []);
-  assert.equal(status.json.reed.state, 'unknown', 'nothing has said what Reed is doing yet');
+  assert.equal(status.json.reed.state, 'disabled', 'RESOURCER_SOURCES=caterer from the start: Reed is off, not "unknown" (the chip follows the setting)');
 });
 
 test('8.4 the nightly backup shows up as the backup; the pre-flight makes the Reed indicator say "disabled"', async () => {

@@ -262,6 +262,24 @@ test('status chips reflect caterer, reed, activity and backup problems', async (
   });
 });
 
+test('the Reed chip says Disabled, Not logged in or Auth OK, with the reason as its hint', async () => {
+  const cases = [
+    [{ state: 'disabled', enabled: false, sources: 'caterer', detail: 'RESOURCER_SOURCES=caterer' }, 'Disabled', 'rsr-muted-chip'],
+    [{ state: 'not_logged_in', enabled: true, sources: 'both', detail: 'Reed is on (RESOURCER_SOURCES=both) but no successful Reed login is recorded yet' }, 'Not logged in', 'rsr-warn'],
+    [{ state: 'ok', enabled: true, sources: 'both', detail: null }, 'Auth OK', 'rsr-ok'],
+  ];
+  for (const [reed, text, tone] of cases) {
+    await withPage(standardRoutes({ '/status': () => statusOk({ reed }) }), {}, async (h) => {
+      const chips = mini.findAll(h.tree, (n) => n.props && typeof n.props.className === 'string' && n.props.className.startsWith('rsr-chip '));
+      const chip = chips.find((c) => mini.textOf(c).startsWith('Reed'));
+      assert.ok(mini.textOf(chip).includes(text), `${reed.state}: ${mini.textOf(chip)}`);
+      assert.ok(chip.props.className.includes(tone), `${reed.state}: ${chip.props.className}`);
+      if (reed.detail) assert.equal(chip.props.title, reed.detail);
+      if (reed.state !== 'ok') assert.ok(!mini.textOf(chip).includes('Auth OK'));
+    });
+  }
+});
+
 test('progress bars never exceed 100 percent', async () => {
   const routes = standardRoutes({ '/stats': () => statsOk({ targets: { perDay: 181, perWeek: 1269, todayPulled: 900, weekPulled: 5000, todayPercent: 497.2, weekPercent: 394 }, zoho: { caterer: 1, reed: 1, total: 2, goal: 1, percent: 250 } }) });
   await withPage(routes, {}, async (h) => {

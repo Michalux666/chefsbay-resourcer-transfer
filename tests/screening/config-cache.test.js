@@ -20,14 +20,16 @@ test('config/screening.json is the owner-facing copy of the built-in defaults (n
   assert.match(json.decide.stage1._CALIBRATE, /CALIBRATE/);
   assert.match(json.decide.stage2._CALIBRATE, /CALIBRATE/);
   assert.equal(json.decide.calibration.calibrated, false);
-  assert.equal(json.engine, 'jev_shadow');
+  assert.equal(json.engine, 'jev_only');
+  assert.deepEqual(json.decide.reviewPolicy, { preUnlock: 'reject', postUnlock: 'approve' });
   assert.equal(json.tierMode, 'legacy');
 });
 
-test('defaults: jev_shadow, legacy tier mode, gateway origin, models, no ZDR, redaction on', () => {
+test('defaults: jev_only, legacy tier mode, gateway origin, models, no ZDR, redaction on', () => {
   const c = config.load({ getEnv: noEnv, file: 'none.json' });
-  assert.equal(c.engine, 'jev_shadow');
-  assert.equal(c.engineEffective, 'jev_shadow');
+  assert.equal(c.engine, 'jev_only');
+  assert.equal(c.engineEffective, 'jev_only');
+  assert.deepEqual(c.decide.reviewPolicy, { preUnlock: 'reject', postUnlock: 'approve' });
   assert.equal(c.tierMode, 'legacy');
   assert.equal(c.gateway.origin, 'https://ai-gateway.vercel.sh');
   assert.equal(c.llm.model, 'anthropic/claude-sonnet-5.5');
@@ -45,7 +47,7 @@ test('defaults: jev_shadow, legacy tier mode, gateway origin, models, no ZDR, re
 test('environment overrides', () => {
   const c = config.load({
     getEnv: withEnv({
-      SCREEN_ENGINE: 'LLM', SCREEN_TIER_MODE: 'fixed', SCREEN_GATEWAY_ORIGIN: 'http://127.0.0.1:1/', SCREEN_LLM_MODEL: 'x/y',
+      SCREEN_ENGINE: 'LLM', SCREEN_ALLOW_LLM: '1', SCREEN_TIER_MODE: 'fixed', SCREEN_GATEWAY_ORIGIN: 'http://127.0.0.1:1/', SCREEN_LLM_MODEL: 'x/y',
       SCREEN_CONCURRENCY: '3', SCREEN_LLM_CONCURRENCY: '2', SCREEN_MAX_ATTEMPTS: '5', SCREEN_BACKOFF_BASE_MS: '7',
       SCREEN_SHADOW_RATE: '0.25', SCREEN_REDACT: '0', SCREEN_CACHE_TTL_SEC: '60', SCREEN_STALE_RULE: '1', SCREEN_ZDR: 'true',
       SCREEN_PAGE_RETRY_PAUSE_SEC: '5', SCREEN_JEV_TIMEOUT_MS: '1234', SCREEN_LLM_TIMEOUT_MS: '4321', SCREEN_SHADOW_TEXT: '0',
@@ -75,7 +77,7 @@ test('environment overrides', () => {
 
 test('bad values never crash: they fall back to safe defaults with a warning', () => {
   const c = config.load({ getEnv: withEnv({ SCREEN_ENGINE: 'bogus', SCREEN_TIER_MODE: 'bogus', SCREEN_CONCURRENCY: 'abc', SCREEN_SHADOW_RATE: '9' }), file: 'none.json' });
-  assert.equal(c.engine, 'jev_shadow');
+  assert.equal(c.engine, 'jev_only');
   assert.equal(c.tierMode, 'legacy');
   assert.equal(c.jev.concurrency, 6);
   assert.equal(c.shadow.rate, 1);
@@ -86,7 +88,7 @@ test('a corrupt config file falls back to built-in defaults with a warning', () 
   const f = path.join(h.HOME, 'corrupt.json');
   fs.writeFileSync(f, '{oops');
   const c = config.load({ getEnv: noEnv, file: f });
-  assert.equal(c.engine, 'jev_shadow');
+  assert.equal(c.engine, 'jev_only');
   assert.ok(c.warnings.some(w => /unreadable/.test(w)));
 });
 
@@ -105,11 +107,11 @@ test('file values override defaults; env overrides the file; underscore keys are
 });
 
 test('safety: engine=jev only decides once the thresholds are marked calibrated', () => {
-  const a = config.load({ getEnv: withEnv({ SCREEN_ENGINE: 'jev' }), file: 'none.json' });
+  const a = config.load({ getEnv: withEnv({ SCREEN_ENGINE: 'jev', SCREEN_ALLOW_LLM: '1' }), file: 'none.json' });
   assert.equal(a.engineRequested, 'jev');
   assert.equal(a.engineEffective, 'jev_shadow');
   assert.ok(a.warnings.some(w => /calibrated/.test(w)));
-  const b = config.load({ getEnv: withEnv({ SCREEN_ENGINE: 'jev', SCREEN_CALIBRATED: '1' }), file: 'none.json' });
+  const b = config.load({ getEnv: withEnv({ SCREEN_ENGINE: 'jev', SCREEN_ALLOW_LLM: '1', SCREEN_CALIBRATED: '1' }), file: 'none.json' });
   assert.equal(b.engineEffective, 'jev');
   assert.equal(b.warnings.length, 0);
 });
@@ -166,7 +168,7 @@ test('config hardening: file values are normalised, wrong-typed sections and bad
   assert.equal(c.redact.enabled, true);
   assert.equal(c.decide.stage1.rejectP, 0.9, 'null would have rejected with zero evidence');
   assert.equal(c.decide.stage1.approveP, 0.6);
-  assert.equal(c.decide.stage1.injectionP, 0.5, 'a value above 1 would have disabled the injection guard');
+  assert.equal(c.decide.stage1.injectionP, 0.7, 'a value above 1 would have disabled the injection guard');
   assert.equal(c.decide.stage1.needCorroboration, false);
   for (const s of ['llm', 'shadow', 'batch', 'cache', 'redact', 'stage1']) assert.ok(c.warnings.some(w => w.includes('section ' + s)), s);
   assert.ok(c.warnings.some(w => /decide.stage1.rejectP/.test(w)));

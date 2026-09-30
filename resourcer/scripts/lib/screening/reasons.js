@@ -22,7 +22,12 @@ const TABLE = {
   reject_other: ['Not suitable for <job>', 'any other reason to reject'],
   sys_fail_open: ['Screening result unusable - approved conservatively', null],
   sys_invalid_result: ['Screening result invalid - rejected conservatively', null],
+  sys_review_policy_reject: ['Uncertain fit for <job> - rejected by the review policy', null],
+  sys_review_policy_approve: ['Uncertain fit for <job> - approved by the review policy', null],
 };
+
+// Decisions taken by the configured review policy (engine jev_only) instead of a confident model answer.
+const POLICY_CODES = ['sys_review_policy_reject', 'sys_review_policy_approve'];
 
 // Codes an engine (LLM or Jev) may return.
 const ENGINE_CODES = Object.keys(TABLE).filter(c => !c.startsWith('sys_'));
@@ -45,13 +50,19 @@ const COARSE = {
   reject_other: 'reject_other',
   sys_fail_open: 'approve_other',
   sys_invalid_result: 'reject_other',
+  sys_review_policy_reject: 'reject_other',
+  sys_review_policy_approve: 'approve_other',
 };
 
 function sideOf(code) {
   const c = String(code || '');
-  if (c.startsWith('approve_') || c === 'sys_fail_open') return 'approve';
-  if (c.startsWith('reject_') || c === 'sys_invalid_result') return 'reject';
+  if (c.startsWith('approve_') || c === 'sys_fail_open' || c === 'sys_review_policy_approve') return 'approve';
+  if (c.startsWith('reject_') || c === 'sys_invalid_result' || c === 'sys_review_policy_reject') return 'reject';
   return null;
+}
+
+function isPolicyCode(code) {
+  return POLICY_CODES.includes(String(code || ''));
 }
 
 // A code from an engine, made consistent with the decision. Unknown or contradicting -> <side>_other.
@@ -86,4 +97,4 @@ function codeHelpBlock() {
   return ENGINE_CODES.map(c => `${c} - ${TABLE[c][1]}`).join('\n');
 }
 
-module.exports = { MAX_REASON, TABLE, ENGINE_CODES, ALL_CODES, COARSE, sideOf, normaliseCode, sentenceFor, reasonText, codeHelpBlock, clip };
+module.exports = { MAX_REASON, TABLE, ENGINE_CODES, ALL_CODES, POLICY_CODES, COARSE, sideOf, isPolicyCode, normaliseCode, sentenceFor, reasonText, codeHelpBlock, clip };

@@ -1,7 +1,9 @@
 {
-  "_readme": "Screening configuration. Keys starting with an underscore are notes and are ignored. Environment variables (SCREEN_*) override this file. Every decide.* threshold is a CALIBRATE placeholder: it is NOT fitted to Chefs Bay data. See docs/SCREENING.md for what each setting does, how to calibrate, and how to promote engine jev_shadow to jev.",
+  "_readme": "Screening configuration. Keys starting with an underscore are notes and are ignored. Environment variables (SCREEN_*) override this file. Every decide.* threshold is a CALIBRATE placeholder: it is NOT fitted to Chefs Bay data. See docs/SCREENING.md for what each setting does, how to calibrate, and how the engines differ. The default engine jev_only uses Jev alone (no LLM); decide.reviewPolicy says what an uncertain Jev answer becomes.",
   "version": 1,
-  "engine": "jev_shadow",
+  "engine": "jev_only",
+  "_allowLlm": "false = the engines llm, jev_shadow and jev are refused (with a warning the engine becomes jev_only), because the AI Gateway carries Jev only. Set true (or SCREEN_ALLOW_LLM=1) only if the Vercel team allows the language model.",
+  "allowLlm": false,
   "tierMode": "legacy",
   "gateway": {
     "origin": "https://ai-gateway.vercel.sh"
@@ -76,6 +78,10 @@
       "reportId": null,
       "date": null
     },
+    "reviewPolicy": {
+      "preUnlock": "reject",
+      "postUnlock": "approve"
+    },
     "stage1": {
       "_CALIBRATE": "CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it.",
       "rejectP": 0.9,
@@ -83,7 +89,7 @@
       "needCorroboration": true,
       "notFitMin": 0.6,
       "counterRoleMatch": 0.6,
-      "injectionP": 0.5,
+      "injectionP": 0.7,
       "infoFloor": 0.5,
       "notStatedP": 0.5,
       "noInfoApproveHospP": 0.5,
@@ -99,7 +105,7 @@
       "needCorroboration": true,
       "notFitMin": 0.6,
       "counterRoleMatch": 0.6,
-      "injectionP": 0.5,
+      "injectionP": 0.7,
       "infoFloor": 0.5,
       "notStatedP": 0.5,
       "noInfoApproveHospP": 0.5,
@@ -109,7 +115,7 @@
       "titleConsistentMin": 0.3
     },
     "ladder": {
-      "tier0Titles": ["catering assistant", "kitchen hand", "food production"],
+      "tier0Titles": ["catering assistant", "kitchen hand", "food production", "waiter", "waitress", "server", "front of house", "bartender", "dish washer"],
       "_note": "Candidate title options the Jev tier question can return, grouped per search tier. inBand = acceptable. tooSenior and tooJunior = clear level mismatches. mismatch = other clear mismatches, by reason code. Anything not listed is an uncertain level and goes to review. A search tier is the legacy role tier of the search title (0 unknown/non-kitchen, 1 entry, 2 mid, 3 senior, 4 head).",
       "bySearchTier": {
         "0": {
@@ -257,7 +263,7 @@
     }
   },
   "gate": {
-    "_note": "The promotion gate for switching engine from jev_shadow to jev. See docs/SCREENING.md.",
+    "_note": "The promotion gate for switching engine from jev_shadow to jev (not used by engine jev_only). See docs/SCREENING.md.",
     "minAgreement": 0.9,
     "maxApprovalDeltaPoints": 3,
     "minRowsPerSource": 500,

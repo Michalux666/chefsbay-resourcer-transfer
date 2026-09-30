@@ -53,6 +53,8 @@ resolution) `secrets/`, `state/`, `.ssh/`, `.git/`, `.env*`, `auth.json`, `state
 `id_rsa*`. The `?profile=` query that Hermes adds to plugin routes is ignored. `tools/request-search.js` has the same function in JS.
 Checked with parametrised escape attempts, symlinked directories and files, a symlink into `secrets/`, and route-level tests
 (`/status` does not read through an escaping `runs/` symlink; `POST /search` refuses to write through an escaping `pending-searches/`).
+One reader is outside `jail_path()` on purpose: `reed_source_setting()` opens `<profile>/.env` (and `RESOURCER_ENV_FILE`, `<RESOURCER_HOME>/.env`) to read the
+single key `RESOURCER_SOURCES`; it has its own fence (section 5, "Status strip fixes 2026-09-30") and never returns or stores another line.
 
 ### 2.3 Halt clear = the halt library's protocol
 Legacy `lib/pipeline-halt.js:77-91` (repo copy `resourcer/scripts/lib/pipeline-halt.js:90-113`) `clearHalt()`; new
@@ -149,9 +151,10 @@ your package against this table.
 | `pending-searches/*.json` | scheduler, catch-up queue, plugin, CLI | `{jobTitle, location, distance, keywords, sources, source, requestedAt, spawnedAt?}`; names must end `.json` to count | queue, duplicates |
 | `credits-sync.json` (root, else `runtime/`) | `caterer-get-credits`, phase 2 | `{credits: number > 0, syncedAt: ISO}` | credits |
 | `logs/watchdog-runner.jsonl` | watchdog runner | lines `{ts, event, note?}`; state mapping `session-safelist-blocked` -> safe-list blocked, `session-dead` (note containing "safelist" -> safe-list blocked) and `session-stale` -> stale, `session-relogin` -> re-login attempted, `session-loaded`, `phase1-start`, `done` -> OK; newest wins; also its last `ts` counts as activity | Caterer state, activity |
-| `runtime/caterer-status.json` | **requested from WP3/WP5** (new schema) | `{state: ok|stale|safelist_blocked|login_failed|relogin, updatedAt: ISO, detail?}`; wins over the log-derived state when newer. The legacy file of that name was an unrelated run record and is ignored when it has no string `state`. | Caterer state |
+| `runtime/caterer-status.json` | `watchdog-runner.js` and `caterer-login.js` (every check and sign-in outcome, see "Status strip fixes" below) | `{state: ok|stale|safelist_blocked|login_failed|relogin, updatedAt: ISO, detail?}`; wins over the log-derived state when newer. The legacy file of that name was an unrelated run record and is ignored when it has no string `state`. | Caterer state |
 | `reed-auth-failed.marker` (`runtime/` first, then root) | Reed phase 1 | `{reason, failedAt}`; present means failed unless a newer OK run exists | Reed state |
-| `runtime/reed-status.json` | **requested from WP7** | `{state: ok|auth_failed|disabled, updatedAt, detail?}` | Reed state |
+| `runtime/reed-status.json` | `reed-api-client.js` (`writeReedStatus`, `--sync-status`) | `{state: ok|auth_failed|disabled, updatedAt, detail?}`; a `disabled` file is ignored while `RESOURCER_SOURCES` says Reed is on; an `ok` file is the proof of a login | Reed state |
+| `RESOURCER_SOURCES` (process environment, then `RESOURCER_ENV_FILE` when it lies inside the profile or workspace, then `<profile>/.env`, then `<RESOURCER_HOME>/.env`; the order of `lib/env.js`) | operator (profile `.env`) | ONE key. Only its value, normalised to `caterer|reed|both`, is ever kept or returned; no other line of any `.env` is retained. The profile is `<RESOURCER_HOME>/../..` and only when `RESOURCER_HOME` ends in `workspace/<name>` and that directory holds no `profiles/` or `plugins/`; a `.env` that resolves outside the profile or workspace, is not a regular file, is over 64 KB, holds a NUL byte or is not UTF-8 counts as unreadable. Excludes Reed (`caterer`, an unset key in a readable file, an empty value, anything invalid) -> the strip says `disabled`; includes Reed -> `not_logged_in` until `runtime/reed-status.json` records `ok`; nothing readable at all -> the fallback chain below. | Reed state |
 | `runtime/backup-status.json` | **requested from the backup job** | `{ok: bool, finishedAt: ISO, error?}`; `ok:false` marks the backup stale | backup |
 | `backups/**` (depth <= 2) | backup job | newest regular file not starting with `.`, not ending `.tmp .partial .part .lock`, not `*.json`, mtime = last backup; stale after 26 h (setting) | backup age |
 | `runtime/*heartbeat*`, `*.hb`, `*.pid` | tick / watchdog | mtime only | activity, stall detection (queue non-empty, inside the window, no run, nothing for 20 min, not halted) |
@@ -165,9 +168,9 @@ The plugin writes exactly: `pending-searches/search-*.json` (+ its dot temp file
 
 | What | Command | Result |
 |---|---|---|
-| Node suites, Windows Node 25.6.1 | `node --test "tests/dashboard/**/*.test.js"` | 132 tests: 130 pass, 0 fail, 2 skipped (symlink test needs privileges on Windows; the Python wrapper needs an interpreter with fastapi) |
-| Node suites, WSL Ubuntu 24.04, Node 22.22.1 | `RESOURCER_PYTHON=<venv>/bin/python node --test 'tests/dashboard/**/*.test.js'` | 132 pass, 0 skipped (includes the pytest wrapper) |
-| Python suite (FastAPI `TestClient`, synthetic DB and workspace) | `<venv>/bin/python -m pytest tests/dashboard/py -q` | 251 pass on fastapi 0.142.0 / starlette 1.7.0 and on fastapi 0.133.1 / starlette 1.3.1 (the version `research/hermes-dashboard-plugin.md` pins); Python 3.12.3, SQLite 3.45.1 |
+| Node suites, Windows Node 25.6.1 | `node --test "tests/dashboard/**/*.test.js"` | 132 tests: 130 pass, 0 fail, 2 skipped (symlink test needs privileges on Windows; the Python wrapper needs an interpreter with fastapi). After the status strip fixes (2026-09-30): 139 tests (`tests/dashboard/*.test.js`), 133 pass, 0 fail, 6 skipped |
+| Node suites, WSL Ubuntu 24.04, Node 22.22.1 | `RESOURCER_PYTHON=<venv>/bin/python node --test 'tests/dashboard/**/*.test.js'` | 132 pass, 0 skipped (includes the pytest wrapper). After the status strip fixes: 139 pass, 0 skipped |
+| Python suite (FastAPI `TestClient`, synthetic DB and workspace) | `<venv>/bin/python -m pytest tests/dashboard/py -q` | 251 pass on fastapi 0.142.0 / starlette 1.7.0 and on fastapi 0.133.1 / starlette 1.3.1 (the version `research/hermes-dashboard-plugin.md` pins); Python 3.12.3, SQLite 3.45.1. After the status strip fixes: 301 pass on fastapi 0.142.0 (32 new in `test_reed_state.py`) |
 | Real React 19.3 in jsdom (manual, scratch install of react, react-dom, jsdom) | `NODE_PATH=<dir>/node_modules node tests/dashboard/manual/real-react-check.js` | renders every panel, drives halt clear, search form, Run now, the header slot and hostile strings; zero React warnings or errors |
 
 Notes for whoever runs this: `pip install` into a `--without-pip` venv works here (`python3 -m venv --without-pip v && pip3 --python v/bin/python install fastapi httpx pytest`)
@@ -196,11 +199,12 @@ no side effects at import); banned tokens, ASCII, LF, no secrets in the shipped 
    exists), the real `run_results` writer and backup job output (file names, `backup-status.json`).
 6. The authenticated `request.state.session` shape in gated mode (only `user_id` is read, defensively).
 7. Behaviour of Hermes' rescan endpoint and dashboard restart (research 13.1 items 1-6 still stand).
+8. Status strip, Reed and Caterer chips (2026-09-30): the dashboard process can read `/opt/data/profiles/resourcer/.env` (mode 0600; it must run as the same user, otherwise the file counts as unreadable and the chip falls back to `runtime/reed-status.json`, which the daily pre-flight keeps at `disabled`); with `RESOURCER_SOURCES=caterer` the Reed chip says "Disabled"; after the owner sets `both` and before the first Reed login it says "Not logged in", never "Auth OK"; after `node scripts/caterer-login.js --check` on the instance the Caterer chip reads "Session OK" without waiting for a tick.
 
 ## 8. Open issues
 
 * Two implementations of the validation and duplicate rules (Python plugin, Node tool). They are pinned to each other by shared fixtures; a change to either must change both fixtures and both files.
-* The Caterer/Reed/backup/heartbeat inputs in section 5 marked "requested" do not exist yet; until they do the strip shows "Unknown" for Reed and derives Caterer state from the log.
+* (Closed 2026-09-30.) The Caterer, Reed, backup and heartbeat status inputs in section 5 now exist. `caterer-login.js` writes `runtime/caterer-status.json` on every outcome, so the Caterer chip is no longer "Unknown" before the first supervisor tick; the Reed chip follows `RESOURCER_SOURCES` (see "Status strip fixes").
 * `stallSuspected` and the 26 h backup threshold are the plugin's own heuristics (settings `stall_minutes`, `backup_stale_hours`).
 
 ## Integration rehearsal changes (docs/parity/integration.md)
@@ -217,3 +221,33 @@ Tests: `tests/dashboard/py/test_search.py`, `test_jail.py`, `test_helpers.py`, `
 - **Cross-site guard** (review 76). All POST routes answer 403 `cross_site` when the browser sent `Sec-Fetch-Site` with anything but `same-origin` or `none`. Requests without the header (curl, older browsers) are unchanged: Hermes' own gate stays the primary defence. `scrub()` slices its input before the regex scans and the e-mail pattern is bounded (60 KB used to cost 3.6 s).
 - **Machine-level home refused** (review 75). `get_home()` raises `JailError` when the root has fewer than three path parts or holds `profiles/` or `plugins/`; `/health` reports it (`ok: false`, `error`) instead of failing, every other route answers 400 `path_jail`. Hard links planted inside the workspace remain undetectable by path resolution (not fixable in the plugin).
 - **Installer** (review 87). `plugin/resourcer/install-plugin.sh` (run with `bash`): copies the plugin without bytecode caches, moves an old install aside instead of deleting it, links it into the profile, enables it for the default home and the profile (falls back to Hermes' config helpers). The README no longer has `rm -rf`, `find -exec` or command-line heredocs in its install and roll-back steps, points the log check at `/opt/data/logs/errors.log`, says a dashboard stop ends the operator's own Chat session, and adds an `httpx` probe to the verify step. UNVERIFIED-LIVE on a real Hermes box.
+
+## Status strip fixes 2026-09-30 (go-live round, found on the live instance)
+
+Tests: `tests/dashboard/py/test_reed_state.py` (32, all failed against the previous plugin except the secrets guard), `tests/dashboard/ui.test.js` (Reed chip), `tests/browser/login-status.test.js` (14, 12 failed before). `tests/dashboard/py/conftest.py` now clears `RESOURCER_SOURCES` and `RESOURCER_ENV_FILE` for every test.
+
+- **Reed said "Auth OK" while Reed was disabled and had never logged in.** Cause: `reed_state()` turned the newest `run_results.reed_json` (history imported from the laptop, `authFailed:false`) into `ok`. Now `plugin_api.py:reed_source_setting()` resolves `RESOURCER_SOURCES` in the order of `lib/env.js` (non-empty process variable; then the first env file that defines the key, an empty value meaning unset: `RESOURCER_ENV_FILE`, `<profile>/.env`, `<RESOURCER_HOME>/.env`; then the pipeline default `caterer`; anything that is not `caterer|reed|both` counts as `caterer`, as in `reed-api-client.js:sourcesGate`). Result of `GET /status` `reed`:
+  - Reed excluded: `{state:"disabled", enabled:false, sources:"caterer", source:"RESOURCER_SOURCES", detail:"RESOURCER_SOURCES=caterer", updatedAt:null, ageMinutes:null}`. Wins over a failure marker, a status file and run history. Detail for an unset key says "default caterer"; for an invalid value it says the value is not `caterer|reed|both` and never echoes it.
+  - Reed enabled, an `ok` in `runtime/reed-status.json` (written by `markAuthOk` on every successful login or refresh): `ok` as before. A newer failure marker or `auth_failed` still wins. A stale `disabled` status file is ignored.
+  - Reed enabled and no recorded login (only run history, or nothing): NEW state `not_logged_in` ("Not logged in", warn tone), detail "Reed is on (RESOURCER_SOURCES=both) but no successful Reed login is recorded yet".
+  - No process variable and no readable env file (missing, unreadable, binary, over 64 KB, not UTF-8, a directory, a FIFO, outside the profile, a symlink leaving it): the old chain (marker, `runtime/reed-status.json`, run history) with `enabled:null, sources:null`.
+  - New response keys `enabled` (bool or null) and `sources` (`caterer|reed|both` or null); `dist/index.js` maps `not_logged_in` to "Not logged in". The value of RESOURCER_SOURCES is the only thing ever read from an `.env`: the reader matches one line pattern, keeps nothing else, and the tests plant fake secret keys (`AI_GATEWAY_API_KEY`, a passphrase, a Zoho secret, an `export`ed token) and assert that no route (`/health /status /stats /runs /territories /schedule /halt /errors`) returns a key name, a value or any other `.env` text.
+  - Fence: the profile is `<RESOURCER_HOME>/../..` only when `RESOURCER_HOME` is `<profile>/workspace/<name>` and that directory holds no `profiles/` or `plugins/` (a machine-level `.env` is never read); candidates are resolved with `realpath` and must stay inside the profile or the workspace, and outside `secrets/`, `state/`, `.ssh/`, `.git/`.
+  - Cost: a few small file reads per `/status` poll (not cached, so an edit to the `.env` shows within one poll).
+- **Caterer said "Unknown" until the first supervisor tick although the sign-in worked.** `caterer-login.js` now writes `runtime/caterer-status.json` (atomic, `{state, updatedAt, detail<=200}`, the same file and shape as `watchdog-runner.js:writeCatererStatus`) from `ensureLoggedInDetailed` (so also `ensureLoggedIn`, the CLI, the pre-flight and the keep-alive, phase 1's self-heal and the runner) and `openVerificationLink`:
+
+  | Outcome | state | detail |
+  |---|---|---|
+  | signed in (no sign-in needed) | `ok` | empty |
+  | signed in by this call | `ok` | `signed in again` |
+  | sign-in attempt begins | `relogin` | `sign-in attempt started` (replaced by the outcome; a killed process leaves it, and the runner then writes `login_failed`) |
+  | safe-list block, also while the sign-in is suppressed | `safelist_blocked` | `SafeListLoginBlocked` |
+  | CV Database module failing while signed in | `stale` | `CV Database module error` (as the runner) |
+  | `--check` (or keep-alive) and not signed in | `stale` | `not signed in (check only, no sign-in attempted)` |
+  | sign-in failed, credentials unusable, or suppressed by the attempt limiter | `login_failed` | the marker (`LOGIN_FAILED`, `CRED_MISSING`, ...) or `sign-in suppressed (min-gap|hold)` |
+  | `--open-link` cleared the block | `ok` | `safe-list block cleared by the emailed link` |
+  | `--open-link` did not clear it | `safelist_blocked` | `the emailed link did not clear the block` |
+  | network failure, check error, unrecognised page, bad link | nothing written | the last known state stays (a guess would send the operator to a needless re-login, which costs a safe-list email) |
+
+  No exit code, CLI line or alert changed (the rate-limited alerts are untouched); the write is `try/catch` and passed through `env.redact`; a credential, username or link token never reaches the file (tested). The library `login()` itself does not write (only `ensureLoggedInDetailed` calls it); the file is written by whichever of the runner and this module ran last, both with the same mapping.
+- **Tests outside this package affected.** `tests/e2e/08-dashboard.e2e.js` test 8.3 asserts `status.json.reed.state === 'unknown'` for a world whose profile `.env` says `RESOURCER_SOURCES=caterer`; the plugin now (correctly) answers `disabled` there. CLOSED 2026-09-30 by the finalizer: the assertion expects `disabled` and `bash tests/e2e-linux.sh --only 08` passes (before the fix only 8.3 failed). Earlier note (run: `bash tests/e2e-linux.sh --only 08`, WSL: only that assertion failed, 8.1/8.2/8.4/8.5/8.6 passed; `--only 02,04` passed with the new caterer-status writer).

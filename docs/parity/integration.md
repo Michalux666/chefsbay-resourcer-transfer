@@ -5,7 +5,7 @@ Owner: the end-to-end rehearsal engineer. Legacy source: nothing is read from th
 ## 1. How to run it
 
 ```
-bash tests/e2e-linux.sh                 all scenarios, then a summary (about 16 minutes; last full run 934 s, 12 of 12 pass)
+bash tests/e2e-linux.sh                 all scenarios, then a summary (about 18 minutes; the last full run of 2026-09-29 took 934 s and 12 of 12 passed; scenario 13 was added 2026-09-30)
 bash tests/e2e-linux.sh --only 02,05    some scenarios
 bash tests/e2e-linux.sh --unit          also the whole unit suite: node --test "tests/**/*.test.js"
 bash tests/e2e-linux.sh --keep          keep the per-scenario profiles under $E2E_ROOT/worlds
@@ -30,7 +30,7 @@ Test-only switches that reach the code: `RESOURCER_TEST_NOW` (operating window a
 | # | File | Proves |
 |---|---|---|
 | 1 | `01-install.e2e.js` | npm install; wrappers byte-identical, executable, real files; bundle build (dry run, real), verify, restore (idempotent, modes 0700/0600, nothing forbidden travels, no secret printed); migrate twice; preflight-db; backfill `--strict` on a fresh install; all eight wrappers silent under a scrubbed environment and reading `.env` themselves (backup needs its passphrase from there); one-line failures (exit 90, 91) |
-| 2 | `02-happy-path.e2e.js` | pending file drained by ticks; 3 pages, 2 DB skips, 3 rejects, 1 post-unlock reject, 1 duplicate in Zoho, 1 phone recovered from a PDF; engine `jev_shadow` (LLM decides, Jev logged, redacted); DB rows and scoped rejections; run_results; territory; Zoho payload and attachments (PDF and DOCX); CVs and candidate JSON deleted; status files; digest at 18:30 equals run_results; no secret; personal data only in queue/result files |
+| 2 | `02-happy-path.e2e.js` | pending file drained by ticks; 3 pages, 2 DB skips, 3 rejects, 1 post-unlock reject, 1 duplicate in Zoho, 1 phone recovered from a PDF; engine `jev_shadow` (pinned by `tests/e2e/lib/world.js`; LLM decides, Jev logged, redacted); DB rows and scoped rejections; run_results; territory; Zoho payload and attachments (PDF and DOCX); CVs and candidate JSON deleted; status files; digest at 18:30 equals run_results; no secret; personal data only in queue/result files |
 | 3 | `03-screening-outage.e2e.js` | (a) gateway unreachable: probe miss, halt after two, one critical alert, nothing consumed, canary resumes by itself; (b) model failing mid-run: three strikes, halt, no Phase 2, territory and pending search kept and released, no candidate marked, queue held (no loop), recovery re-runs the same search; (c) Jev outage in shadow mode never blocks |
 | 4 | `04-session-paths.e2e.js` | safe-list (exit 11 `safelist`, one alert, one e-mail asked for, limiter, `--open-link` and `--clear-cooldown` recovery); wrong password (`login`); module error (`cvdb-module`, no re-login); session dying between runner check and phase 1 (`phase1-session-stale`, critical tick alert); 05:50 pre-flight against a block (exit 2, one line, one alert); routine overnight re-login |
 | 5 | `05-kill-recovery.e2e.js` | `kill -9` of the tick (run adopted), the runner (claim released, retried), phase 1 after an unlock (candidate recovered and pushed), Phase 2 mid-push (queue pushed again), everything at once, and five seeded random kills: never two runs, every unlocked candidate reaches Zoho once, no orphan lock, no CV left |
@@ -41,6 +41,7 @@ Test-only switches that reach the code: `RESOURCER_TEST_NOW` (operating window a
 | 10 | `10-retention.e2e.js` | a failed attach keeps one CV for its window; sweep by rule (review-tmp, stale screening input, queue/results after 3 days, orphans and the retried CV after 14 days, run records after 7, logs compressed); secrets/state/config byte-identical; the shadow log leaves at 180 days; after it no personal data or snippet text anywhere (compressed logs scanned too) |
 | 11 | `11-secrets.e2e.js` | a full day; no secret on disk outside its home, none in any process argument, file modes; a token endpoint and a gateway that echo credentials do not put them on disk |
 | 12 | `12-db-guard.e2e.js` | a missing database holds the queue with one critical alert; the runbook restore brings it back with the dedupe memory |
+| 13 | `13-jev-only.e2e.js` | the shipped default engine (`jev_only`, no engine named in the `.env`) with the fake gateway answering every chat-completions request 403 "restricted access": a normal run makes the numbers of scenario 2 with zero chat requests, rows say `jev_only` with no LLM data, the label names Jev; Jev refused by the team: three strikes halt, nothing consumed, the halt remedy names `typesafe-ai/jev`, no fallback, and the run completes once Jev is allowed again |
 
 ## 4. Findings and the smallest fix for each
 
