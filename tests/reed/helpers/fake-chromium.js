@@ -59,6 +59,15 @@ function onBrowserClose() {
       onBrowserClose,
     });
     if (process.env.FAKE_SITE_MODE) world.site.mode = process.env.FAKE_SITE_MODE;
+    // FAKE_REED_FAULT_FILE: JSON {site:{...}, api:{...}} read at every start (each Reed run starts a fresh browser), so a scenario can
+    // change the fault between runs. Used by the first-page failure scenarios (wipeTokenAfterSeed, initMs, alwaysHeaderMissing ...).
+    if (process.env.FAKE_REED_FAULT_FILE) {
+      try {
+        const fault = JSON.parse(fs.readFileSync(process.env.FAKE_REED_FAULT_FILE, 'utf8'));
+        Object.assign(world.site, fault.site || {});
+        Object.assign(world.api, fault.api || {});
+      } catch { /* no fault file: the stock fake */ }
+    }
   }
 })().catch((e) => { console.error(e.message); process.exit(1); });
 

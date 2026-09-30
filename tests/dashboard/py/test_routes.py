@@ -201,6 +201,26 @@ def test_runs_are_newest_first_with_parsed_breakdowns(plugin, ws, client, db):
     assert a["screeningModel"] == "test-model" and a["newToZoho"] == 10 and a["downloaded"] == 12
 
 
+def test_runs_show_a_failed_reed_attempt_as_failed_never_as_ok_pool_0(plugin, ws, client, db):
+    """docs/parity/reed-first-page.md: a Reed attempt that could not search is 'failed' with errors 1 in its breakdown; old rows are unchanged."""
+    failed = json.dumps({"pool": 0, "newToZoho": 0, "downloaded": 0, "duplicates": 0, "errors": 1, "status": "failed", "failed": True,
+                         "failureReason": "HTTP 400 code 50010", "authFailed": False, "authFailureReason": None, "phase1": {"pagesScraped": 0}})
+    empty = json.dumps({"pool": 0, "newToZoho": 0, "downloaded": 0, "duplicates": 0, "errors": 0, "status": "empty", "authFailed": False, "phase1": {}})
+    con = ws.connect()
+    for key, rj in (("merged-queue-f", failed), ("merged-queue-g", empty)):
+        con.execute("INSERT INTO run_results (run_key, date, started_at, completed_at, job_title, location, distance, keywords, sources, errors, reed_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)", (key, today_str(), "2099-01-01T10:00:00.000Z", "2099-01-01T10:05:00.000Z", "Sous Chef", "LS1", 20, "", "both", 0, rj))
+    con.commit()
+    con.close()
+    runs = {r["runKey"]: r for r in client.get(url("/runs"), params={"limit": 50}).json()["runs"]}
+    f, g, old = runs["merged-queue-f"], runs["merged-queue-g"], runs["merged-queue-a"]
+    assert f["reed"]["failed"] is True and f["reed"]["status"] == "failed" and f["reed"]["errors"] == 1
+    assert f["reed"]["failureReason"] == "HTTP 400 code 50010" and f["reed"]["pool"] == 0
+    assert g["reed"]["status"] == "empty" and "failed" not in g["reed"]
+    assert "status" not in old["reed"] and "failed" not in old["reed"]
+    assert set(f) == RUN_KEYS
+
+
 def test_runs_paging_and_clamping(plugin, ws, client, db):
     page = client.get(url("/runs"), params={"limit": 2, "offset": 2}).json()
     assert [r["runKey"] for r in page["runs"]] == ["merged-queue-c", "merged-queue-d"] and page["total"] == 5

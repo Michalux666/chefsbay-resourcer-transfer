@@ -287,6 +287,27 @@ test('digest at 18:00: once per day, with targets, sources, roles, halts, credit
   assert.ok(a.lines.some((l) => l.includes('daily digest 2026-09-30')), 'again the next day');
 });
 
+test('digest names the Reed attempts that failed today, and stays silent about Reed when none did', async (t) => {
+  let ok = true;
+  try { require('better-sqlite3'); } catch { ok = false; }
+  if (!ok) return t.skip('better-sqlite3 not installed');
+  const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  const today = new Date(a.clock()).toISOString().slice(0, 10);
+  seedDb(a.home, [
+    { key: 'f1', date: today, new: 5, sources: 'both', cj: JSON.stringify({ newToZoho: 5 }), rj: JSON.stringify({ pool: 0, errors: 1, status: 'failed', failed: true }) },
+    { key: 'f2', date: today, new: 5, sources: 'both', cj: JSON.stringify({ newToZoho: 5 }), rj: JSON.stringify({ pool: 0, errors: 1, status: 'failed', failed: true }) },
+    { key: 'g1', date: today, new: 25, sources: 'both', cj: JSON.stringify({ newToZoho: 5 }), rj: JSON.stringify({ pool: 30, errors: 0, status: 'ok', newToZoho: 20 }) },
+  ]);
+  await a.run();
+  const d = a.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'));
+  assert.ok(d, JSON.stringify(a.lines));
+  assert.match(d, /Reed attempts that failed today: 2 [(]/);
+  const b = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  seedDb(b.home, [{ key: 'g2', date: new Date(b.clock()).toISOString().slice(0, 10), new: 25, sources: 'both', rj: JSON.stringify({ pool: 30, errors: 0, status: 'ok', newToZoho: 20 }) }]);
+  await b.run();
+  assert.ok(!b.lines.find((l) => l.includes('daily digest')).includes('Reed attempts that failed'));
+});
+
 test('digest survives a missing database and never runs in quiet hours unless forced', async (t) => {
   const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 22, 30), fresh: true });
   await a.run();

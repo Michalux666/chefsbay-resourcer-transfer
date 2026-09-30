@@ -16,6 +16,10 @@ const AUTH_MARKER = path.join(paths.RUNTIME, 'reed-auth-failed.marker');
 const LOGIN_BLOCK_FILE = path.join(paths.RUNTIME, 'reed-login-block.json');
 const STATUS_FILE = path.join(paths.RUNTIME, 'reed-status.json');
 const ALERT_EPISODES_FILE = path.join(paths.RUNTIME, 'reed-alert-episodes.json');
+const FIRST_PAGE_STREAK_FILE = path.join(paths.RUNTIME, 'reed-first-page-streak.json');
+const FIRST_PAGE_ALERT_KEY = 'reed-first-page-failed';
+// A warn alert per episode; critical once this many Reed attempts in a row failed on the first page (a design default, not an owner decision).
+const FIRST_PAGE_CRITICAL_STREAK = 5;
 const STATUS_STATES = ['ok', 'auth_failed', 'disabled'];
 const CRED_FILE = path.join(paths.SECRETS, 'reed-credentials.json');
 const API_BASE = env.get('REED_API_BASE') || 'https://api.reed.co.uk/api-bff-recruiter-candidates';
@@ -90,16 +94,20 @@ function readEpisodes() {
 }
 
 // One alert per episode: silent until clearAlertEpisode(key), except a reminder after REED_ALERT_REMIND_HOURS (72, 0 = never) so a forgotten problem resurfaces.
+const SEVERITY_RANK = { info: 0, warn: 1, critical: 2 };
+
 function alertOnce(key, alert) {
   const eps = readEpisodes();
   const open = eps[key];
   if (open) {
+    // An open episode stays silent, except that a higher severity than the one raised for it gets through once (warn -> critical).
+    const escalates = !!open.severity && (SEVERITY_RANK[alert.severity] || 0) > (SEVERITY_RANK[open.severity] || 0);
     const remindH = numEnv('REED_ALERT_REMIND_HOURS', 72);
     const age = Date.now() - Date.parse(open.at);
-    if (!(remindH > 0 && age >= remindH * 3600000)) return false;
+    if (!escalates && !(remindH > 0 && age >= remindH * 3600000)) return false;
   }
   try {
-    fsx.writeJsonAtomic(ALERT_EPISODES_FILE, { ...eps, [key]: { at: new Date().toISOString() } });
+    fsx.writeJsonAtomic(ALERT_EPISODES_FILE, { ...eps, [key]: { at: new Date().toISOString(), severity: alert.severity || 'info' } });
   } catch { /* an unwritable state file must not swallow the alert */ }
   const { notify } = require('./lib/notify');
   return notify({ key, ...alert });
@@ -111,6 +119,38 @@ function clearAlertEpisode(...keys) {
   for (const k of keys) if (k in eps) { delete eps[k]; changed = true; }
   if (!changed) return;
   try { fsx.writeJsonAtomic(ALERT_EPISODES_FILE, eps); } catch { /* advisory */ }
+}
+
+// ---------------------------------------------------------------- first search page failures (docs/parity/reed-first-page.md)
+
+function readFirstPageStreak() {
+  const j = fsx.readJson(FIRST_PAGE_STREAK_FILE, null);
+  return j && typeof j === 'object' && Number.isFinite(j.count) && j.count > 0 ? j : { count: 0 };
+}
+
+// One Reed attempt could not fetch its first search page (after the request retries). Counts the consecutive failures and raises
+// reed-first-page-failed: a warn alert once per episode, critical once FIRST_PAGE_CRITICAL_STREAK attempts in a row failed. The text carries
+// names and numbers only (no token, no header, no candidate data).
+function recordFirstPageFailure({ reason, attempts, jobTitle, location } = {}) {
+  const prev = readFirstPageStreak();
+  const now = new Date().toISOString();
+  const count = prev.count + 1;
+  try {
+    fsx.writeJsonAtomic(FIRST_PAGE_STREAK_FILE, { count, since: prev.since || now, lastAt: now, reason: String(reason || 'unknown').slice(0, 80) });
+  } catch { /* advisory */ }
+  const critical = count >= FIRST_PAGE_CRITICAL_STREAK;
+  const what = `Reed could not fetch the first search page for ${jobTitle || '?'}/${location || '?'} (${String(reason || 'unknown').slice(0, 80)}, ${attempts || 1} attempt(s)).`;
+  const text = critical
+    ? `${what} ${count} Reed attempts in a row have failed this way, so Reed is effectively down. The Caterer half of every run is unaffected. Read the REED_REQUEST_FORENSIC lines of the newest logs/phase1-console-*.log (docs/parity/reed-first-page.md) and report them; do not change settings.`
+    : `${what} The Caterer half of the run is unaffected; the Reed half is recorded as failed and is listed by tools/reed-catchup.js. One alert per episode; it becomes critical after ${FIRST_PAGE_CRITICAL_STREAK} failures in a row (now ${count}).`;
+  const alerted = alertOnce(FIRST_PAGE_ALERT_KEY, { severity: critical ? 'critical' : 'warn', text, meta: { count, reason: String(reason || 'unknown').slice(0, 80) } });
+  return { count, critical, alerted };
+}
+
+// The first search page of a Reed attempt was fetched: the streak and its alert episode end.
+function clearFirstPageFailures() {
+  fsx.safeUnlink(FIRST_PAGE_STREAK_FILE);
+  clearAlertEpisode(FIRST_PAGE_ALERT_KEY);
 }
 
 // ---------------------------------------------------------------- RESOURCER_SOURCES gate and the auth hold
@@ -292,6 +332,15 @@ function getBrowserFetch() {
   }
 }
 
+// An error of the browser path that a direct fetch cannot improve: no token to send (REED_TOKEN_MISSING), a page that kept being replaced
+// under the request (REED_NAV_DURING_REQUEST, after its retries), a login problem, or an HTTP 4xx answer. Node's own request is blocked by
+// Cloudflare and would only turn such an error into a misleading REED_RELOGIN_NEEDED.
+function isFinalBrowserError(err) {
+  const code = err && err.code;
+  return code === 'REED_TOKEN_MISSING' || code === 'REED_NAV_DURING_REQUEST'
+    || String((err && err.message) || '').includes('REED_RELOGIN_NEEDED') || String((err && err.message) || '').includes('HTTP 4');
+}
+
 async function reedFetch(endpoint, options = {}, timeoutMs = 30000) {
   const bf = getBrowserFetch();
   if (bf) {
@@ -301,7 +350,7 @@ async function reedFetch(endpoint, options = {}, timeoutMs = 30000) {
       }
       return await bf.reedBrowserFetch(endpoint);
     } catch (err) {
-      if (!err.message.includes('REED_RELOGIN_NEEDED') && !err.message.includes('HTTP 4')) {
+      if (!isFinalBrowserError(err)) {
         process.stderr.write(`[reed-api-client] Browser proxy failed, trying direct: ${err.message.slice(0, 80)}\n`);
         return reedFetchDirect(endpoint, options, timeoutMs);
       }
@@ -317,7 +366,7 @@ async function reedFetchBinary(endpoint, options = {}, timeoutMs = 60000) {
     try {
       return await bf.reedBrowserFetchBinary(endpoint, options.body ? JSON.parse(options.body) : null);
     } catch (err) {
-      if (!err.message.includes('REED_RELOGIN_NEEDED') && !err.message.includes('HTTP 4')) {
+      if (!isFinalBrowserError(err)) {
         return reedFetchBinaryDirect(endpoint, options, timeoutMs);
       }
       throw err;
@@ -397,6 +446,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  isFinalBrowserError,
   reedFetch,
   reedFetchBinary,
   getToken,
@@ -410,6 +460,11 @@ module.exports = {
   readReedStatus,
   alertOnce,
   clearAlertEpisode,
+  recordFirstPageFailure,
+  clearFirstPageFailures,
+  readFirstPageStreak,
+  FIRST_PAGE_STREAK_FILE,
+  FIRST_PAGE_CRITICAL_STREAK,
   sourcesGate,
   syncGateStatus,
   authHold,

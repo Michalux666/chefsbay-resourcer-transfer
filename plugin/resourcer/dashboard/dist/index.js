@@ -514,6 +514,12 @@
   function StatsRow(props) {
     var s = props.stats;
     if (!s) return null;
+    if (s.failed) {
+      return h("div", { className: "rsr-src-row" },
+        h("span", { className: "rsr-src-l" }, props.label),
+        h("span", null, "not searched: " + (s.failureReason || "the search failed") + " | err " + num(s.errors)),
+        h("span", { className: "rsr-badge rsr-badge-warn" }, "failed"));
+    }
     return h("div", { className: "rsr-src-row" },
       h("span", { className: "rsr-src-l" }, props.label),
       h("span", null, "pool " + num(s.pool) + " | approved " + num(s.phase1 && s.phase1.approved) + " | new " + num(s.newToZoho) + " | dup " + num(s.duplicates) + " | err " + num(s.errors)),
@@ -531,6 +537,7 @@
       d && d.warnings && d.warnings.length ? d.warnings.map(function (w, i) { return h(Notice, { key: "w" + i, text: w }); }) : null,
       d && d.runs.length === 0 ? h("div", { className: "rsr-muted" }, "No runs recorded yet.") : null,
       d ? d.runs.map(function (r) {
+        var reedFailed = !!(r.reed && r.reed.failed);
         var bad = (r.errors || 0) > 0;
         return h("div", { key: r.runKey || (r.completedAt + r.location), className: "rsr-hist" },
           h("div", { className: "rsr-hist-top" },
@@ -538,8 +545,9 @@
             h("span", { className: "rsr-muted" }, r.sources || ""),
             h("span", { className: "rsr-muted" }, when(r.completedAt || r.startedAt)),
             h("span", { className: "rsr-muted" }, dur(r.runSecs)),
-            h("span", { className: "rsr-badge " + (bad ? "rsr-badge-warn" : "rsr-badge-ok") }, bad ? num(r.errors) + " errors" : "OK"),
-            r.reedAuthFailed ? h("span", { className: "rsr-badge rsr-badge-warn" }, "Reed auth failed") : null),
+            h("span", { className: "rsr-badge " + (bad || reedFailed ? "rsr-badge-warn" : "rsr-badge-ok") }, bad ? num(r.errors) + " errors" : reedFailed ? "Caterer OK" : "OK"),
+            r.reedAuthFailed ? h("span", { className: "rsr-badge rsr-badge-warn" }, "Reed auth failed") : null,
+            reedFailed ? h("span", { className: "rsr-badge rsr-badge-warn" }, "Reed failed") : null),
           h("div", { className: "rsr-hist-stats" },
             h(Stat, { label: "pool", value: num(r.pool) }), h(Stat, { label: "unlocked", value: num(r.downloaded) }),
             h(Stat, { label: "new to Zoho", value: num(r.newToZoho) }), h(Stat, { label: "duplicates", value: num(r.duplicates) }),

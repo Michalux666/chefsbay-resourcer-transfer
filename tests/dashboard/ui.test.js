@@ -225,6 +225,19 @@ test('the page renders every panel with the numbers from the API', async () => {
   });
 });
 
+test('a failed Reed attempt reads "Reed failed" with its reason, never OK and never pool 0', async () => {
+  const runs = runsOk();
+  runs.runs = [{ ...runs.runs[0], errors: 0, sources: 'both', reedAuthFailed: false,
+    reed: { pool: 0, newToZoho: 0, downloaded: 0, duplicates: 0, errors: 1, phase1: {}, authFailed: false, status: 'failed', failed: true, failureReason: 'HTTP 400 code 50010' } }];
+  await withPage(standardRoutes({ '/runs?limit=10&offset=0': () => runs }), {}, async (h) => {
+    const t = h.text();
+    assert.ok(t.includes('Reed failed'), 'the run carries a Reed failed badge');
+    assert.ok(t.includes('Caterer OK'), 'the run header says which half is OK instead of a bare OK');
+    assert.ok(t.includes('not searched: HTTP 400 code 50010'), 'the Reed row says why');
+    assert.ok(!t.includes('Reed pool 0 | approved'), 'no pool-0 line for the failed Reed attempt');
+  });
+});
+
 test('active runs show phase, progress and elapsed time from the start time', async () => {
   const routes = standardRoutes({ '/status': () => statusOk({ activeRuns: [
     { id: 'a', file: 'phase1-a.json', status: 'phase1_running', stage: 'phase1', label: 'Phase 1 - Scraping', jobTitle: 'Sous Chef', location: 'DT6', distance: 20, sources: 'both', startedAt: new Date(Date.now() - 125000).toISOString(), updatedAt: null, idleSecs: 30, stale: false,

@@ -452,9 +452,10 @@ test('UPDATE-B.md canary commands and invented CVs are character for character t
 });
 
 test('UPDATE-B.md copies exactly the installed files that changed since Update A, and says nothing else changed', (t) => {
-  const changed = gitLines(['diff', '--name-only', 'd60d917']);
-  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
-  if (!changed || !added) { t.skip('no git history with Update A here'); return; }
+  // The note describes Update B only: its range ends at the commit of Update B (later updates change other files and have their own notes).
+  const changed = gitLines(['diff', '--name-only', 'd60d917', 'a7fc7be']);
+  const added = changed ? [] : null;
+  if (!changed || !added) { t.skip('no git history with Update A and B here'); return; }
   const files = changed.concat(added);
   const note = read('docs/UPDATE-B.md');
   const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');

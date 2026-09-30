@@ -11,9 +11,14 @@
 // Usage: node scripts/reed-phase1.js --job-title "Chef" --location "LS1" [--distance 20] [--cv-limit 20]
 //          [--active-within month] [--uk-only true|false] [--temp-only true|false] [--caterer-queue <path>]
 //          [--run-id <id>] [--skip-screening]
-// Exit codes: 0 done (also: empty pool, or stopped early because AI screening is unavailable), 1 usage error / REED_AUTH_FAILED /
+// Exit codes: 0 done (also: a genuine empty pool, or stopped early because AI screening is unavailable), 1 usage error / REED_AUTH_FAILED /
 //             first search page failed / fatal.
-// Stdout markers: REED_AUTH_FAILED, REED_SCREENING_HALT, REED_DAILY_LIMIT, REED_BROWSER_BUSY, REED_PHASE1_SUMMARY:<json>.
+// Stdout markers: REED_AUTH_FAILED, REED_FIRST_PAGE_FAILED, REED_SCREENING_HALT, REED_DAILY_LIMIT, REED_BROWSER_BUSY, REED_PHASE1_SUMMARY:<json>.
+//
+// First page failure (2026-09-30 incident, docs/parity/reed-first-page.md): when the first search page cannot be fetched (after the request
+// retries of reed-browser-fetch.js) and the cause is not an auth problem (401/403 relogin, 451, which keep their own handling), the attempt is a
+// FAILURE, not an empty search: exit 1 and `REED_FIRST_PAGE_FAILED: <reason> attempts=<n> streak=<k>` on stdout. "Total pool: 0 candidates"
+// stays a normal empty result (exit 0).
 //
 // D4 (screening unavailable): ANY screening attempt that does not end in a successful parse (exit 3 / API_UNAVAILABLE, exit 1 or any other
 // non-zero exit, timeout, signal, spawn failure, unparseable or malformed output, results that do not cover every candidate) counts as
@@ -28,7 +33,7 @@ const paths = require('./lib/paths');
 const env = require('./lib/env');
 const fsx = require('./lib/fsx');
 const { search } = require('./reed-search');
-const { SESSION_FILE, AUTH_MARKER, LOGIN_COMMAND, writeReedStatus, markAuthOk, alertOnce, clearAlertEpisode } = require('./reed-api-client');
+const { SESSION_FILE, AUTH_MARKER, LOGIN_COMMAND, writeReedStatus, markAuthOk, alertOnce, clearAlertEpisode, recordFirstPageFailure, clearFirstPageFailures } = require('./reed-api-client');
 const launcher = require('./ensure-chrome-cdp');
 const candidateDb = require('../candidates-db');
 
@@ -126,6 +131,20 @@ function seenReedCandidate(reedId) {
     return false;
   }
 }
+
+// Short, secret-free description of why the first page failed: HTTP status and API error code, or the error code of the failure.
+function firstPageFailureReason(err) {
+  const m = /"errorCode"\s*:\s*"?(\d{3,6})/.exec(String(err && err.message));
+  if (err && err.status) return `HTTP ${err.status}${m ? ` code ${m[1]}` : ''}`;
+  if (err && err.code && /^[A-Z0-9_]{3,40}$/.test(String(err.code))) return String(err.code);
+  return 'error';
+}
+
+// A first-page error that belongs to this territory and not to Reed's state: the place cannot be searched at all (Reed's location lookup
+// returns nothing, raised by reed-search.js before any request to the search API). It is not a failure of the attempt: no streak, no alert,
+// no retry, no catch-up listing. Everything else (HTTP 400 of any code, 5xx, timeouts, browser errors) stays a failure, so a systematic break
+// is never taken for a run of unsearchable places.
+const isUnsearchablePlace = (err) => /No locations found for/.test(String((err && err.message) || ''));
 
 function makeRunId(jobTitle, location) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -646,6 +665,7 @@ async function main(argv) {
       out(`  Total pool: ${totalCount} candidates (${totalPages} pages)`);
 
       if (totalCount === 0) {
+        clearFirstPageFailures(); // a genuine empty answer: the search worked
         out('[Reed Phase 1] No candidates found - exiting');
         writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, searchDate, [], emptyStats({}));
         return 0;
@@ -655,11 +675,28 @@ async function main(argv) {
       if (currentQueryId) out(`  QueryId: ${currentQueryId}`);
       else out('  WARN: No queryId in search response - profile download may fail');
     } catch (err) {
+      if (isUnsearchablePlace(err)) {
+        // Reed has no such place: nothing to search, nothing failed. Recorded as an empty search (pool 0, errors 0), with the reason in the log.
+        log(`Reed location lookup found nothing for this territory: ${String(err.message).slice(0, 120)}`);
+        out('REED_LOCATION_NOT_FOUND: Reed cannot search this place - recorded as an empty Reed search, not a failure');
+        writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, searchDate, [], emptyStats({ locationNotFound: true }));
+        return 0;
+      }
       log(`FATAL: Could not fetch first page: ${err.message}`);
       if (err.message.includes('REED_RELOGIN_NEEDED')) log(`Run: ${LOGIN_COMMAND}`);
       if (err.status === 451 || /HTTP 451/.test(err.message)) {
         writeAuthFailedMarker('reed_451_international', ctx);
         alertOnce('reed-451', { severity: 'critical', text: `Reed refused the search from this server (HTTP 451 InternationalCvSearchNotAllowed): the login session was created from a non-UK network. Once the server egresses from the UK, re-establish the session with: cd ${paths.HOME} && node scripts/cdp-reed-full-login.js --clean (add --human if Turnstile blocks it). Reed is skipped until then; Caterer keeps running.` });
+      } else if (err.code === 'REED_TOKEN_MISSING') {
+        // No usable token in the saved session and none from the browser: that is a login problem, handled like any other (marker, hold, alert).
+        writeAuthFailedMarker('token_missing', ctx);
+        out('REED_AUTH_FAILED');
+      } else if (!/REED_RELOGIN_NEEDED/.test(err.message)) {
+        // Not an auth problem and not an empty search: the Reed half of this run did not happen. Say so, loudly and in a fixed form.
+        const reason = firstPageFailureReason(err);
+        const rec = recordFirstPageFailure({ reason, attempts: err.attempts, jobTitle, location });
+        writeReedStatus('ok', `authenticated, but the first search page failed (${rec.count} in a row)`);
+        out(`REED_FIRST_PAGE_FAILED: ${reason} attempts=${err.attempts || 1} streak=${rec.count}`);
       }
       return 1;
     }
@@ -673,6 +710,9 @@ async function main(argv) {
     const cvCache = new Map();
     const approvedIds = new Set();
     let apiFailureCount = 0;
+    let pageFetchFailures = 0; // search pages that could not be fetched (after the retries of reed-browser-fetch)
+    let lastPageFailure = null;
+    let firstPageSettled = false;
 
     const maxPages = cvLimit ? Math.ceil(cvLimit * 10 / PAGE_SIZE) : totalPages; // overfetch to allow for rejections
     out(`[Reed Phase 1] Step 2 - Paginating through results (up to ${Math.min(maxPages, totalPages)} pages)...\n`);
@@ -689,10 +729,14 @@ async function main(argv) {
         pageData = await search(searchParams(page));
         if (page === 1 && stats.pagesScraped === 0 && !currentQueryId && pageData.queryId) currentQueryId = pageData.queryId;
         stats.pagesScraped++;
+        if (!firstPageSettled) { firstPageSettled = true; clearFirstPageFailures(); } // the search answered: the streak and its alert episode end
       } catch (err) {
         log(`ERROR fetching page ${page}: ${err.message}`);
+        pageFetchFailures++;
+        lastPageFailure = err;
+        stats.errors++;
         if (err.message.includes('REED_RELOGIN_NEEDED')) break;
-        if (err.status === 451) { stats.errors++; break; }
+        if (err.status === 451) break;
         await sleep(2000);
         continue;
       }
@@ -825,6 +869,16 @@ async function main(argv) {
       if (page < Math.min(maxPages, totalPages)) await sleep(500);
     }
 
+    // A run that found a pool but could not fetch a single page of it did not do its Reed half: that is a failure, never a quiet "ok".
+    let noPageFetched = null;
+    if (stats.pagesScraped === 0 && pageFetchFailures > 0 && !stats.screeningHalted) {
+      const reason = firstPageFailureReason(lastPageFailure);
+      const rec = recordFirstPageFailure({ reason, attempts: lastPageFailure && lastPageFailure.attempts, jobTitle, location });
+      writeReedStatus('ok', `authenticated, but no search page could be fetched (${rec.count} in a row)`);
+      out(`REED_FIRST_PAGE_FAILED: ${reason} attempts=${(lastPageFailure && lastPageFailure.attempts) || 1} streak=${rec.count} (no search page could be fetched)`);
+      noPageFetched = reason;
+    }
+
     // Step 3: write approved queue
     const phase1CompletedAt = new Date().toISOString();
     const phase1Stats = {
@@ -841,6 +895,7 @@ async function main(argv) {
       phase1CompletedAt,
     };
     if (stats.screeningHalted) phase1Stats.screeningHalted = true;
+    if (noPageFetched) { phase1Stats.failed = true; phase1Stats.failureReason = noPageFetched; phase1Stats.errors = Math.max(1, phase1Stats.errors); }
     const queueData = writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, searchDate, approvedCandidates, phase1Stats);
     const marked = markApprovedSeen(queueData.outputPath, approvedCandidates);
     out(`[Reed Phase 1] approvals recorded as seen: ${marked}`);
@@ -888,5 +943,5 @@ if (require.main === module) {
 }
 
 module.exports = {
-  main, runAiScreening, parseScreeningOutput, describeFailure, checkByReedId, seenReedCandidate, screeningUnavailable, parseArgs, REFRESH_KILL_TIMEOUT_MS,
+  main, firstPageFailureReason, runAiScreening, parseScreeningOutput, describeFailure, checkByReedId, seenReedCandidate, screeningUnavailable, parseArgs, REFRESH_KILL_TIMEOUT_MS,
 };

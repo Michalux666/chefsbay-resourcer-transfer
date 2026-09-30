@@ -42,6 +42,7 @@ Test-only switches that reach the code: `RESOURCER_TEST_NOW` (operating window a
 | 11 | `11-secrets.e2e.js` | a full day; no secret on disk outside its home, none in any process argument, file modes; a token endpoint and a gateway that echo credentials do not put them on disk |
 | 12 | `12-db-guard.e2e.js` | a missing database holds the queue with one critical alert; the runbook restore brings it back with the dedupe memory |
 | 13 | `13-jev-only.e2e.js` | the shipped default engine (`jev_only`, no engine named in the `.env`) with the fake gateway answering every chat-completions request 403 "restricted access": a normal run makes the numbers of scenario 2 with zero chat requests, rows say `jev_only` with no LLM data, the label names Jev; Jev refused by the team: three strikes halt, nothing consumed, the halt remedy names `typesafe-ai/jev`, no fallback, and the run completes once Jev is allowed again |
+| 15 | `15-reed-first-page.e2e.js` | the Reed first-page failure (HTTP 400, code 50010) through the whole pipeline with Reed on: (a) a first page that never works is a FAILED Reed attempt (results, run_results, dashboard, one warn alert, territory marked Reed-pending with one retry, catch-up lists it) while the Caterer half completes as before; (b) the next run does the Reed half, clears the mark and closes the alert; (c) transient 400s and page reloads are absorbed |
 
 ## 4. Findings and the smallest fix for each
 
