@@ -103,8 +103,8 @@ function render(s, lists) {
   out.push(`CV screening report: ${s.rows} screened CVs, operating point tau ${s.tau}`);
   out.push('');
   out.push('WHO DECIDED');
-  out.push(`  Jev-decided     ${s.lanes.jev}   ${s.jevShare}% of the ${s.modelled} that needed a decision   ${s.modelled && s.jevShare < 99 ? 'BELOW the 99% the owner requires' : 'ok (99% or more)'}`);
-  out.push(`  fallback lane   ${s.lanes.fallback}   ${s.fallbackShare}%   ${s.fallbackShare > 1 ? 'ABOVE the 1% the owner allows' : 'ok (1% or less)'}`);
+  out.push(`  Jev-decided     ${s.lanes.jev}   ${s.jevShare}% of the ${s.modelled} that needed a decision   ${!s.modelled ? 'no data yet' : (s.jevShare < 99 ? 'BELOW the 99% the owner requires' : 'ok (99% or more)')}`);
+  out.push(`  fallback lane   ${s.lanes.fallback}   ${s.fallbackShare}%   ${!s.modelled ? 'no data yet' : (s.fallbackShare > 1 ? 'ABOVE the 1% the owner allows' : 'ok (1% or less)')}`);
   out.push(`  code only       ${s.lanes.facts}   ${s.factsShare}%   (a CV read with high confidence that lists no work history)`);
   out.push(`  unreadable      ${s.lanes.unreadable}   ${s.unreadableShare}% of all CVs (${s.unreadableNotRead} could not be read, ${s.unreadableNoWorkHistory} were read but no work history could be found); these pass through and are never counted against Jev`);
   out.push(`  Jev-decided of ALL ${s.rows} screened CVs: ${s.lanes.jev}, ${s.jevShareAll}% (the honest share if the CVs from which no work history could be found are counted too)`);

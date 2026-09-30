@@ -16,7 +16,8 @@
 //                       [[LLMJSON:<text>]] [[LLMLENGTH]] [[LLMREFUSAL]] [[L500PRIMARY]] [[LBADPRIMARY]]
 //   failure tokens    : [[HTTP500]] [[HTTP500x<n>]] [[HTTP429]] [[HTTP429x<n>]] [[HTTP422]] [[SLOW:<ms>]]
 //                       [[TIMEOUT]] [[MALFORMED]] [[BADCHOICE]] [[NOPROBS]] [[NOTJEV]]
-// Global modes per route (POST /__fake/mode {jev|llm: ...}): ok, down, slow, 401, 402, 403, 429, 500, 503,
+// Global modes per route (POST /__fake/mode {jev|llm|cv: ...}; cv = only the requests of the CV screening stage, recognised by their questions, so the snippet
+// route can stay healthy while the CV route refuses, as in Update C finding F1): ok, down, slow, 401, 402, 403, 429, 500, 503,
 // restricted (403 "Your team has restricted access to this model"), no_providers (400 no_providers_available).
 
 const http = require('node:http');
@@ -147,7 +148,7 @@ function startFakeGateway(options) {
   const opts = options || {};
   const KEY = opts.key || DEFAULT_KEY;
   const S = {
-    mode: { jev: 'ok', llm: 'ok', credits: 'ok', canary: 'reject', failNext: { jev: 0, llm: 0 }, latencyMs: 2, jevLatencyMs: null, llmLatencyMs: null, randomLatency: false, slowMs: 1500 },
+    mode: { jev: 'ok', llm: 'ok', cv: 'ok', credits: 'ok', canary: 'reject', failNext: { jev: 0, llm: 0 }, latencyMs: 2, jevLatencyMs: null, llmLatencyMs: null, randomLatency: false, slowMs: 1500 },
     calls: {},
     inflight: 0,
     maxInflight: 0,
@@ -165,7 +166,7 @@ function startFakeGateway(options) {
   const rnd = () => { S.seed = (S.seed * 1103515245 + 12345) & 0x7fffffff; return S.seed / 0x7fffffff; };
 
   function reset() {
-    S.mode = { jev: 'ok', llm: 'ok', credits: 'ok', canary: 'reject', failNext: { jev: 0, llm: 0 }, latencyMs: 2, jevLatencyMs: null, llmLatencyMs: null, randomLatency: false, slowMs: 1500 };
+    S.mode = { jev: 'ok', llm: 'ok', cv: 'ok', credits: 'ok', canary: 'reject', failNext: { jev: 0, llm: 0 }, latencyMs: 2, jevLatencyMs: null, llmLatencyMs: null, randomLatency: false, slowMs: 1500 };
     S.calls = {}; S.inflight = 0; S.maxInflight = 0; S.byRoute = {}; S.maxByRoute = {}; S.requests = []; S.forbid = []; S.forbiddenHits = 0;
     S.counters = new Map(); S.capture = false; S.captured = [];
   }
@@ -189,7 +190,7 @@ function startFakeGateway(options) {
     }
     if (['401', '402', '403', '429', '500', '503'].includes(m)) {
       const code = Number(m);
-      send(res, code, kind === 'jev'
+      send(res, code, kind === 'jev' || kind === 'cv'
         ? { message: `fake ${code}`, error_type: code === 401 ? 'authentication_error' : 'invalid_request' }
         : { error: { message: `fake ${code}`, type: 'fake_error' } }, code === 429 ? { 'retry-after-ms': '5' } : {});
       return true;
@@ -271,6 +272,13 @@ function startFakeGateway(options) {
         const toks = tokensOf(`${snippet} ${title}`, 'jev');
         if (isCanary(snippet)) toks.push({ name: S.mode.canary === 'approve' ? 'APPROVE' : 'REJECT', arg: undefined });
         S.requests.push({ route, model: body.model, questions: Object.keys(body.questions), stateKeys: Object.keys(body.state || {}), candidateKeys: Object.keys((body.state && body.state.candidate) || {}), hasProviderOptions: !!body.providerOptions, bodyHash: hash(bodyText) });
+        const cvRequest = !!body.questions.search_level || Object.keys(body.questions).some(k => /^relevance_\d+$/.test(k));
+        if (cvRequest && S.mode.cv !== 'ok') {
+          // the CV route alone is failing (the same failure shapes as a global jev mode, for these requests only)
+          const cvGated = await modeGate('cv', req, res, toks, bodyText);
+          if (cvGated === 'hang') return undefined;
+          if (cvGated) return undefined;
+        }
         const gated = await modeGate('jev', req, res, toks, bodyText);
         if (gated === 'hang') return undefined;
         if (gated) return undefined;

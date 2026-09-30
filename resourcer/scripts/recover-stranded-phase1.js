@@ -99,6 +99,11 @@ function findApprovedQueueFor(statusFile) {
 
 const norm = (v) => String(v || '').trim().toLowerCase();
 
+// True while the pipeline halt is up for a screening reason (fails open: a halt that cannot be read never blocks a recovery).
+function heldByHalt() {
+  try { return require('./lib/cv/phase2').screeningHalted(); } catch { return false; }
+}
+
 // The merged queue a both-source Phase 2 was working on: same title and location, written after the run began.
 function findMergedQueueFor(data) {
   if (data.sources !== 'both') return null;
@@ -222,7 +227,8 @@ function recoverInterrupted(opts) {
     if ((now - new Date(data.startedAt || data.updatedAt).getTime()) > MAX_AGE_DAYS * 24 * 60 * 60 * 1000) continue;
     if (ageMinutes(data.updatedAt || data.startedAt) < (o.minAgeMin === undefined ? INTERRUPTED_MIN_AGE_MIN : o.minAgeMin)) continue;
 
-    const merged = data.status === 'phase2_starting' ? findMergedQueueFor(data) : null;
+    // A both-source Phase 2 that was HELD is released to phase1_abandoned by the supervisor's orphan sweep, so its merged queue is looked for then too.
+    const merged = (data.status === 'phase2_starting' || (data.status === 'phase1_abandoned' && data.phase2Hold)) ? findMergedQueueFor(data) : null;
     const queueFile = merged ? merged.file : findApprovedQueueFor(fp);
     if (!queueFile) continue;
     const queue = merged ? merged.queue : safeReadJson(queueFile);
@@ -237,6 +243,10 @@ function recoverInterrupted(opts) {
       try { fsx.writeJsonAtomic(fp, data); } catch { /* next pass */ }
       continue;
     }
+
+    // A queue that CV screening HELD (process-approved-queue.js left phase2Hold) waits for the screening halt to clear: retrying it now could only
+    // hold again. Once the halt is gone (the supervisor clears it only when the CV route answers) the retry below completes it.
+    if (data.phase2Hold && heldByHalt()) continue;
 
     const rec = data.phase2Recovery && typeof data.phase2Recovery === 'object' ? data.phase2Recovery : { attempts: 0 };
     if (rec.pid && fsx.pidAlive(rec.pid) && ageMinutes(rec.at) < LOCK_MAX_MIN) continue;

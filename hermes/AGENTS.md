@@ -92,7 +92,7 @@ The pipeline stops starting runs when AI screening cannot answer, and holds terr
 shows on the dashboard. It clears by itself within about a minute of the gateway answering. Read it with
 `node scripts/pipeline-halt-cli.js get`. Causes and owner actions: gateway unreachable (wait, check the Vercel status page),
 `screening gateway auth failed` (the key was revoked or is wrong: the owner replaces `AI_GATEWAY_API_KEY`; if the detail says the team has restricted access to a model, the owner allows `typesafe-ai/jev` on the Vercel team), `credits exhausted`
-(the owner tops up the AI Gateway balance). Clear by hand with `node scripts/pipeline-halt-cli.js clear` only after the cause is
+(the owner tops up the AI Gateway balance), `screening criteria invalid` (`config/screening-criteria.json` is broken or missing: the owner restores it from git), `CV screening criteria invalid` (the same for `config/cv-screening.json`, only while `CV_SCREEN` is `on`), `screening halt keeps returning` (only while `CV_SCREEN` is `on`: the halt was cleared twice within 6 hours while a CV-held queue waited and came back each time, so the supervisor stopped clearing it; HUMAN looks at the CV route and clears it by hand, or the owner sets `CV_SCREEN` to `shadow`). With `CV_SCREEN=on` the halt also clears only when the CV route answers a canary, and no candidate is unlocked while it is up. Clear by hand with `node scripts/pipeline-halt-cli.js clear` only after the cause is
 fixed; if it comes back within two minutes, leave it and report.
 
 ## Alerts: what each key means and what to do
@@ -125,8 +125,9 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | cv-fallback-rate-high | more than 5 percent of a queue of at least 20 CVs was not decided by Jev | report; the owner reads `node scripts/cv-report.js` |
 | cv-forced-rate-high | more than 35 percent of a queue was decided in real doubt (forced) | report; the owner audits the forced rows |
 | cv-unreadable-rate-high | more than 30 percent of a queue could not be read; those CVs went to Zoho unscreened | report; the CV reader may be broken |
-| cv-shadow-stopped | CV screening (shadow) stopped early: 5 CVs in a row could not be screened, the rest of that queue was not screened; nothing was blocked or lost | report; the owner checks the key, credits and gateway; the next queue tries again by itself |
-| cv-screening-unavailable | CV screening (mode on) could not reach Jev; the queue is held with every CV kept | see Halts; auth or credits need HUMAN; it retries by itself |
+| cv-shadow-stopped | CV screening (shadow) stopped early: 5 CVs in a row could not be screened, or the queue had been screened for 120 seconds (Jev slow), the rest of that queue was not screened; nothing was blocked or lost | report; the owner checks the key, credits and gateway; the next queue tries again by itself |
+| cv-screening-unavailable | CV screening (mode on) could not reach Jev, or `config/cv-screening.json` is broken; the queue is held with every CV kept and nothing more is unlocked | see Halts; auth or credits need HUMAN, a broken file is fixed by the owner; it retries by itself |
+| cv-config-invalid | CV screening (shadow): `config/cv-screening.json` is broken or missing, so the stage did not run for that queue; nothing was blocked | report; the owner fixes or restores the file (docs/CV-SCREENING.md section 5) |
 | cv-reject-not-recorded | a CV rejection (mode on) could not be written to `candidates.db`; files kept, decided again next run | report; check `node scripts/preflight-db.js` |
 | cv-review-errors | the CV reviewer process failed on some CVs; they went through like unreadable ones | report the text |
 | phase2-fatal | the Zoho push run aborted | report with the text; recovery runs by itself up to 3 times |

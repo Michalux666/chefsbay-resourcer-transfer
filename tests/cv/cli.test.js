@@ -177,7 +177,7 @@ test('nothing about the CV is written to disk: only the shadow row and the two n
   const r = await cli(['--job', 'Sous Chef', '--cv-file', f, '--known-file', '-', '--candidate-id', '5'], { input: JSON.stringify(KNOWN) });
   assert.equal(r.code, 0, r.stderr);
   const files = home.listFiles().filter(n => !n.startsWith('..') && !/^cv9|\.txt$/.test(n));
-  const allowed = files.every(n => /^(shadow\/cv-\d{4}-\d{2}-\d{2}\.jsonl|shadow\/\.last-prune-cv|state\/cv-answers\.jsonl|state\/cv-search-levels\.json)$/.test(n));
+  const allowed = files.every(n => /^(config\/cv-screening\.json|shadow\/cv-\d{4}-\d{2}-\d{2}\.jsonl|shadow\/\.last-prune-cv|state\/cv-answers\.jsonl|state\/cv-search-levels\.json)$/.test(n));
   assert.ok(allowed, files.join(', '));
   for (const n of files) {
     const body = fs.readFileSync(path.join(home.home, n), 'utf8');
@@ -219,9 +219,11 @@ test('the operating point, the fallback policy and the config file act on the co
   assert.equal(JSON.parse(r.stdout).finalReasonCodes[0], 'policy_fallback_reject');
   home.writeConfig('{ this is not json');
   r = await cli(['--job', 'Sous Chef', '--cv-file', sneaky]);
-  assert.equal(r.code, 0);
+  // fail closed (Update C, F3): a broken file decides nothing, exit 3 with its own fixed reason, never a reject and never an approve
+  assert.equal(r.code, 3);
   assert.match(r.stderr, /WARN cv config: config file cv-screening\.json is unreadable/);
-  assert.equal(JSON.parse(r.stdout).final, 'approve');
+  assert.match(r.stdout, /^API_UNAVAILABLE:cv-screening\.json is not usable/);
+  assert.match(r.stderr, /SCREENING_REASON: cvconfig/);
   home.writeConfig({ fallback: { policy: 'reject' } });
   r = await cli(['--job', 'Sous Chef', '--cv-file', sneaky]);
   assert.equal(JSON.parse(r.stdout).final, 'reject');

@@ -21,10 +21,10 @@ const path = require('path');
 const paths = require('./lib/paths');
 const env = require('./lib/env');
 const screening = require('./lib/screening');
-const { maybePrune } = require('./lib/screening/shadow');
+const { maybePrune, ShadowLog } = require('./lib/screening/shadow');
 
 const VALUE_FLAGS = new Set(['mode', 'job', 'location', 'distance', 'batch-size', 'candidates-file', 'candidates', 'title', 'snippet', 'name', 'source', 'run-id', 'single-file']);
-const BOOL_FLAGS = new Set(['help', 'h', 'consume-input', 'with-codes']);
+const BOOL_FLAGS = new Set(['help', 'h', 'consume-input', 'with-codes', 'no-shadow']);
 
 function usageLines() {
   return [
@@ -55,6 +55,7 @@ function helpText() {
     '                             so the candidate text never appears on the command line',
     '  --source caterer|reed      Optional source label for the shadow log (default: detected from the snippet)',
     '  --run-id <id>              Optional run id for the shadow log',
+    '  --no-shadow                Do not write rows to the shadow log (the install canaries use it, so invented cards never reach the numbers the owner reads)',
     '  --batch-size <n>           Accepted and ignored: every candidate is screened individually',
     '',
     'Environment: AI_GATEWAY_API_KEY (required), SCREEN_ENGINE jev_only|llm|jev_shadow|jev (default jev_only: Jev only, no LLM),',
@@ -255,7 +256,7 @@ async function main(argv, io) {
     sweepReviewTmp();
     try { maybePrune({ days: cfg.shadow.retentionDays }); } catch (e) { /* best effort */ }
 
-    const engine = screening.createEngine(cfg, { log: lio.log });
+    const engine = screening.createEngine(cfg, { log: lio.log, ...(args['no-shadow'] ? { shadow: new ShadowLog({ enabled: false }) } : {}) });
     if (mode === 'batch') await runBatch(args, lio, cfg, engine);
     else await runSingle(args, lio, cfg, engine);
     return 0;

@@ -96,7 +96,7 @@ test('a credits endpoint that is missing for this key type (404) does not fail t
 
 test('the reason strings are a fixed set and never contain a status code (no halt churn)', async () => {
   assert.deepEqual(Object.values(health.REASONS).sort(), [
-    'AI screening unavailable', 'screening credits exhausted', 'screening gateway auth failed', 'screening gateway error', 'screening gateway unreachable',
+    'AI screening unavailable', 'CV screening criteria invalid', 'screening credits exhausted', 'screening criteria invalid', 'screening gateway auth failed', 'screening gateway error', 'screening gateway unreachable',
   ].sort());
   for (const r of Object.values(health.REASONS)) assert.ok(!/\d{3}/.test(r), r);
   gw.setMode({ credits: '500' });

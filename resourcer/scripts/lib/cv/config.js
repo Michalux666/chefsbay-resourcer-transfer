@@ -1,8 +1,9 @@
 'use strict';
 // Configuration of the CV screening stage: defaults.json (built in) <- config/cv-screening.json (the owner's file)
-// <- environment. A key the code does not know is ignored (with a warning, so a typo is noticed); a value of the wrong
-// type or outside its range is replaced by the default with a warning; a broken or missing file means the defaults.
-// Nothing here throws: screening must never fail because someone edited a number.
+// <- environment. A key the code does not know is ignored (with a warning, so a typo is noticed). Anything the owner's file
+// asked for and the code cannot apply (not JSON, a wrong type, out of range, a blanked option, a missing required file) is a
+// FAULT (cfg.fault): the values then fall back to the defaults for display only and whoever decides must fail closed.
+// Nothing here throws.
 
 const fs = require('fs');
 const path = require('path');
@@ -43,6 +44,7 @@ function rangeOf(key) {
   if (/Months$/.test(key)) return [0, 1200];
   if (/Years$/.test(key)) return [0, 60];
   if (/Ms$/.test(key)) return [0, 3600000];
+  if (key === 'shadowMaxSeconds') return [1, 3600];
   if (/Sec$/.test(key)) return [0, 86400 * 30];
   if (/Level$/.test(key)) return [0, 9];
   if (/Chars$/.test(key)) return [1, 20000];
@@ -190,28 +192,20 @@ function operatingTau(op) {
   return op.costLost / (op.costLost + op.costWasted);
 }
 
-/**
- * @param {{getEnv?:(name:string)=>string|undefined, file?:string, overrides?:object}} [opts]
- * @returns {object} effective, validated configuration; cfg.warnings lists everything that was corrected, cfg.tau is the reject threshold
- */
-function load(opts) {
-  const o = opts || {};
-  const getEnv = o.getEnv || (n => env.get(n));
-  const warnings = [];
-  let cfg = clone(DEFAULTS);
+// A correction that is only an unknown key stays a warning (a note or a typo must not stop the pipeline); anything else that the
+// owner's file asked for and the code could not apply is a fault.
+const isFault = w => !/^unknown setting /.test(w);
 
-  const file = o.file || configFile(getEnv);
-  const explicit = !o.file && !!getEnv('CV_SCREEN_CONFIG_FILE');
-  let fromFile = null;
-  try {
-    fromFile = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\ufeff/, ''));
-    if (!isPlain(fromFile)) { warnings.push(`config file ${path.basename(file)} does not hold an object; using the built-in defaults`); fromFile = null; }
-  } catch (e) {
-    if (e && e.code !== 'ENOENT') warnings.push(`config file ${path.basename(file)} is unreadable (${String(e.message).slice(0, 80)}); using the built-in defaults`);
-    else if (explicit) warnings.push(`config file ${path.basename(file)} was named explicitly but does not exist; using the built-in defaults`);
-  }
+const FAULT_KEY = 'cvconfig';
+
+/**
+ * Builds the effective configuration from the parsed file (or null), the test overrides and the environment, recording every
+ * correction in `warnings`. Pure: the same inputs give the same result.
+ */
+function assemble(fromFile, overrides, getEnv, warnings) {
+  let cfg = clone(DEFAULTS);
   if (fromFile) cfg = mergeKnown(cfg, fromFile, '', warnings);
-  if (o.overrides) cfg = mergeKnown(cfg, o.overrides, '', warnings);
+  if (overrides) cfg = mergeKnown(cfg, overrides, '', warnings);
 
   const E = n => getEnv(n);
   if (E('SCREEN_GATEWAY_ORIGIN')) cfg.gateway.origin = String(E('SCREEN_GATEWAY_ORIGIN')).trim();
@@ -318,6 +312,7 @@ function load(opts) {
   cfg.cache.answersTtlSec = Math.max(0, cfg.cache.answersTtlSec);
   cfg.cache.searchLevelTtlSec = Math.max(0, cfg.cache.searchLevelTtlSec);
   cfg.phase2.shadowStopAfterFailures = Math.max(1, Math.round(cfg.phase2.shadowStopAfterFailures));
+  cfg.phase2.shadowMaxSeconds = Math.max(1, Number(cfg.phase2.shadowMaxSeconds) || DEFAULTS.phase2.shadowMaxSeconds);
   cfg.cache.maxEntries = Math.max(10, Math.round(cfg.cache.maxEntries));
   cfg.shadow.enabled = cfg.shadow.enabled === true;
   cfg.shadow.storeAnswers = cfg.shadow.storeAnswers === true;
@@ -325,6 +320,48 @@ function load(opts) {
 
   cfg.signature = signatureOf(cfg);
   cfg.warnings = warnings;
+  return cfg;
+}
+
+/**
+ * @param {{getEnv?:(name:string)=>string|undefined, file?:string, overrides?:object, fileRequired?:boolean}} [opts]
+ *   file: use this criteria file instead of the default one (a test seam and the --config flag); it may be absent unless fileRequired.
+ * @returns {object} effective, validated configuration; cfg.warnings lists everything that was corrected, cfg.tau is the reject threshold.
+ *   cfg.fault is null, or {kind:'config', key:'cvconfig', detail} when the owner's file is broken (not JSON, not an object, a value of
+ *   the wrong type or outside its range, a question section without every option the code reads, a rule the code cannot apply) or
+ *   missing where it must exist (the default path, a file CV_SCREEN_CONFIG_FILE names, --config). The values of such a configuration are
+ *   the built-in defaults, for display only: whoever DECIDES must check cfg.fault and never decide on it (fail closed, like the snippet criteria).
+ */
+function load(opts) {
+  const o = opts || {};
+  const getEnv = o.getEnv || (n => env.get(n));
+  const warnings = [];
+
+  const file = o.file || configFile(getEnv);
+  const explicit = !o.file && !!getEnv('CV_SCREEN_CONFIG_FILE');
+  const mustExist = !o.file || explicit || o.fileRequired === true;
+  const name = path.basename(file);
+  let fromFile = null;
+  let fileProblem = null;
+  try {
+    fromFile = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\ufeff/, ''));
+    if (!isPlain(fromFile)) { warnings.push(`config file ${name} does not hold an object; using the built-in defaults`); fromFile = null; fileProblem = 'it does not hold a JSON object'; }
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') {
+      warnings.push(`config file ${name} is unreadable (${String(e.message).slice(0, 80)}); using the built-in defaults`);
+      fileProblem = 'it cannot be read as JSON';
+    } else {
+      if (explicit) warnings.push(`config file ${name} was named explicitly but does not exist; using the built-in defaults`);
+      if (mustExist) fileProblem = 'the file does not exist';
+    }
+  }
+
+  const cfg = assemble(fromFile, o.overrides, getEnv, warnings);
+
+  // What is wrong with the FILE itself: the same assembly on the file alone (no test overrides, no environment), so a value from the
+  // environment can never make a good file a fault and a bad value in the file always does.
+  const problems = fileProblem ? [fileProblem] : (fromFile ? assemble(fromFile, null, () => undefined, []).warnings.filter(isFault) : []);
+  cfg.fault = problems.length ? { kind: 'config', key: FAULT_KEY, detail: `${name} is not usable: ${problems.slice(0, 3).join('; ').slice(0, 240)}` } : null;
   cfg.configFile = file;
   cfg.configLoaded = !!fromFile;
   return cfg;
@@ -332,5 +369,5 @@ function load(opts) {
 
 module.exports = {
   DEFAULTS, MODES, DEFAULT_MODE, SIDES, LEVEL_NAMES, SEARCH_LEVEL_ANSWERS, SENIORITY_OPTIONS, PROGRESSION_OPTIONS, REJECT_SWITCHES,
-  load, screenMode, mergeKnown, stripUnderscore, questionsProblem, operatingTau,
+  FAULT_KEY, load, screenMode, mergeKnown, stripUnderscore, questionsProblem, operatingTau,
 };

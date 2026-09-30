@@ -163,6 +163,23 @@ test('the switch-on check never passes on an empty report', () => {
   assert.ok(s.acceptance.checks.every(c => c.ok === false));
 });
 
+test('an empty report says "no data yet" beside the two shares, never "ok" beside a zero (F12)', () => {
+  const empty = run([]).out;
+  assert.match(empty, /Jev-decided .*no data yet/);
+  assert.match(empty, /fallback lane .*no data yet/);
+  assert.ok(!/ok \(99% or more\)|ok \(1% or less\)/.test(empty), empty);
+  // rows that were all decided without Jev (nothing modelled) are also "no data yet", not an ok
+  writeRows([{ lane: 'unreadable', decision: 'unreadable', final: 'approve', pReject: null, forced: false, confidence: null, finalReasonCodes: ['unreadable_scanned_no_text_layer'] }]);
+  const none = run([]).out;
+  assert.match(none, /Jev-decided .*no data yet/);
+  assert.ok(!/ok \(99% or more\)/.test(none), none);
+  // with data the verdicts come back
+  writeRows([jev(0), jev(0)]);
+  const some = run([]).out;
+  assert.match(some, /Jev-decided .*ok \(99% or more\)/);
+  assert.match(some, /fallback lane .*ok \(1% or less\)/);
+});
+
 test('--rejects lists every decision that rejects for the panel, oldest first, with the forced marker; without the flag nothing is listed', () => {
   const rows = [
     jev(1, { candidateId: '31', ts: '2026-09-28T09:00:00.000Z', finalReasonCodes: ['no_relevant_experience'] }),

@@ -69,7 +69,9 @@ function buildRunResultRow(results, runKey, queue) {
     downloaded: intOrNull(fromQ(results.downloaded, results.total)),
     new_to_zoho: intOrZero(results.new),
     duplicates: intOrZero(results.duplicates),
-    skipped: intOrZero(results.skipped),
+    // skipped = already in Zoho (pre-check) plus the candidates CV screening rejected (results.cvRejected, absent when the stage was off):
+    // the dashboard funnel then explains every candidate of the queue (downloaded = new + duplicates + skipped + errors).
+    skipped: intOrZero(results.skipped) + intOrZero(results.cvRejected),
     errors: intOrZero(results.errors),
     approved_p1: intOrNull(fromQ(p1.approved, fromQ(qStats.approved, qStats.approvedQueue))),
     skipped_db: intOrNull(fromQ(p1.skippedDb, qStats.skippedDb)),

@@ -1,17 +1,21 @@
 // Is AI screening usable right now? Used by supervision (the halt logic), never by the pipeline itself.
 //
-//   check({ deep:false })  cheap: is the AI Gateway origin reachable (DNS + TCP, milliseconds) and is
-//                          a key configured. Safe to run on every tick.
+//   check({ deep:false })  cheap: is a key configured, are the criteria files the decisions depend on valid (config/screening-criteria.json
+//                          for the snippet engines that decide with Jev, config/cv-screening.json while CV_SCREEN is on: local reads,
+//                          no network), and is the AI Gateway origin reachable (DNS + TCP, milliseconds). Safe to run on every tick.
 //   check({ deep:true })   a real check: GET /v1/credits (auth + balance, no tokens), then one tiny
 //                          canary call to the ENGINE THAT DECIDES: in jev_only (the default) ONLY Jev
 //                          (the LLM canary is skipped and no chat-completions request is made); otherwise
-//                          the LLM, plus Jev when the engine is 'jev'. Costs a fraction of a cent and takes
-//                          about a second (the legacy probe took 73-103 s). Run it only while halted, at
-//                          most once a minute.
+//                          the LLM, plus Jev when the engine is 'jev'. While CV_SCREEN is 'on' it ALSO asks one small invented
+//                          request through the CV stage's own client (the CV canary): a halt raised by the CV stage must only clear
+//                          when the CV route itself answers, and a healthy snippet route proves nothing about it.
+//                          Costs a fraction of a cent and takes about a second (the legacy probe took 73-103 s). Run it only
+//                          while halted, at most once a minute.
 //
 // Returns { ok, reason, ms, level, key, detail, engines, degraded }. reason is '' when ok, otherwise
 // one of the FIXED strings in REASONS (put status codes and bodies in `detail`, never in `reason`, so
-// the halt state does not churn when a status code changes).
+// the halt state does not churn when a status code changes). The key 'config' is a broken or missing config/screening-criteria.json and
+// 'cvconfig' a broken or missing config/cv-screening.json (CV_SCREEN on only): our own files, not the gateway.
 'use strict';
 
 const net = require('net');
@@ -31,6 +35,8 @@ const REASONS = {
   auth: 'screening gateway auth failed',
   credits: 'screening credits exhausted',
   error: 'screening gateway error',
+  config: 'screening criteria invalid',
+  cvconfig: 'CV screening criteria invalid',
   unavailable: 'AI screening unavailable',
 };
 
@@ -39,6 +45,8 @@ const REMEDIES = {
   auth: 'Check AI_GATEWAY_API_KEY in the profile .env; create a new key in the Vercel AI Gateway dashboard if it was revoked. If the detail says the team has restricted access to a model, allow typesafe-ai/jev on the Vercel team (AI Gateway model access); the gateway carries only that model. Screening resumes automatically.',
   credits: 'Top up the Vercel AI Gateway credits (or raise the key budget). Screening resumes automatically.',
   error: 'The AI Gateway or the model is failing. Check the AI Gateway status page; if it persists, tell the owner (SCREEN_LLM_MODEL only matters for the engines llm, jev_shadow and jev; the default jev_only calls Jev alone). Screening resumes automatically.',
+  config: 'Fix config/screening-criteria.json or restore it from git. Nothing is decided on a broken file; screening resumes automatically once the file is valid.',
+  cvconfig: 'Fix config/cv-screening.json (or the file CV_SCREEN_CONFIG_FILE names) or restore it from git. Nothing is decided on a broken file; CV screening resumes automatically once the file is valid.',
   unavailable: 'AI screening failed on several consecutive pages. Check the halt detail; it clears itself when the deep check passes.',
 };
 
@@ -116,6 +124,36 @@ async function jevCanary(cfg, timeoutMs) {
   return { ok: true };
 }
 
+// True while CV_SCREEN is 'on': the only mode in which the CV stage can hold the pipeline, so the only one supervision checks it in.
+function cvStageOn() {
+  try { return require('./cv/config').screenMode(env.get('CV_SCREEN')).mode === 'on'; } catch (e) { return false; }
+}
+
+// The local files every decision depends on. A broken file is reported under its own fixed reason and remedy, not as a gateway error.
+// Fail closed, like the engines: the snippet criteria matter for the engines that decide with Jev; the CV file only while the CV stage is on.
+function configProblem(cfg) {
+  try {
+    if (cfg.engineEffective === 'jev_only' || cfg.engineEffective === 'jev') {
+      const loaded = screening.criteria.get();
+      if (!loaded.ok || loaded.decisionErrors.length) {
+        const why = loaded.ok ? loaded.decisionErrors : loaded.errors;
+        return { key: 'config', detail: `screening-criteria.json: ${why.join('; ').slice(0, 200)}` };
+      }
+    }
+  } catch (e) {
+    return { key: 'config', detail: `screening-criteria.json could not be checked: ${env.redact(String(e && e.message)).slice(0, 120)}` };
+  }
+  if (cvStageOn()) {
+    try {
+      const cvCfg = require('./cv/config').load();
+      if (cvCfg.fault) return { key: 'cvconfig', detail: cvCfg.fault.detail };
+    } catch (e) {
+      return { key: 'cvconfig', detail: `cv-screening.json could not be checked: ${env.redact(String(e && e.message)).slice(0, 120)}` };
+    }
+  }
+  return null;
+}
+
 function failFrom(err, fallbackKey) {
   const key = err instanceof HttpFailure ? reasonKeyOf(err) : (fallbackKey || 'error');
   return { key, detail: env.redact(String(err && err.message ? err.message : err)).slice(0, 300), status: (err && err.status) || null };
@@ -142,6 +180,8 @@ async function check(opts) {
   try {
     const cfg = o.cfg || screening.loadConfig();
     if (!env.get('AI_GATEWAY_API_KEY')) return res(false, 'auth', 'AI_GATEWAY_API_KEY is not set');
+    const broken = configProblem(cfg);
+    if (broken) return res(false, broken.key, broken.detail);
 
     const parts = originParts(cfg.gateway.origin);
     if (!parts) return res(false, 'error', `invalid SCREEN_GATEWAY_ORIGIN ${String(cfg.gateway.origin).slice(0, 60)}`);
@@ -169,11 +209,21 @@ async function check(opts) {
     const canaryMs = o.timeoutMs && o.timeoutMs > probeMs ? o.timeoutMs : cfg.health.canaryTimeoutMs;
     const eff = cfg.engineEffective;
     const engines = {};
+    // The CV canary starts beside the snippet canaries (the supervisor gives the deep check 90 s in all) and never throws. Once the snippet
+    // engines have passed, the CV route must answer too, or the stage could not screen and the halt it raised stays.
+    const cvRun = cvStageOn() ? require('./cv/canary').cvCanary({ timeoutMs: canaryMs }) : null;
+    const withCv = async (extra) => {
+      if (!cvRun) return res(true, null, '', extra);
+      const cvr = await cvRun;
+      engines.cv = cvr.ok ? { ok: true } : { ok: false, ...failFrom(cvr.err) };
+      if (cvr.ok) return res(true, null, '', extra);
+      return res(false, engines.cv.key, `cv canary failed: ${engines.cv.detail}`, { engines });
+    };
     if (eff === 'jev_only') {
       // the LLM is never contacted in this engine: not for the canary either
       const jevOnly = await jevCanary(cfg, canaryMs);
       engines.jev = jevOnly.ok ? { ok: true } : { ok: false, ...failFrom(jevOnly.err) };
-      if (jevOnly.ok) return res(true, null, '', { engines, degraded: false });
+      if (jevOnly.ok) return withCv({ engines, degraded: false });
       const restricted = engines.jev.key === 'auth' && engines.jev.status === 403 && RESTRICTED_RE.test(engines.jev.detail);
       return res(false, engines.jev.key, `jev canary failed: ${engines.jev.detail}`, { engines, ...(restricted ? { remedy: RESTRICTED_REMEDY } : {}) });
     }
@@ -192,10 +242,10 @@ async function check(opts) {
       else if (eff === 'jev' && decideOk) fsx.safeUnlink(DEGRADED_FILE);
     } catch (e) { /* best effort */ }
 
-    if (decideOk) return res(true, null, '', { engines, degraded });
-    const bad = !llm.ok ? engines.llm : engines.jev;
-    const llmRestricted = !llm.ok && bad.key === 'auth' && bad.status === 403 && RESTRICTED_RE.test(bad.detail);
-    return res(false, bad.key, `${eff === 'jev' ? 'jev and llm' : 'llm'} canary failed: ${bad.detail}`, { engines, ...(llmRestricted ? { remedy: LLM_RESTRICTED_REMEDY } : {}) });
+    if (decideOk) return withCv({ engines, degraded });
+    const worst = !llm.ok ? engines.llm : engines.jev;
+    const llmRestricted = !llm.ok && worst.key === 'auth' && worst.status === 403 && RESTRICTED_RE.test(worst.detail);
+    return res(false, worst.key, `${eff === 'jev' ? 'jev and llm' : 'llm'} canary failed: ${worst.detail}`, { engines, ...(llmRestricted ? { remedy: LLM_RESTRICTED_REMEDY } : {}) });
   } catch (e) {
     return res(false, 'error', `health check crashed: ${env.redact(String(e && e.message)).slice(0, 200)}`);
   }

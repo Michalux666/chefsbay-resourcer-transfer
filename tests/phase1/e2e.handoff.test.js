@@ -219,3 +219,25 @@ test('the process exits on its own promptly after finishing (no stray handles)',
   assert.strictEqual(r.code, 0);
   assert.ok(Date.now() - started < 30000);
 });
+
+// ------------------------------------------------------------------ Update C, finding F9: a HELD Phase 2 is neither done nor failed
+
+test('caterer-only: Phase 2 exit 2 (HELD by CV screening) ends the run with exit 14, not as a success; it is not announced as done; any other non-zero exit still never fails the run', async (t) => {
+  const held = await run(t, Object.assign({ pap: { exit: 2 } }, onePage));
+  assert.strictEqual(held.r.code, 14, held.out);
+  assert.ok(held.out.includes('PHASE2_HELD: CV screening could not run'));
+  assert.ok(!held.out.includes('PHASE2_DONE'));
+  assert.ok(!held.out.includes('did not finish cleanly'), 'a hold is not a warning about a crash');
+  assert.ok(held.out.includes('CREDITS:'));
+  for (const code of [1, 3, 9]) {
+    const other = await run(t, Object.assign({ pap: { exit: code } }, onePage));
+    assert.strictEqual(other.r.code, 0, `Phase 2 exit ${code}: legacy, never fails the run`);
+    assert.ok(other.out.includes('PHASE2_DONE: true'));
+  }
+});
+
+test('sources=both: run-pipeline exit 14 (Phase 2 held) is passed through, and any other code as before', async (t) => {
+  const held = await run(t, Object.assign({ pipeline: { exit: 14 } }, onePage), ['--sources', 'both']);
+  assert.strictEqual(held.r.code, 14);
+  assert.ok(held.out.includes('run-pipeline.js exited with code: 14'));
+});

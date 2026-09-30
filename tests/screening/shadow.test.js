@@ -193,3 +193,49 @@ test('storing the redacted input can be switched off (shadow.storeText / SCREEN_
   assert.equal(row.inputTitle, '', 'a title that is only a mask (a postcode) is no title at all; it is not logged or sent as <PC>');
   assert.ok(!/ZZTESTNAME|Smithson|ZZ1 1ZZ/.test(JSON.stringify(row)));
 });
+
+// ---------------------------------------------------------------------------------------------------------- Update C, finding F8 (part 2)
+// The snippet install canaries (docs/UPDATE-B.md 7.1, docs/UPDATE-C.md) wrote three rows with runId install-canary into the shadow log, which the
+// acceptance report reads. --no-shadow keeps them out, and the readers skip such rows that an instance at Update B already holds.
+
+test('ai-review --no-shadow writes no shadow row (batch and single) and changes nothing else; without it the row is written', async () => {
+  const cands = [{ id: 'canary-yes', snippet: h.card('Chef de Partie', '[[APPROVE]]') }, { id: 'canary-no', snippet: 'Retail Cashier | Testville [[REJECT]]' }];
+  const cfgFile = h.writeConfig({ shadow: { enabled: true, rate: 1, graceMs: 300 } });
+  const env = { SCREEN_CONFIG_FILE: cfgFile };
+  const plain = await h.runBatch(cands, { env, extraArgs: ['--run-id', 'install-canary', '--with-codes'] });
+  assert.equal(plain.code, 0, plain.stderr);
+  const withRows = h.readShadow();
+  assert.ok(withRows.length >= 2, 'without the flag the canary rows are logged');
+  assert.ok(withRows.every(r => r.runId === 'install-canary'));
+
+  h.resetHome();
+  gw.reset();
+  const quiet = await h.runBatch(cands, { env, extraArgs: ['--run-id', 'install-canary', '--with-codes', '--no-shadow'] });
+  assert.equal(quiet.code, 0, quiet.stderr);
+  assert.deepEqual(h.readShadow(), [], 'no row');
+  assert.equal(quiet.stdout, plain.stdout, 'the decisions are the same');
+
+  h.resetHome();
+  const single = await h.runSingle('Retail Cashier | Testville [[REJECT]]', { env, extraArgs: ['--run-id', 'install-canary', '--no-shadow'] });
+  assert.equal(single.code, 0, single.stderr);
+  assert.deepEqual(h.readShadow(), []);
+});
+
+test('ai-review --help names --no-shadow; it is a flag, never taken for the value of the one before it', async () => {
+  const r = await h.runNode(h.CLI, ['--help']);
+  assert.match(r.stderr, /--no-shadow/);
+  const x = await h.runBatch([{ id: '1', snippet: h.card('Head Chef', '[[APPROVE]]') }], { extraArgs: ['--run-id', '--no-shadow'] });
+  assert.equal(x.code, 0, x.stderr);
+  assert.deepEqual(h.readShadow(), [], 'the flag after a value flag still counts as a flag');
+});
+
+test('readRows skips the rows of run id install-canary unless asked for them; every other row is read', () => {
+  const dir = path.join(h.HOME, 'shadow-canary');
+  fs.mkdirSync(dir, { recursive: true });
+  const day = new Date().toISOString().slice(0, 10);
+  const row = (id, runId) => JSON.stringify({ ts: new Date().toISOString(), id, runId });
+  fs.writeFileSync(path.join(dir, `screening-${day}.jsonl`), [row('a', 'install-canary'), row('b', 'phase1-2026-09-30'), row('c', null), row('d', 'install-canary'), row('e', 'install-canary-zdr')].join('\n') + '\n');
+  assert.deepEqual(readRows({ dir }).map(r => r.id), ['b', 'c']);
+  assert.deepEqual(readRows({ dir, includeCanary: true }).map(r => r.id), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(require(h.lib('screening/shadow')).INSTALL_CANARY_RUN_ID, 'install-canary');
+});

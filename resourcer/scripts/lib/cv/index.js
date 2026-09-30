@@ -92,6 +92,8 @@ function injectionTexts(f) {
 async function screenCv(req) {
   const ctx = req.ctx || {};
   const cfg = ctx.cfg || config.load();
+  // Fail closed: a broken or missing criteria file never decides anything (the snippet criteria do the same). Never a reject from a broken file.
+  if (cfg.fault) throw new ScreeningUnavailable(cfg.fault.detail, { reasonKey: cfg.fault.key });
   const now = ctx.now || new Date();
   const log = ctx.log || (() => {});
   const searchRole = facts.cleanText(req.searchRole, cfg.input.maxSearchRoleChars);

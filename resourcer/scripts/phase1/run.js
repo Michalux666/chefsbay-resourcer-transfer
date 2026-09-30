@@ -18,6 +18,7 @@ const { writeStatus, loadCheckpoint, writeCheckpoint } = require('./queue');
 const { finalise } = require('./finalise');
 const { handoff } = require('./handoff');
 const { KINDS, markIncomplete, raiseAlert } = require('./incomplete');
+const cvHold = require('./cv-hold');
 const { killAll } = require('./proc');
 const { makeOut, clockLondon, runTimestamp, round1, safeText } = require('./util');
 
@@ -104,6 +105,7 @@ async function pageLoop(ctx) {
   let consecutiveSkips = 0;
 
   while (!st.stop) {
+    if (cvHold.stopIfBlocked(ctx, `before page ${st.page}`)) break;
     out('');
     out(`--- Page ${st.page} ---`);
     const pageStartMs = Date.now();

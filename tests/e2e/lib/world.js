@@ -376,6 +376,7 @@ exec '${NODE}' '${path.join(REPO, 'tests', 'e2e', 'lib', 'fake-chromium.js')}' "
     if (st) {
       st.lastMaintenanceAt = 0;
       st.launchNotBefore = 0;
+      st.haltProbeAt = 0; // the supervisor verifies a halt at most once a minute: the next tick may verify it again
       fs.writeFileSync(this.p('runtime/watchdog-state.json'), JSON.stringify(st));
     }
   }

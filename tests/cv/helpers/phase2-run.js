@@ -48,6 +48,9 @@ function setup(ids, dbOpts) {
   fs.rmSync(path.join(ws.home, 'runtime'), { recursive: true, force: true });
   fs.rmSync(path.join(ws.home, 'shadow'), { recursive: true, force: true });
   fs.rmSync(path.join(ws.home, 'state'), { recursive: true, force: true });
+  // the shipped criteria file, as an installed instance has it (a missing file at the default path is a fault)
+  fs.mkdirSync(path.join(ws.home, 'config'), { recursive: true });
+  fs.copyFileSync(path.resolve(__dirname, '..', '..', '..', 'resourcer', 'config', 'cv-screening.json'), path.join(ws.home, 'config', 'cv-screening.json'));
 }
 
 function writeCvFile(id, body, source) {

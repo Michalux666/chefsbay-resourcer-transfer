@@ -65,3 +65,16 @@ test('a phase 1 that died (phase1_abandoned) is never matched to a merged queue'
   assert.match(r.stdout, /RECOVERY_OK n=1 /);
   assert.deepEqual(await waitCalls(home), ['approved-queue-2026-09-29-100000.json']);
 });
+
+test('Update C: a both-source Phase 2 that CV screening HELD (released to phase1_abandoned by the orphan sweep, phase2Hold kept) is recovered on the merged queue too, so the Reed half is not stranded', async (t) => {
+  const { home, status } = scene(t, { status: 'phase1_abandoned' });
+  const d = JSON.parse(fs.readFileSync(status, 'utf8'));
+  d.phase2Hold = { reason: 'cv-screening-unavailable', at: iso(9) };
+  put(status, d);
+  assert.match(run(home).stdout, /RECOVERY_OK n=1 /);
+  assert.deepEqual(await waitCalls(home), ['merged-queue-2026-09-29-101500.json']);
+  // an abandoned phase 1 without a hold (a run killed before Phase 2) keeps the old behaviour: the Caterer queue
+  const plain = scene(t, { status: 'phase1_abandoned' });
+  assert.match(run(plain.home).stdout, /RECOVERY_OK n=1 /);
+  assert.deepEqual(await waitCalls(plain.home), ['approved-queue-2026-09-29-100000.json']);
+});

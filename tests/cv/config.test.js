@@ -33,7 +33,7 @@ test('defaults: Jev only, concurrency 4, fallback policy approve, the 1:3 operat
   assert.equal(cfg.evidence.minReadableChars, 120);
   assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.1, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
   assert.deepEqual(cfg.cache, { answersTtlSec: 604800, searchLevelTtlSec: 2592000, maxEntries: 2000 });
-  assert.deepEqual(cfg.phase2, { shadowStopAfterFailures: 5 });
+  assert.deepEqual(cfg.phase2, { shadowStopAfterFailures: 5, shadowMaxSeconds: 120 });
   assert.equal(cfg.shadow.retentionDays, 180);
   assert.equal(cfg.input.maxRoles, 16);
   assert.equal(cfg.input.maxYears, 15);
