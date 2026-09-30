@@ -1,5 +1,5 @@
 {
-  "_readme": "Screening configuration. Keys starting with an underscore are notes and are ignored. Environment variables (SCREEN_*) override this file. Every decide.* threshold is a CALIBRATE placeholder: it is NOT fitted to Chefs Bay data. See docs/SCREENING.md for what each setting does, how to calibrate, and how the engines differ. The default engine jev_only uses Jev alone (no LLM); decide.reviewPolicy says what an uncertain Jev answer becomes.",
+  "_readme": "Screening configuration. Keys starting with an underscore are notes and are ignored. Environment variables (SCREEN_*) override this file. The questions Jev is asked and the rules that turn its answers into approve or reject are NOT here: they live in screening-criteria.json (docs/SCREENING-CRITERIA.md), the one file the owner edits. See docs/SCREENING.md for what each setting here does and how the engines differ. The default engine jev_only uses Jev alone (no LLM); decide.reviewPolicy settles only the rare fallback lane (a card flagged as an instruction by both the keyword filter and Jev).",
   "version": 1,
   "engine": "jev_only",
   "_allowLlm": "false = the engines llm, jev_shadow and jev are refused (with a warning the engine becomes jev_only), because the AI Gateway carries Jev only. Set true (or SCREEN_ALLOW_LLM=1) only if the Vercel team allows the language model.",
@@ -67,9 +67,9 @@
   "stage1": {
     "rules": {
       "S1-NA-NONHOSP": "shadow",
-      "T-ENTRY-OVERQUAL-HEAD": "shadow",
-      "T-ENTRY-OVERQUAL-SOUS": "shadow",
-      "T-UNDER-GAP": "shadow"
+      "T-ENTRY-OVERQUAL-HEAD": "off",
+      "T-ENTRY-OVERQUAL-SOUS": "off",
+      "T-UNDER-GAP": "off"
     }
   },
   "decide": {
@@ -83,183 +83,18 @@
       "postUnlock": "approve"
     },
     "stage1": {
-      "_CALIBRATE": "CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it.",
-      "rejectP": 0.9,
-      "approveP": 0.6,
-      "needCorroboration": true,
-      "notFitMin": 0.6,
-      "counterRoleMatch": 0.6,
+      "_note": "Only these four are read by decide(): injectionP (a card goes to the fallback lane only when Jev scores an instruction at least this high AND the keyword filter fired), infoFloor (below it a card with no history is an empty profile), notStatedP (after the unlock a title Jev cannot place above this is ignored), titleConsistentMin (below it the unlocked title contradicts the card). The bar that turns a card into approve or reject is decision.operatingPoint in screening-criteria.json (docs/SCREENING-CRITERIA.md).",
       "injectionP": 0.7,
       "infoFloor": 0.5,
       "notStatedP": 0.5,
-      "noInfoApproveHospP": 0.5,
-      "clearFitP": 0.6,
-      "clearFitHardMax": 0.5,
-      "approveNotFitMax": 0.5,
       "titleConsistentMin": 0.3
     },
     "stage2": {
-      "_CALIBRATE": "CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it. Stage 2 is after the credit is spent, so the reject bar is higher and the approve bar lower.",
-      "rejectP": 0.95,
-      "approveP": 0.5,
-      "needCorroboration": true,
-      "notFitMin": 0.6,
-      "counterRoleMatch": 0.6,
+      "_note": "Only these four are read by decide(): injectionP (a card goes to the fallback lane only when Jev scores an instruction at least this high AND the keyword filter fired), infoFloor (below it a card with no history is an empty profile), notStatedP (after the unlock a title Jev cannot place above this is ignored), titleConsistentMin (below it the unlocked title contradicts the card). The bar that turns a card into approve or reject is decision.operatingPoint in screening-criteria.json (docs/SCREENING-CRITERIA.md).",
       "injectionP": 0.7,
       "infoFloor": 0.5,
       "notStatedP": 0.5,
-      "noInfoApproveHospP": 0.5,
-      "clearFitP": 0.6,
-      "clearFitHardMax": 0.5,
-      "approveNotFitMax": 0.5,
       "titleConsistentMin": 0.3
-    },
-    "ladder": {
-      "tier0Titles": ["catering assistant", "kitchen hand", "food production", "waiter", "waitress", "server", "front of house", "bartender", "dish washer"],
-      "_note": "Candidate title options the Jev tier question can return, grouped per search tier. inBand = acceptable. tooSenior and tooJunior = clear level mismatches. mismatch = other clear mismatches, by reason code. Anything not listed is an uncertain level and goes to review. A search tier is the legacy role tier of the search title (0 unknown/non-kitchen, 1 entry, 2 mid, 3 senior, 4 head).",
-      "bySearchTier": {
-        "0": {
-          "inBand": [
-            "entry_kp",
-            "commis",
-            "cdp_cook",
-            "front_of_house"
-          ],
-          "tooSenior": [
-            "sous",
-            "head",
-            "management_non_kitchen"
-          ],
-          "tooJunior": [],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ]
-          }
-        },
-        "1": {
-          "inBand": [
-            "entry_kp",
-            "commis",
-            "cdp_cook"
-          ],
-          "tooSenior": [
-            "sous",
-            "head",
-            "management_non_kitchen"
-          ],
-          "tooJunior": [],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ],
-            "reject_foh_only": [
-              "front_of_house"
-            ]
-          }
-        },
-        "2": {
-          "inBand": [
-            "commis",
-            "cdp_cook",
-            "sous",
-            "head"
-          ],
-          "tooSenior": [],
-          "tooJunior": [
-            "entry_kp"
-          ],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ],
-            "reject_foh_only": [
-              "front_of_house"
-            ],
-            "reject_management_only": [
-              "management_non_kitchen"
-            ]
-          }
-        },
-        "3": {
-          "inBand": [
-            "sous",
-            "head"
-          ],
-          "tooSenior": [],
-          "tooJunior": [
-            "entry_kp",
-            "commis"
-          ],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ],
-            "reject_foh_only": [
-              "front_of_house"
-            ],
-            "reject_management_only": [
-              "management_non_kitchen"
-            ]
-          }
-        },
-        "4": {
-          "inBand": [
-            "head"
-          ],
-          "tooSenior": [],
-          "tooJunior": [
-            "entry_kp",
-            "commis",
-            "cdp_cook"
-          ],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ],
-            "reject_foh_only": [
-              "front_of_house"
-            ],
-            "reject_management_only": [
-              "management_non_kitchen"
-            ]
-          }
-        }
-      },
-      "overrides": [
-        {
-          "name": "cdp-specific",
-          "tiers": [
-            2
-          ],
-          "matchAny": [
-            "chef de partie",
-            "cdp",
-            "line cook"
-          ],
-          "inBand": [
-            "cdp_cook",
-            "sous",
-            "head"
-          ],
-          "tooSenior": [],
-          "tooJunior": [
-            "entry_kp",
-            "commis"
-          ],
-          "mismatch": {
-            "reject_unrelated_industry": [
-              "unrelated"
-            ],
-            "reject_foh_only": [
-              "front_of_house"
-            ],
-            "reject_management_only": [
-              "management_non_kitchen"
-            ]
-          }
-        }
-      ]
     }
   },
   "gate": {

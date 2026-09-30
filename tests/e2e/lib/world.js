@@ -169,7 +169,7 @@ exec '${NODE}' '${path.join(REPO, 'tests', 'e2e', 'lib', 'fake-chromium.js')}' "
     this.writeEnv({ RESOURCER_SOURCES: 'both', CHROMIUM_PATH: bin });
     Object.assign(this.knobs, {
       REED_CDP_PORT: String(cdp), FAKE_API_PORT: String(api), REED_API_BASE: `http://127.0.0.1:${api}/api-bff-recruiter-candidates`,
-      REED_CDP_WAIT_S: '30', REED_AUTO_RELAUNCH: '0',
+      REED_CDP_WAIT_S: '30', REED_AUTO_RELAUNCH: '0', E2E_REED_CV_TEXT: D.REED_CV_TEXT,
     });
     this.reed = { cdp, api, bin };
     return this.reed;

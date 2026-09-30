@@ -10,6 +10,7 @@ const fsx = require('./lib/fsx');
 const env = require('./lib/env');
 const { notify } = require('./lib/notify');
 const retention = require('./lib/cv-retention');
+const cvStage = require('./lib/cv/phase2');
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +29,7 @@ const DEFAULT_CONFIG = Object.freeze({
   maxRetries: 3,
   childTimeoutMs: 150000, // caterer-download-cv.js budgets 60 s to 135 s of its own; a shorter parent timer killed working downloads
   fillTimeoutMs: 30000,
+  cvScreenTimeoutMs: 180000, // one reviewer process (the Jev part has its own 90 s deadline)
 });
 
 const sleepReal = ms => new Promise(r => setTimeout(r, ms));
@@ -62,6 +64,9 @@ function realDeps() {
     },
     getCredits: () => getCreditsReal(),
     allowedSources: () => env.get('RESOURCER_SOURCES', 'caterer'),
+    cvScreenMode: () => cvStage.mode(env.get('CV_SCREEN')),
+    cvScreen: req => cvStage.runCli(req),
+    cvConfig: () => cvStage.loadConfig(),
     sleep: sleepReal,
   };
 }
@@ -649,6 +654,29 @@ async function run(queuePathArg, injected) {
     }
     console.log('');
 
+    // CV screening (CV_SCREEN off|shadow|on, default shadow, docs/CV-SCREENING.md). An outage in mode on holds the whole queue with every CV kept.
+    const cvMode = deps.cvScreenMode();
+    const cvCfg = cvMode === 'off' ? null : deps.cvConfig();
+    if (cvCfg) for (const w of cvCfg.warnings) console.log(`[Phase 2] WARN cv config: ${w}`);
+    const cvRejected = new Map();
+    const holdRun = (detail, held, reasonKey) => {
+      console.log(`[Phase 2] HELD: CV screening is unavailable (${detail}) - ${held} candidate(s) stay queued with their CVs; nothing further was pushed or approved. The stranded-run recovery retries this queue.`);
+      cvStage.raiseOutage({ detail, jobTitle, location, runId, held, reasonKey });
+      runState.update({ status: 'error', error: 'cv-screening-unavailable', completedAt: new Date().toISOString() });
+      const p1 = findPhase1StatusFile(absQueuePath, ['phase2_starting', 'phase1_complete', 'phase1_running', 'phase1_initializing'], { jobTitle, location });
+      if (p1) {
+        try {
+          const existing = JSON.parse(fs.readFileSync(p1, 'utf8'));
+          const rec = existing.phase2Recovery;
+          if (rec && rec.attempts > 0) rec.attempts -= 1; // an outage must not use up the recovery attempts of the run
+          Object.assign(existing, { updatedAt: new Date().toISOString(), phase2Hold: { reason: 'cv-screening-unavailable', at: new Date().toISOString() } });
+          safeAtomicWrite(p1, existing);
+        } catch { /* the status file is a hint only */ }
+      }
+      return { code: 2, reason: 'cv-screening-unavailable', held, runId };
+    };
+    if (cvMode === 'on' && candidates.length > 0 && cvStage.screeningHalted()) return holdRun('the screening halt is up', candidates.length);
+
     // Refresh the Zoho token once so child calls do not trigger their own refreshes.
     console.log('[Phase 2] Refreshing Zoho OAuth token...');
     try {
@@ -667,6 +695,12 @@ async function run(queuePathArg, injected) {
     const noEmailSkip = new Map();
     const invalidIdSkip = new Map();
     const idSources = new Map();
+    const removeCvArtifacts = (cand, cvPath) => {
+      const sources = idSources.get(String(cand.id));
+      return retention.removeCandidateArtifacts({
+        dir: DOWNLOADS, id: cand.id, source: cand.source === 'reed' ? 'reed' : 'caterer', jailRoots: [DOWNLOADS], protectAlternate: !!(sources && sources.size > 1), cvPath,
+      });
+    };
 
     for (const cand of candidates) {
       if (!retention.isSafeId(cand.id)) {
@@ -683,6 +717,18 @@ async function run(queuePathArg, injected) {
       if (existingZohoId) {
         console.log(`  [${cand.id}] Already in Zoho (${existingZohoId}) - skipping`);
         toSkipZoho.add(cand.id);
+      }
+
+      // Idempotent re-run: a CV that screening rejected earlier for this job title is neither downloaded nor pushed again.
+      if (cvMode === 'on' && !existingZohoId) {
+        const earlier = cvStage.findEarlierRejection(deps, cand, jobTitle);
+        if (earlier) {
+          console.log(`  [${cand.id}] Rejected by CV screening in an earlier run (${earlier.reason}) - not downloaded again`);
+          cvRejected.set(key, { reasonCodes: earlier.reason.replace(/^cv:/, '').split(','), earlier: true, recorded: true });
+          toSkipZoho.add(cand.id);
+          removeCvArtifacts(cand, null);
+          continue;
+        }
       }
 
       const cvExists = findExistingCv(cand.id, cand.source);
@@ -809,6 +855,49 @@ async function run(queuePathArg, injected) {
       }
     }
 
+    // ---- Step 4.6: CV screening (CV_SCREEN=on|shadow) -----------------------------------------
+    let cvSummary = null;
+    const cvShadowHalted = cvMode === 'shadow' && cvStage.screeningHalted();
+    if (cvShadowHalted) console.log('\n[Phase 2] WARN CV screening (shadow) skipped: the screening halt is up, so Jev is not reachable; nothing was blocked');
+    if (cvMode !== 'off' && !cvShadowHalted) {
+      // cfg.cvScreenConcurrency is only a test seam; the setting is CV_SCREEN_CONCURRENCY / jev.concurrency of the criteria file
+      const cvConcurrency = Math.max(1, Math.round(Number(cfg.cvScreenConcurrency) || cvCfg.jev.concurrency));
+      console.log(`\n[Phase 2] Step 4.6 - CV screening (${cvMode}, up to ${cvConcurrency} at a time)...`);
+      const cvRun = await cvStage.screenCandidates({
+        deps, cfg: cvCfg, mode: cvMode, candidates,
+        skip: c => toSkipZoho.has(c.id) || !retention.isSafeId(c.id),
+        findCv: c => findExistingCv(c.id, c.source),
+        jsonPathOf: c => path.join(DOWNLOADS, retention.candidateJsonName(c.id)),
+        jobTitle, runId, concurrency: cvConcurrency, timeoutMs: cfg.cvScreenTimeoutMs,
+        applyReject: (c, cvPath, codes) => {
+          const rec = cvStage.recordRejection(deps, c, jobTitle, codes);
+          if (rec.ok) removeCvArtifacts(c, cvPath);
+          else logError('cv_reject_record', rec.error, { candidateId: String(c.id), jobTitle, location });
+          return { recorded: rec.ok };
+        },
+      });
+      cvSummary = cvRun.stats;
+      for (const [id, o] of cvRun.outcomes) {
+        if (o.screened) console.log(`  [${id}] CV ${o.decision} -> ${o.action === 'reject' ? 'REJECTED' : 'continue'} (${o.lane}${o.forced ? ', forced' : ''}: ${o.reasonCodes.join(',')})`);
+        else if (o.why === 'no-cv') console.log(`  [${id}] no CV file - not screened`);
+      }
+      if (cvRun.unavailable) {
+        const held = [...cvRun.outcomes.values()].filter(o => o.action === 'held').length;
+        return holdRun(cvRun.unavailable.detail || 'Jev unavailable', held, cvRun.unavailable.reasonKey);
+      }
+      if (cvRun.shadowStopped) console.log(`[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.failures} CVs in a row could not be screened (${cvRun.shadowStopped.detail}); ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`);
+      else if (cvMode === 'shadow' && cvSummary.unscreened) console.log(`[Phase 2] WARN CV screening (shadow) could not reach Jev for ${cvSummary.unscreened} candidate(s); nothing was blocked`);
+      for (const cand of candidates) {
+        const o = cvRun.outcomes.get(String(cand.id));
+        if (o && o.action === 'reject') {
+          cvRejected.set(String(cand.id), { reasonCodes: o.reasonCodes, recorded: o.recorded });
+          toSkipZoho.add(cand.id);
+        }
+      }
+      console.log(`[Phase 2] CV screening (${cvMode}): screened ${cvSummary.screened}, pass ${cvSummary.pass}, reject ${cvSummary.reject}, fallback ${cvSummary.review}, unreadable ${cvSummary.unreadable}; Jev-decided ${cvSummary.jev} (${cvSummary.jevShare === null ? 'n/a' : `${Math.round(cvSummary.jevShare * 1000) / 10} percent`}), forced ${cvSummary.forced}; reader errors ${cvSummary.errors}`);
+      for (const a of cvStage.alertsFor(cvSummary, cvCfg, jobTitle, location)) notify(a);
+    }
+
     // ---- Step 5: sequential Zoho push -------------------------------------------------------
     console.log('\n[Phase 2] Step 5 - Zoho push (sequential with rate limiting)...');
     const pushStepStartMs = Date.now();
@@ -836,6 +925,10 @@ async function run(queuePathArg, injected) {
           console.log(`  [${cand.id}] -> error (no email on profile or CV)`);
           logError('zoho_push', noEmailErr, { candidateId: String(cand.id), jobTitle, location });
           phaseResults.push({ id: String(cand.id), name, status: 'error', error: noEmailErr, cvAttached: !!cvPath });
+        } else if (cvRejected.has(String(cand.id))) {
+          const cvRej = cvRejected.get(String(cand.id));
+          console.log(`  [${cand.id}] -> rejected by CV screening (${cvRej.reasonCodes.join(',')}) - not pushed${cvRej.earlier ? ' (decided in an earlier run)' : ''}`);
+          phaseResults.push({ id: String(cand.id), name, status: 'cv_rejected', source: cand.source || 'caterer', reasonCodes: cvRej.reasonCodes, cvAttached: false });
         } else {
           const existingZohoId = await getZohoIdFromDb(deps, cand.id, cand.source);
           console.log(`  [${cand.id}] -> already in Zoho (${existingZohoId}) - skipped`);
@@ -1052,6 +1145,7 @@ async function run(queuePathArg, injected) {
     const newCount = phaseResults.filter(r => r.status === 'new').length;
     const dupCount = phaseResults.filter(r => r.status === 'duplicate').length;
     const skipCount = phaseResults.filter(r => r.status === 'skipped').length;
+    const cvRejectedCount = phaseResults.filter(r => r.status === 'cv_rejected').length;
     const pushErrCount = phaseResults.filter(r => r.status === 'error').length;
     const dlErrCount = dlTimings.filter(t => t.error).length;
     const totalErrCount = pushErrCount + dlErrCount;
@@ -1146,6 +1240,7 @@ async function run(queuePathArg, injected) {
       errors: totalErrCount,
       downloadErrors: dlErrCount,
       pushErrors: pushErrCount,
+      ...(cvSummary ? { cvRejected: cvRejectedCount, cvScreen: cvSummary } : {}),
       // Per-source breakdown: always emitted for caterer/both (reed/both) runs even with 0 candidates.
       catererStats: (() => {
         const catCands = phaseResults.filter(r => !r.source || r.source === 'caterer');
@@ -1366,6 +1461,7 @@ async function run(queuePathArg, injected) {
     console.log(`Errors:                   ${totalErrCount} (download ${dlErrCount}, push ${pushErrCount})`);
     console.log(`Total processed:  ${candidates.length}`);
     console.log(`CV/JSON cleaned:  ${cleanedCandidates} candidate(s) | CV attach failures kept: ${attachFailures}`);
+    if (cvSummary) console.log(`CV screening (${cvMode}): ${cvRejectedCount} rejected and not pushed | screened ${cvSummary.screened} | forced ${cvSummary.forced} | fallback ${cvSummary.fallback} (approved ${cvSummary.policyApprove}, rejected ${cvSummary.policyReject})`);
     console.log(`Results saved to: ${resultsPath}`);
 
     // ---- Step 7.5: alerts (replaces the legacy chat report) ----------------------------------
@@ -1384,6 +1480,13 @@ async function run(queuePathArg, injected) {
       }
       if (cleanupFailures.length) {
         notify({ severity: 'warn', key: 'cv-cleanup-failed', text: `Could not delete local CV/JSON for ${cleanupFailures.length} candidate(s) after a successful push.`, meta: { runId, count: cleanupFailures.length } });
+      }
+      const cvUnrecorded = [...cvRejected.values()].filter(v => v.recorded === false).length;
+      if (cvUnrecorded > 0) {
+        notify({ severity: 'warn', key: 'cv-reject-not-recorded', text: `${cvUnrecorded} CV screening rejection(s) in ${jobTitle}/${location} could not be written to candidates.db; their files were kept and the decision is repeated on the next run.`, meta: { runId, count: cvUnrecorded } });
+      }
+      if (cvSummary && cvSummary.errors > 0) {
+        notify({ severity: 'warn', key: 'cv-review-errors', text: `The CV reviewer failed on ${cvSummary.errors} CV(s) in ${jobTitle}/${location}; they passed through like unreadable CVs.`, meta: { runId, count: cvSummary.errors } });
       }
       if (!runResultsWritten) {
         notify({ severity: 'warn', key: 'run-results-write-failed', text: `run_results row not written for ${runId}; the retention sweep will repair it from the results file.`, meta: { runId } });
@@ -1423,7 +1526,7 @@ if (require.main === module) {
   process.stderr.on('error', () => {});
   const cliArgs = process.argv.slice(2);
   if (cliArgs[0] === '--help' || cliArgs[0] === '-h') {
-    process.stdout.write('Usage: node scripts/process-approved-queue.js <queue.json> [--force]\n--force re-runs a queue that already finished (retry failed pushes); its results go to a separate -rerun- file and the territory is not re-marked.\nExit: 0 done or already processed, 1 fatal error or bad input.\n');
+    process.stdout.write('Usage: node scripts/process-approved-queue.js <queue.json> [--force]\n--force re-runs a queue that already finished (retry failed pushes); its results go to a separate -rerun- file and the territory is not re-marked.\nExit: 0 done or already processed, 1 fatal error or bad input, 2 held because CV screening (CV_SCREEN=on) could not reach Jev: nothing was lost and the queue is retried.\n');
     process.exit(0);
   }
   run(cliArgs.find(a => !a.startsWith('-')), cliArgs.includes('--force') ? { force: true } : undefined).then(res => {

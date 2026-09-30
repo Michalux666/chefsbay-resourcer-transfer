@@ -9,8 +9,9 @@
 // switch (POST /__fake/mode). It never stores request bodies unless capture is switched on, and only
 // synthetic data is ever sent to it.
 //
-//   Jev answer tokens : [[APPROVE]] (default) [[REJECT]] [[LOWCONF]] [[TIER:<option>]] [[RTIER:<option>]]
-//                       [[INJECT]] [[NOINFO]] [[MISMATCH]] [[ROLEMATCH:<p>]] [[FIT:<p0>,<p1>,<p2>]]
+//   Jev answer tokens : [[APPROVE]] [[REJECT]] [[LOWCONF]] [[TIER:<option>]] [[RTIER:<option>]] [[INJECT]] [[NOINFO]] [[MISMATCH]]
+//                       for the criteria questions (seniority, role_level) they are mapped by criteria-answers.js and the
+//                       default is a keyword reading of the card; [[ROLEMATCH]] and [[FIT]] only steer the old question set
 //   LLM answer tokens : [[APPROVE]] (default) [[REJECT]] [[REASON:<code>]] [[LLMCONF:<x>]] [[LLMSTRBOOL]]
 //                       [[LLMJSON:<text>]] [[LLMLENGTH]] [[LLMREFUSAL]] [[L500PRIMARY]] [[LBADPRIMARY]]
 //   failure tokens    : [[HTTP500]] [[HTTP500x<n>]] [[HTTP429]] [[HTTP429x<n>]] [[HTTP422]] [[SLOW:<ms>]]
@@ -264,8 +265,9 @@ function startFakeGateway(options) {
         const bad = body.__unparseable || !body.model || body.state === undefined || !body.questions || typeof body.questions !== 'object' || !Object.keys(body.questions).length
           || Object.values(body.questions).some(q => !q || !['noul', 'choice', 'score', 'boolean'].includes(q.type));
         if (bad) return send(res, 422, { message: 'invalid request body', error_type: 'invalid_request' });
-        const snippet = String((body.state && body.state.candidate && body.state.candidate.snippet) || '');
-        const title = String((body.state && body.state.candidate && body.state.candidate.real_job_title) || '');
+        const cstate = (body.state && body.state.candidate) || {};
+        const snippet = String(cstate.snippet || `${cstate.current_title || ''} ${cstate.recent_work || ''}`);
+        const title = String(cstate.confirmed_job_title || cstate.real_job_title || '');
         const toks = tokensOf(`${snippet} ${title}`, 'jev');
         if (isCanary(snippet)) toks.push({ name: S.mode.canary === 'approve' ? 'APPROVE' : 'REJECT', arg: undefined });
         S.requests.push({ route, model: body.model, questions: Object.keys(body.questions), stateKeys: Object.keys(body.state || {}), candidateKeys: Object.keys((body.state && body.state.candidate) || {}), hasProviderOptions: !!body.providerOptions, bodyHash: hash(bodyText) });
@@ -279,7 +281,10 @@ function startFakeGateway(options) {
           for (const [k, q] of Object.entries(body.questions)) answers[k] = q.type === 'choice' ? { type: 'choice', choice: 'x', probabilities: { x: 1 } } : { type: 'boolean', probability: 0.9 };
           return send(res, 200, { model: 'typesafe-ai/jev', answers, usage: { inputTokens: 100, outputTokens: 5 }, providerMetadata: { typesafe: { confidence: {} } } });
         }
-        const answers = jevAnswers(body.questions, toks);
+        const cvStage = body.questions.search_level || Object.keys(body.questions).some(k => /^relevance_\d+$/.test(k));
+        const answers = cvStage
+          ? require('../cv/helpers/fake-jev').answersFor(body, {})
+          : (body.questions.seniority || body.questions.role_level) ? require('./criteria-answers').answersForTokens(body, toks) : jevAnswers(body.questions, toks);
         return send(res, 200, {
           model: has(toks, 'NOTJEV') ? 'anthropic/claude-sonnet-5.5' : 'typesafe-ai/jev',
           answers,

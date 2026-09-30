@@ -1,6 +1,7 @@
 'use strict';
-// tools/screening-report.js: agreement, reliability, approve rates, false approve/reject, threshold
-// sweep, rule table and the go/no-go verdict, reproduced from a fixture log with known numbers.
+// tools/screening-report.js: agreement, reliability, approve rates, false approve/reject, the sweep of the one bar
+// (decision.operatingPoint rejectAt), rule table and the go/no-go verdict, reproduced from a fixture log with known numbers.
+// The fixture rows hold the answers of the criteria questions and are decided by the real decide().
 const h = require('./helpers');
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,17 +11,21 @@ const path = require('node:path');
 const screening = require(h.lib('screening'));
 const report = require(path.join(h.REPO, 'tools', 'screening-report.js'));
 const REPORT = path.join(h.REPO, 'tools', 'screening-report.js');
+const { A } = require('./criteria-answers');
 
 const cfg = screening.loadConfig({ getEnv: () => undefined, file: 'none.json' });
 // the same gate scoped to Caterer on purpose (Reed is off until its canary passes)
 const cfgC = screening.loadConfig({ getEnv: () => undefined, file: 'none.json', overrides: { gate: { requiredSources: ['caterer'] } } });
 const decide = screening.decide.decide;
+const compact = screening.decide.compactAnswers;
 
-const T = o => ({ entry_kp: 0, commis: 0, cdp_cook: 0, sous: 0, head: 0, front_of_house: 0, management_non_kitchen: 0, unrelated: 0, not_stated: 0, ...o });
+const RETAIL = { kind: 'not_hospitality', sen: 'not_comparable', hosp: 0.03, area: 0.02, fit: 0.05, rel: [0.95, 0.03, 0.01, 0.01] };
 const PROFILES = {
-  approve: { current_tier: { p: T({ cdp_cook: 0.97, commis: 0.03 }), c: 0.97 }, hospitality_seen: 0.95, kitchen_seen: 0.95, role_match_seen: 0.7, info_sufficient: 0.95, instruction_injection: 0.01, overall_fit: { p: { 0: 0.05, 1: 0.25, 2: 0.7 }, c: 0.55 } },
-  reject: { current_tier: { p: T({ unrelated: 0.97, commis: 0.03 }), c: 0.97 }, hospitality_seen: 0.03, kitchen_seen: 0.02, role_match_seen: 0.02, info_sufficient: 0.95, instruction_injection: 0.01, overall_fit: { p: { 0: 0.95, 1: 0.04, 2: 0.01 }, c: 0.92 } },
-  review: { current_tier: { p: T({ entry_kp: 0.4, cdp_cook: 0.3, front_of_house: 0.3 }), c: 0.4 }, hospitality_seen: 0.95, kitchen_seen: 0.9, role_match_seen: 0.5, info_sufficient: 0.95, instruction_injection: 0.01, overall_fit: { p: { 0: 0.3, 1: 0.4, 2: 0.3 }, c: 0.1 } },
+  approve: compact(A({ fit: 0.99 })),
+  reject: compact(A({ ...RETAIL })),
+  review: compact(A({ inject: 0.9, kw: 1 })),
+  // one step below a sous search with the readings at 80% mismatch: R 0.8, rejected at a bar of 0.8 or less, approved above it
+  border: compact(A({ role: 'senior_chef', kind: 'cook', sen: 'one_step_junior', fit: 0.2 })),
 };
 
 let seq = 0;
@@ -31,8 +36,8 @@ function row({ jev, llm, source = 'caterer', role = 'Chef', tier = 2, stage = 'p
     candidateId: String(++seq), snippetSha: '0123456789abcdef', snippetLen: 100, redacted: true, flags: [], rules: rules || [],
     used: { engine: 'llm', approved: llm === 'approve', reasonCode: llm === 'approve' ? 'approve_other' : 'reject_other', model: 'anthropic/claude-sonnet-5.5', escalated: false },
     llm: { status: 'ok', model: 'anthropic/claude-sonnet-5.5', approved: llm === 'approve', reasonCode: llm === 'approve' ? 'approve_other' : 'reject_other', confidence: llmConf, latencyMs: 10, attempts: 1, backup: false },
-    jev: { status: 'ok', model: 'typesafe-ai/jev', lane: dec.lane, reasonCode: dec.reasonCode, reviewReason: dec.reviewReason, confidence: dec.confidence, flags: [], stage: 1, answers: PROFILES[jev], latencyMs: 20, attempts: 1 },
-    rv: 'legacy-1', qv: 'q1', tm: 'legacy',
+    jev: { status: 'ok', model: 'typesafe-ai/jev', lane: dec.lane, reasonCode: dec.reasonCode, reviewReason: dec.reviewReason, confidence: dec.confidence, flags: dec.flags, stage: 1, answers: PROFILES[jev], latencyMs: 20, attempts: 1 },
+    rv: 'legacy-1', qv: 's2-0123456789ab', tm: 'legacy',
   };
 }
 const many = (n, spec) => Array.from({ length: n }, () => row(spec));
@@ -61,8 +66,9 @@ function strongRows(source) {
   ];
 }
 
-test('archetype profiles behave as intended under the default thresholds', () => {
+test('archetype profiles behave as intended under the shipped criteria: approve, reject, and the fallback lane (a double injection flag)', () => {
   assert.deepEqual(['approve', 'reject', 'review'].map(k => decide({ answers: PROFILES[k], searchRole: 'Chef', searchTier: 2, stage: 1 }, cfg).lane), ['approve', 'reject', 'review']);
+  assert.equal(decide({ answers: PROFILES.border, searchRole: 'Sous Chef', stage: 1 }, cfg).lane, 'reject');
 });
 
 test('numbers are reproduced exactly from the fixture log', () => {
@@ -97,8 +103,8 @@ test('reliability bands: decided rows land in the confidence bands with agreemen
   assert.equal(top.n, 430);
   assert.ok(Math.abs(top.agreement - 400 / 430) < 1e-12);
   assert.ok(top.agreementLo < top.agreement && top.agreementLo > 0.85);
-  assert.ok(top.meanConfidence > 0.97 && top.meanConfidence < 1, `mean stated confidence ${top.meanConfidence}`);
-  assert.ok(top.gap < 0, 'stated ~0.99 vs actual 93%: over-confident');
+  assert.ok(top.meanConfidence > 0.96 && top.meanConfidence < 1, `mean stated confidence ${top.meanConfidence}`);
+  assert.ok(top.gap < 0, 'stated ~0.97 vs actual 93%: over-confident');
   assert.equal(a.byBand.slice(0, -1).every(b => b.n === 0), true);
   const w = report.wilson(50, 100);
   assert.ok(w.lo > 0.39 && w.lo < 0.41 && w.hi > 0.59 && w.hi < 0.61);
@@ -145,7 +151,7 @@ test('gate: Jev losing 10% of the LLM-approved cards fails even when the two err
   assert.ok(failing.some(n => /lane agreement lower bound/.test(n)), failing.join('; '));
 });
 
-test('gate: Jev that hands almost everything to review is not a GO (minimum coverage)', () => {
+test('gate: Jev that hands almost everything to the fallback lane is not a GO (minimum coverage)', () => {
   const rows = [...many(30, { jev: 'approve', llm: 'approve' }), ...many(30, { jev: 'reject', llm: 'reject' }), ...many(540, { jev: 'review', llm: 'approve' })];
   const v = report.analyze(rows, cfgC, { decide }).verdict;
   assert.equal(v.status, 'NO-GO');
@@ -181,7 +187,7 @@ test('gate: coverage is measured on the Jev lanes of every row, not only on rows
 
 test('recommend() honours the lost-candidate caps and the lane bound, not only the wasted-credit cap', () => {
   const g = cfg.gate;
-  const point = over => ({ pairs: 600, decided: 400, systemAgreement: 0.97, falseApproveRate: 0.01, falseRejectRate: 0.005, falseRejectOfLlmApproved: 0.01, laneAgreementLo: 0.95, coverage: 0.6, approveDeltaPts: 0.5, laneAgreement: 0.96, rejectP: 0.9, approveP: 0.6, ...over });
+  const point = over => ({ pairs: 600, decided: 400, systemAgreement: 0.97, falseApproveRate: 0.01, falseRejectRate: 0.005, falseRejectOfLlmApproved: 0.01, laneAgreementLo: 0.95, coverage: 0.6, approveDeltaPts: 0.5, laneAgreement: 0.96, rejectAt: 0.7, ...over });
   assert.ok(report.recommend([point({})], g));
   assert.equal(report.recommend([point({ falseRejectRate: 0.04 })], g), null, 'too many lost candidates');
   assert.equal(report.recommend([point({ falseRejectOfLlmApproved: 0.1 })], g), null, 'too large a share of the LLM-approved cards lost');
@@ -200,19 +206,34 @@ test('approval-rate delta per role is judged only for roles with enough rows', (
   assert.ok(tiny.smallRoles.some(s => /^Cook/.test(s)));
 });
 
-test('threshold sweep re-runs decide() offline: a stricter reject bar moves rejects to review; a recommendation respects the gate', () => {
-  // rows where the tier answer is 92% too junior: reject at rejectP <= 0.9, review at >= 0.95
-  const junior = { ...PROFILES.reject, current_tier: { p: T({ entry_kp: 0.7, commis: 0.22, cdp_cook: 0.08 }), c: 0.7 }, role_match_seen: 0.2 };
-  PROFILES.junior = junior;
-  const rows = [...many(200, { jev: 'junior', llm: 'reject', role: 'Chef De Partie' }), ...many(200, { jev: 'approve', llm: 'approve', role: 'Chef De Partie' })];
+test('bar sweep re-runs decide() offline: a higher rejectAt moves rejects to approves, every card stays decided; the recommendation respects the gate', () => {
+  const rows = [...many(200, { jev: 'border', llm: 'reject', role: 'Sous Chef' }), ...many(200, { jev: 'approve', llm: 'approve', role: 'Sous Chef' })];
   const a = report.analyze(rows, cfg, { decide });
   const s = a.sweeps.find(x => x.stage === 1);
   assert.equal(s.rows, 400);
-  const at = (rp, ap) => s.grid.find(g => g.rejectP === rp && g.approveP === ap);
-  assert.ok(Math.abs(at(0.9, 0.6).coverage - 1) < 1e-12);
-  assert.ok(Math.abs(at(0.95, 0.6).coverage - 0.5) < 1e-12);
-  assert.ok(s.recommended && s.recommended.coverage >= 0.5);
+  assert.equal(s.current, 0.7);
+  assert.deepEqual(s.grid.map(g => g.rejectAt), [0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]);
+  const at = bar => s.grid.find(g => g.rejectAt === bar);
+  assert.ok(Math.abs(at(0.7).coverage - 1) < 1e-12);
+  assert.ok(Math.abs(at(0.7).systemAgreement - 1) < 1e-12, 'at 0.7 the border card (R 0.8) is rejected like the LLM did');
+  assert.ok(Math.abs(at(0.9).coverage - 1) < 1e-12, 'no bar sends a card to a fallback: the forced choice');
+  assert.ok(Math.abs(at(0.9).systemAgreement - 0.5) < 1e-12, 'at 0.9 the border card is approved: it disagrees with the LLM');
+  assert.ok(Math.abs(at(0.9).falseApproveRate - 0.5) < 1e-12);
+  assert.ok(s.recommended && s.recommended.rejectAt <= 0.8 && s.recommended.systemAgreement === 1);
   assert.ok(s.grid.every(g => typeof g.systemAgreement === 'number'));
+  assert.ok(!('approveP' in s.grid[0]) && !('rejectP' in s.grid[0]), 'the two retired bars are not swept');
+});
+
+test('bar sweep: rows of the older question set are not re-decided, and a criteria file passed in decides with its own bar', () => {
+  const old = row({ jev: 'approve', llm: 'approve' });
+  old.jev.answers = { current_tier: { p: { cdp_cook: 1 } }, overall_fit: { p: { 0: 0, 1: 0, 2: 1 } } };
+  old.qv = 'q1';
+  const a = report.analyze([old, ...many(10, { jev: 'border', llm: 'reject', role: 'Sous Chef' })], cfg, { decide });
+  assert.equal(a.sweeps.find(x => x.stage === 1).rows, 10, 'the old row is left out');
+  const criteria = JSON.parse(JSON.stringify(screening.criteria.get().criteria));
+  criteria.decision.operatingPoint.stage1.rejectAt = 0.85;
+  const b = report.analyze(many(10, { jev: 'border', llm: 'reject', role: 'Sous Chef' }), cfg, { decide, criteria });
+  assert.equal(b.sweeps.find(x => x.stage === 1).current, 0.85);
 });
 
 test('rule table: agreement, disagreements and the promotion check', () => {
@@ -243,7 +264,7 @@ test('labels: accuracy of each engine against human labels', () => {
   assert.ok(Math.abs(a.labels.jevLaneAccuracy - 1) < 1e-12);
 });
 
-test('CLI: text report has every section; --json parses; --strict maps the verdict to exit codes', async () => {
+test('CLI: text report has every section; --json parses; --strict maps the verdict to exit codes; --criteria loads another file and refuses a broken one', async () => {
   const dir = path.join(h.HOME, 'report-shadow');
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
@@ -252,9 +273,10 @@ test('CLI: text report has every section; --json parses; --strict maps the verdi
   write([...strongRows('caterer'), ...strongRows('reed')]);
   const txt = await h.runNode(REPORT, ['--dir', dir]);
   assert.equal(txt.code, 0, txt.stderr);
-  for (const s of ['1. AGREEMENT', '2. RELIABILITY', '3. BY SOURCE', 'BY ROLE', '4. FALSE-APPROVE', '5. THRESHOLD SWEEP', '6. STAGE-1 RULES', '7. VERDICT', 'engine promotion (jev_shadow -> jev): GO']) {
+  for (const s of ['1. AGREEMENT', '2. RELIABILITY', '3. BY SOURCE', 'BY ROLE', '4. FALSE-APPROVE', '5. BAR SWEEP', 'rejectAt', '6. STAGE-1 RULES', '7. VERDICT', 'engine promotion (jev_shadow -> jev): GO']) {
     assert.ok(txt.stdout.includes(s), `report contains ${s}`);
   }
+  assert.ok(!/THRESHOLD SWEEP|rejectP|approveP/.test(txt.stdout), 'the retired bars are not mentioned');
   const js = await h.runNode(REPORT, ['--dir', dir, '--json']);
   assert.equal(JSON.parse(js.stdout).verdict.status, 'GO');
   assert.equal((await h.runNode(REPORT, ['--dir', dir, '--strict'])).code, 0);
@@ -268,6 +290,13 @@ test('CLI: text report has every section; --json parses; --strict maps the verdi
   assert.equal((await h.runNode(REPORT, ['--dir', dir, '--source', 'reed'])).code, 0);
   assert.equal((await h.runNode(REPORT, ['--dir', path.join(h.HOME, 'no-such-dir')])).code, 0, 'an empty log is a valid (insufficient) report');
   assert.equal((await h.runNode(REPORT, ['--help'])).code, 0);
+  const crit = h.writeRawConfig(Object.assign(JSON.parse(fs.readFileSync(path.join(h.REPO, 'resourcer', 'config', 'screening-criteria.json'), 'utf8'))), 'report-criteria.json');
+  assert.equal((await h.runNode(REPORT, ['--dir', dir, '--criteria', crit])).code, 0);
+  const broken = h.writeRawConfig({ version: 'x' }, 'report-broken-criteria.json');
+  const bad = await h.runNode(REPORT, ['--dir', dir, '--criteria', broken]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /--criteria file unusable/);
+  assert.match((await h.runNode(REPORT, ['--help'])).stdout, /--criteria/);
 });
 
 test('an end-to-end log written by the engine feeds the report without errors', async () => {
@@ -280,6 +309,7 @@ test('an end-to-end log written by the engine feeds the report without errors', 
   assert.equal(rows.length, 12);
   const a = report.analyze(rows, cfg, { decide });
   assert.equal(a.overall.pairs, 12);
+  assert.equal(a.sweeps.find(x => x.stage === 1).rows, 12, 'the rows the engine wrote carry answers the sweep can re-decide');
   assert.ok(report.render(a).includes('VERDICT'));
 });
 
@@ -323,4 +353,12 @@ test('gold-set export: redacted inputs only, no model answers, stratified, deter
   fs.writeFileSync(lf, labelled.map(l => JSON.stringify(l)).join('\n'));
   const rep = await h.runNode(REPORT, ['--dir', dir, '--labels', lf, '--json']);
   assert.equal(JSON.parse(rep.stdout).labels.matched, 9);
+});
+
+test('gold-set export: a card Jev decided but flagged as forced (the operating point, not Jev, chose the side) is offered for labelling like any uncertain card', () => {
+  const plain = i => ({ ...row({ jev: 'approve', llm: 'approve' }), input: `Cook | Leeds, <PC> plain ${i}` });
+  const forced = i => { const r = { ...row({ jev: 'approve', llm: 'approve' }), input: `Cook | Leeds, <PC> forced ${i}` }; r.jev = { ...r.jev, flags: ['forced'], confidence: 0.95 }; return r; };
+  const rows = [...Array.from({ length: 60 }, (_, i) => plain(i)), ...Array.from({ length: 6 }, (_, i) => forced(i))];
+  const sample = report.exportSample(rows, 9, 5);
+  assert.ok(sample.filter(x => /forced/.test(x.input)).length >= 3, 'the uncertain third is filled with forced cards');
 });

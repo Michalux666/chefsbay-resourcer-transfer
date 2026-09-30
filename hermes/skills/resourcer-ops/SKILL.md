@@ -70,9 +70,18 @@ node /opt/data/profiles/resourcer/workspace/tools/screening-report.js --strict
 node /opt/data/profiles/resourcer/workspace/tools/screening-report.js --json
 ```
 
-Reads `R/shadow/screening-*.jsonl`. In the default engine `jev_only` (Jev alone, no language model) it prints the Jev lane distribution, approval rate by role and source, and the share of decisions taken by the review policy; the promotion verdict is "not applicable in jev_only mode".
+Reads `R/shadow/screening-*.jsonl`. In the default engine `jev_only` (Jev alone, no language model) it prints the Jev lane distribution, the share Jev decided itself (the owner requires at least 99 percent, so the share taken by the review policy should be near zero), the forced share, approval rate by role and source; the promotion verdict is "not applicable in jev_only mode".
 `--strict` exits 3 (not applicable) in `jev_only`, and 0 GO, 1 NO-GO, 2 INSUFFICIENT DATA for the older engines. Changing the engine or the review policy (`SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST`) is the owner's decision (docs/SCREENING.md section 16); you only report
 the numbers and the verdict. Do not use `--export-sample` unless the owner asks: it writes redacted candidate cards to a file.
+
+CV screening (after the unlock, Phase 2) runs in shadow mode by default and only records what it would have done. Read it, never change it:
+
+```
+node /opt/data/profiles/resourcer/workspace/resourcer/scripts/cv-report.js --days 1 --mode shadow
+node /opt/data/profiles/resourcer/workspace/resourcer/scripts/cv-report.js --days 7 --mode shadow --forced --rejects
+```
+
+It reads `R/shadow/cv-*.jsonl` (numbers and codes, no CV text; the platform candidate ids in it are personal data: report counts, list ids only when the owner asks). Report the Jev-decided share, the fallback share, the unreadable share, the would-be reject rate and the SWITCH-ON CHECK verdict. Switching `CV_SCREEN` to `on` is the owner's decision after the shadow week (docs/CV-SCREENING.md section 10). Never open a CV.
 
 ## 5. Backups
 

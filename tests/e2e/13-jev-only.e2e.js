@@ -38,6 +38,8 @@ test('13a a normal run on the default engine: Jev decides, the policy is visible
     assert.equal(last.errors, 0);
     assert.equal(w.svc.zoho.created().length, 5);
     assert.equal(w.json('runtime/pipeline-halt.json'), null);
+    // the same people as scenario 2, not merely the same count: the post-unlock reject (#8) has no CV and must never reach Phase 2
+    assert.deepEqual([...w.svc.zoho.state.records.values()].filter((r) => r.attachments.length).map((r) => r.key).sort(), ['71000001', '71000005', '71000007', '71000009', '71000011']);
   });
 
   await t.test('the gateway saw Jev requests and not one chat-completions request; only Jev is named on the wire', () => {

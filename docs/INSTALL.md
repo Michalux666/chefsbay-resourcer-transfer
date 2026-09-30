@@ -243,7 +243,7 @@ Remember the key for later pulls:
 git -C /opt/data/profiles/resourcer/workspace config core.sshCommand 'ssh -i /opt/data/profiles/resourcer/deploy/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/data/profiles/resourcer/deploy/known_hosts -o StrictHostKeyChecking=yes'
 ```
 
-Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the update that switches an installed instance to the Jev-only engine follow `docs/UPDATE-JEV-ONLY.md` instead):
+Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) and then `docs/UPDATE-B.md` (screening criteria and the CV stage) instead):
 
 ```
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
@@ -662,7 +662,7 @@ Idempotent: yes (all copies overwrite with identical content).
 
 ## 7. Screening canaries (real AI calls with invented text)
 
-Goal: prove the AI Gateway key works, the owner's Vercel team lets Jev through, Jev (the only model this system uses) answers in the expected shape through the screening tool, and record whether zero data retention is available. There is no language model in screening (engine `jev_only`, docs/SCREENING.md section 16): the team blocks every other model, so a canary of one would only answer HTTP 403, and none is part of this install. All text sent in this step is invented. No candidate data is used. Total cost: a fraction of a cent per call. Precondition: step 6 done. Do not repeat these calls in a loop: send each one once, wait for the answer.
+Goal: prove the AI Gateway key works, the owner's Vercel team lets Jev through, Jev (the only model this system uses) answers in the expected shape through the screening tool (for the search cards, 7.3, and for a downloaded CV, 7.6), and record whether zero data retention is available. There is no language model in screening (engine `jev_only`, docs/SCREENING.md section 16): the team blocks every other model, so a canary of one would only answer HTTP 403, and none is part of this install. All text sent in this step is invented. No candidate data is used. Total cost: a fraction of a cent per call. Precondition: step 6 done. Do not repeat these calls in a loop: send each one once, wait for the answer.
 
 ### 7.1 Gateway auth and credits (OPERATOR)
 
@@ -703,7 +703,7 @@ First the before-unlock stage (batch), one suitable and one unsuitable invented 
 cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/ai-review.js --mode batch --job Chef --location M1 --distance 20 --source caterer --run-id install-canary --with-codes --candidates '[{"id":"canary-yes","snippet":"Chef de Partie | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Chef de Partie Jan 2019 - Current Test Bistro Ltd Key Responsibilities Running the sauce section, daily prep, ordering, food safety"},{"id":"canary-no","snippet":"Retail Cashier | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Retail Cashier Jan 2021 - Current Test Store Ltd Key Responsibilities Till operation, stock replenishment"}]'
 ```
 
-Expect: exit 0; standard output is one line, a JSON array with `"id":"canary-yes"` having `"approved":true` and `"id":"canary-no"` having `"approved":false`, each with a `reason` and a `reasonCode` (Jev's own `reject_...` code, or `sys_review_policy_reject` when Jev was not sure); standard error contains `SCREENING_MODEL: typesafe-ai/jev` (`typesafe-ai/jev+policy` when the review policy decided a card) and, once, a `WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds` line, which is expected until the owner has tuned the thresholds (docs/SCREENING.md section 16.6).
+Expect: exit 0; standard output is one line, a JSON array with `"id":"canary-yes"` having `"approved":true` and `"id":"canary-no"` having `"approved":false`, each with a `reason` and a `reasonCode` (Jev's own `reject_...` code, or `sys_review_policy_reject` when both injection filters flagged the card); standard error contains `SCREENING_MODEL: typesafe-ai/jev` (`typesafe-ai/jev+policy` when the review policy decided a card) and, once, a `WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds` line, which is expected until the owner has calibrated the operating point on recruiter labels (docs/SCREENING-CRITERIA.md section 6). Each call also sends one small extra request per distinct search title (Jev is asked once what level of role `Chef` is): that is expected.
 
 Then the after-unlock stage (single):
 
@@ -711,14 +711,15 @@ Then the after-unlock stage (single):
 cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/ai-review.js --mode single --job Chef --title "Retail Cashier" --source caterer --run-id install-canary --with-codes --snippet "Retail Cashier | Testville Unlock candidate 0 applications in last 30 days Updated 2 days ago Recent experience Other CV snippets Retail Cashier Jan 2021 - Current Test Store Ltd Key Responsibilities Till operation, stock replenishment"
 ```
 
-Expect: exit 0; one line `{"approved":false,"reason":"...","reasonCode":"reject_..."}`. If it reads `"approved":true` with `"reasonCode":"sys_review_policy_approve"`, Jev was not sure enough after the unlock and the review policy (approve after the unlock) decided: that is not a failure, but record it and tell the owner.
+Expect: exit 0; one line `{"approved":false,"reason":"...","reasonCode":"reject_..."}`. If it reads `"approved":true` with `"reasonCode":"sys_review_policy_approve"`, the review policy (approve after the unlock) decided: the card was flagged as an instruction to an AI by both filters, or Jev's answer stayed unusable. That is not expected for this invented text and not a failure of the install, but record it and tell the owner.
 
 If it fails:
 
 | Symptom | Meaning | Action |
 |---|---|---|
 | exit 3, output begins `API_UNAVAILABLE:` | Jev could not be reached, or the gateway refused the key or the model | report the text after the colon (`restricted access to this model` means the owner must allow `typesafe-ai/jev` on the Vercel team); do not repeat more than once |
-| batch: `canary-yes` rejected with `sys_review_policy_reject` | Jev was not sure about an obvious candidate: the placeholder thresholds or Jev itself | STOP and report both lines |
+| batch: `canary-yes` rejected with `sys_review_policy_reject` | the invented text tripped both injection filters (the keyword filter and Jev's own answer), or the card was empty: only the owner rewords the canary | STOP and report both lines |
+| batch: `canary-yes` rejected with a `reject_...` code | Jev's answers and the criteria rejected an obvious Chef de Partie | STOP and report both lines |
 | batch: `canary-no` approved | Jev approved an unrelated candidate | STOP and report both lines |
 | batch: a canary card has `reasonCode` `sys_invalid_result` | Jev's answer for that card was unusable twice; the card is left undecided, not rejected | repeat the batch call once; if it comes back again STOP and report both lines |
 | exit 1 with `FATAL` | usage or input problem | report the text |
@@ -743,7 +744,7 @@ Then, in every case, show who decided each row (an engine name and a code, no pe
 grep -h '"runId":"install-canary"' /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | grep -o '"used":{[^}]*}'
 ```
 
-Expect three lines, each `"engine":"jev"` (Jev decided) or `"engine":"policy"` with a `sys_review_policy_` code (the review policy decided); report which. A line with `"engine":"system"` and a `sys_invalid_result` code means Jev's answer for that card was unusable (the card is left undecided, not rejected): report it. A Jev failure IS a blocker in this engine: without Jev nothing can be screened (the tool exits 3 and the pipeline halts). `http_403` means the AI Gateway account or the Vercel team restricts the model (the owner must allow `typesafe-ai/jev`), `http_402` no credits, `timeout` slowness.
+Expect three lines, each `"engine":"jev"` (Jev decided) or `"engine":"policy"` with a `sys_review_policy_` code (the review policy decided, which is rare: it settles only a card both injection filters flagged, an empty card and, after the unlock, an unusable answer); report which. A line with `"engine":"system"` and a `sys_invalid_result` code means Jev's answer for that card was unusable (the card is left undecided, not rejected): report it. A Jev failure IS a blocker in this engine: without Jev nothing can be screened (the tool exits 3 and the pipeline halts). `http_403` means the AI Gateway account or the Vercel team restricts the model (the owner must allow `typesafe-ai/jev`), `http_402` no credits, `timeout` slowness.
 
 ### 7.5 Zero data retention canary (OPERATOR)
 
@@ -767,9 +768,78 @@ Read the result:
 
 This is a HUMAN decision (H9a). Do not set `SCREEN_ZDR` or `SCREEN_JEV_ZDR` yourself. Record the result in the progress table.
 
-### 7.6 Clean up
+### 7.6 CV screening canary (OPERATOR)
 
-The canary rows in `shadow/` carry the run ids `install-canary` and `install-canary-zdr`; they contain only invented text and stay until the normal 180-day expiry (the calibration report can exclude them by run id). Remove the scratch folder contents: `rm` on any file you created in `/opt/data/profiles/resourcer/install-work/` (none should remain).
+The CV stage reads a downloaded CV between the download and the Zoho push (`docs/CV-SCREENING.md`). It needs no setting: `CV_SCREEN` defaults to `shadow`, which records what it would have done and blocks nothing. Prove it with two invented CVs, a chef and a retail assistant, both for a Chef de Partie search (the command decides and prints; it never blocks anything). Use your file-write tool (not a shell redirect) to create `/opt/data/profiles/resourcer/install-work/canary-cv.txt` with exactly this content (the scratch folder of 0.7 must exist):
+
+```
+Sam Sampleperson
+Chef de Partie
+
+Employment history
+
+Chef de Partie, Test Bistro Ltd, Testville
+January 2019 to present
+Running the sauce section, daily prep, ordering and food safety in a 60 cover restaurant.
+
+Commis Chef, Sample Kitchen Ltd, Testville
+March 2016 to December 2018
+Preparation and cooking on the larder and pastry sections.
+
+Education
+Level 2 Food Safety in Catering
+```
+
+Then create `/opt/data/profiles/resourcer/install-work/canary-cv-no.txt` with exactly this content:
+
+```
+Robin Roleplay
+Retail Assistant
+
+Employment history
+
+Retail Assistant, Test Store Ltd, Testville
+January 2019 to present
+Till operation, stock replenishment and customer service.
+
+Sales Assistant, Sample Shop Ltd, Testville
+March 2016 to December 2018
+Shop floor sales and merchandising.
+```
+
+Run the chef (`timeout=300`):
+
+```
+cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/cv-review.js --job "Chef de Partie" --cv-file /opt/data/profiles/resourcer/install-work/canary-cv.txt --no-shadow
+```
+
+Expect: exit 0; standard output is one JSON line that begins `{"decision":"pass","final":"approve","lane":"jev"` (it holds numbers and reason codes only, no text); standard error ends with `SCREENING_MODEL: typesafe-ai/jev`. `--no-shadow` keeps the invented CVs out of the shadow log. Then the retail assistant (`timeout=300`):
+
+```
+cd /opt/data/profiles/resourcer/workspace/resourcer && RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node scripts/cv-review.js --job "Chef de Partie" --cv-file /opt/data/profiles/resourcer/install-work/canary-cv-no.txt --no-shadow
+```
+
+Expect: exit 0; one JSON line that begins `{"decision":"reject","final":"reject","lane":"jev"` with the reason codes `no_relevant_experience` (and usually `career_change`); the same `SCREENING_MODEL` line. In shadow mode this decision blocks nothing: it only shows that the stage can tell the two apart. Then delete both files, one command each:
+
+```
+rm /opt/data/profiles/resourcer/install-work/canary-cv.txt
+```
+
+```
+rm /opt/data/profiles/resourcer/install-work/canary-cv-no.txt
+```
+
+If it fails:
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| exit 3, output begins `API_UNAVAILABLE:` | Jev could not be reached or refused the key or the model | as in 7.3: report the text after the colon; do not repeat more than once |
+| the chef is `"decision":"reject"`, or either is `"lane":"fallback"` or `"decision":"unreadable"` | the stage read or judged an obvious CV wrongly | STOP and report the JSON line (numbers and codes only) |
+| the retail assistant is `"decision":"pass"` | Jev doubted an obvious mismatch (a forced pass) | STOP and report the JSON line |
+| exit 1 with `FATAL` | usage or input problem (for example a file was not created) | report the text |
+### 7.7 Clean up
+
+The canary rows in `shadow/` carry the run ids `install-canary` and `install-canary-zdr`; they contain only invented text and stay until the normal 180-day expiry (the calibration report can exclude them by run id); the CV canaries of 7.6 write no row (`--no-shadow`). Remove the scratch folder contents: `rm` on any file you created in `/opt/data/profiles/resourcer/install-work/` (none should remain).
 
 Idempotent: yes (each call costs a fraction of a cent).
 
@@ -1298,6 +1368,7 @@ New runs start only between 06:00 and 22:00 London. Outside that window the supe
 | at the end | tick log | `runner finished a run (exit 0) - re-checking gate immediately for next territory` |
 | at the end | `cat /opt/data/profiles/resourcer/workspace/resourcer/runtime/last-run.json` | `"exitCode":0`, counts for `pool` and `approved` (numbers only) |
 | at the end | `ls -t /opt/data/profiles/resourcer/workspace/resourcer/downloads` | `approved-queue-<time>.json` and `phase2-results-<time>.json` (do not open them: they hold personal data); only a few `cv-...` files at most |
+| at the end (once the run approved candidates) | `ls /opt/data/profiles/resourcer/workspace/resourcer/shadow` | `cv-<date>.jsonl` next to `screening-<date>.jsonl`: the CV stage (shadow) screened the downloaded CVs; nothing was blocked. Its numbers: `node /opt/data/profiles/resourcer/workspace/resourcer/scripts/cv-report.js --days 1 --mode shadow` |
 | at the end | `node /opt/data/profiles/resourcer/workspace/resourcer/scripts/alerts-deliver.js --dry-run --digest` | today's pulled count, runs, errors, credits; no unexpected critical alert |
 | at the end | the small first search | its file is gone from `pending-searches/` (`ls /opt/data/profiles/resourcer/workspace/resourcer/pending-searches`) |
 
@@ -1394,7 +1465,7 @@ Alerts you may see: `reed-human-login` (a bot check again: repeat 12.2), `reed-c
 
 ## 13. Reading how Jev is doing (and what is not promoted)
 
-Not part of the install. Jev decides alone (`SCREEN_ENGINE=jev_only`); there is no language model, so there is nothing to promote and no go/no-go gate: the report says "not applicable in jev_only mode". What the operator can produce after a few weeks is the Jev-only report of `docs/SCREENING.md` section 16.7 (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`): the lane distribution, the approval rate by role and source, and above all the share of decisions taken by the review policy instead of a confident Jev answer. Changing the two review-policy switches or the thresholds is the owner's decision alone. The canary rows written in step 7 carry the run ids `install-canary` and `install-canary-zdr` and can be ignored.
+Not part of the install. Jev decides alone (`SCREEN_ENGINE=jev_only`); there is no language model, so there is nothing to promote and no go/no-go gate: the report says "not applicable in jev_only mode". What the operator can produce after a few weeks is the Jev-only report of `docs/SCREENING.md` section 16.7 (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`): the lane distribution, the approval rate by role and source, the share Jev decided itself (the owner requires at least 99 percent, so the share taken by the review policy should be near zero), and the forced share (decisions taken in real doubt, about a sixth). For the CV stage, `node /opt/data/profiles/resourcer/workspace/resourcer/scripts/cv-report.js --days 7 --mode shadow` (`docs/CV-SCREENING.md` section 7). Changing the review-policy switches, the criteria files, the operating points or `CV_SCREEN` is the owner's decision alone. The canary rows written in step 7 carry the run ids `install-canary` and `install-canary-zdr` and can be ignored.
 
 ## Appendix A. What this install changes on the instance
 

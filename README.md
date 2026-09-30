@@ -13,21 +13,21 @@ secrets travel only in an encrypted data bundle (`data/resourcer-bundle.enc`, ad
 2. `docs/INSTALL.md` - the install runbook the operator follows (preflight, code, bundle, cron jobs, plugin, first run). Then `docs/ACCEPTANCE.md` (checks that need the real instance) and `docs/CUTOVER.md`.
 3. `OPERATOR-PROMPT.md` - what to tell the operator agent to begin. Its standing instructions are `hermes/AGENTS.md`, `hermes/SOUL.md` and the skill `hermes/skills/resourcer-ops/SKILL.md`.
 4. Day to day: `docs/OPERATIONS.md` (routine, alerts, recovery), `docs/KNOWN-LIMITS.md` (what is unverified or imperfect, with the mitigation), `docs/ROLLBACK.md`, `docs/TEARDOWN.md` (retiring the laptop).
-5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged, Jev alone and the review policy), `docs/UPDATE-JEV-ONLY.md` (switching an already installed instance to Jev alone), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
+5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged, Jev alone and the review policy), `docs/SCREENING-CRITERIA.md` (the editable screening criteria and operating point), `docs/CV-SCREENING.md` (the CV stage after the unlock, in shadow by default), `docs/UPDATE-JEV-ONLY.md` and `docs/UPDATE-B.md` (updating an already installed instance), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
    (owner decisions and every divergence from the old system), `docs/LEGACY-MAP.md` (old file to new file), `docs/DESIGN.md` (the binding contract), `docs/parity/*.md` (per-package detail with legacy line numbers, UNVERIFIED-LIVE lists).
 
 ## Layout
 
 ```
 README.md  HANDOFF.md  OPERATOR-PROMPT.md  MANIFEST.sha256  .gitattributes (LF line endings)  .gitignore
-docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING DESIGN, parity/<package>.md
+docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING SCREENING-CRITERIA CV-SCREENING DESIGN UPDATE-JEV-ONLY UPDATE-B, parity/<package>.md
 resourcer/    the workspace root (RESOURCER_HOME on the instance)
-  candidates-db.js  package.json  config/  scripts/  scripts/lib/  scripts/lib/screening/  scripts/phase1/
+  candidates-db.js  package.json  config/  scripts/  scripts/lib/  scripts/lib/screening/  scripts/lib/cv/  scripts/phase1/
   (created at run time, never committed: runs/ downloads/ logs/ runtime/ pending-searches/ secrets/ outbox/ shadow/ state/ backups/)
 plugin/resourcer/   the dashboard plugin (manifest, FastAPI routes, one-file UI)
 hermes/       profile files: AGENTS.md SOUL.md .env.example cron/jobs.json scripts/*.sh (cron wrappers) skills/resourcer-ops/SKILL.md
 tools/        make-bundle.js restore-bundle.js verify-bundle.js (data bundle), make-manifest.js check-manifest.js (code lockdown),
-              request-search.js, screening-report.js, preflight.sh (environment probes), install helpers
+              request-search.js, screening-report.js, screening-operating-point.js, gold-rows.js, preflight.sh (environment probes), install helpers
 tests/        node --test suites per package (docs/ checks that the documents agree with the code and the manifest tools hold), fake servers, e2e/ scenarios, e2e-linux.sh
 data/         resourcer-bundle.enc (encrypted; added at cutover; never plaintext)
 ```
@@ -42,12 +42,12 @@ cd resourcer && npm install                                 # better-sqlite3, ma
 cd ..
 node --test "tests/core/*.test.js"                          # one package: core, lifecycle, phase1, screening, supervision, reed, browser, bundle, dashboard, docs
 NODE_PATH=$PWD/resourcer/node_modules RESOURCER_PYTHON=/path/to/venv/bin/python node --test "tests/**/*.test.js"    # everything
-bash tests/e2e-linux.sh                                     # the 13 end-to-end scenarios on Linux (about 18 minutes)
+bash tests/e2e-linux.sh                                     # the 14 end-to-end scenarios on Linux (about 20 minutes)
 ```
 
 Without `NODE_PATH` and a Python that has `fastapi`, `httpx` and `pytest`, about 36 tests skip themselves (backup, the real Phase 2, the dashboard plugin suites) because `better-sqlite3` sits in `resourcer/node_modules`; do
 not trust a green run that skipped them. Four real-browser Reed tests skip unless `REED_REAL_CHROMIUM=<chromium binary>` is set. `bash tests/browser/smoke-linux.sh` and `sh tools/preflight.sh` are read-only checks
-meant to be run on the instance itself. Last full run (2026-09-30, after the go-live round, Linux, Node 22, a fresh copy with `npm install`): 1,983 tests, 1,978 pass, 0 fail, 5 skipped (the 4 real-browser tests and one test that needs the git history); all 13 end-to-end scenarios pass (scenario 08 was re-run on its own after a one-line fix of a stale expectation). What the tests cannot prove
+meant to be run on the instance itself. Last full run (2026-09-30, Update B, Linux, Node 22, a fresh copy with `npm install`): 2,482 tests, 2,476 pass, 0 fail, 6 skipped (the 4 real-browser tests and the 2 tests that need the git history, which pass on the laptop); all 14 end-to-end scenarios pass. What the tests cannot prove
 (live sites, the real Hermes host, Chromium 153, real Zoho) is listed as UNVERIFIED-LIVE in `docs/KNOWN-LIMITS.md` and turned into checks in `docs/ACCEPTANCE.md`.
 
 ## Rules for changing anything

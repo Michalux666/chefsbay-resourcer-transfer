@@ -84,6 +84,7 @@ function makeHome(scenario, opts) {
     copyDir(path.join(SRC, 'scripts', 'lib', 'screening'), path.join(home, 'scripts', 'lib', 'screening'));
     fs.mkdirSync(path.join(home, 'config'), { recursive: true });
     fs.copyFileSync(path.join(SRC, 'config', 'screening.json'), path.join(home, 'config', 'screening.json'));
+    if (fs.existsSync(path.join(SRC, 'config', 'screening-criteria.json'))) fs.copyFileSync(path.join(SRC, 'config', 'screening-criteria.json'), path.join(home, 'config', 'screening-criteria.json'));
   }
 
   // Data files

@@ -121,6 +121,14 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | zoho-push-failing, zoho-push-partial | every (or some) Zoho creates in a run failed; CVs and files are kept 14 days | HUMAN checks Zoho credentials/quota; then the command named in the alert text |
 | cv-attach-failed | CV could not be attached; kept 14 days | report the count; no retry tool yet |
 | cv-cleanup-failed, run-results-write-failed | local delete or stats row failed | report; the nightly sweep repairs |
+| cv-reject-rate-high | CV screening rejected (in shadow mode: would reject) more than 10 percent of a queue of at least 10 CVs | report; the owner checks `shadow/cv-*.jsonl` and `config/cv-screening.json` (docs/CV-SCREENING.md) |
+| cv-fallback-rate-high | more than 5 percent of a queue of at least 20 CVs was not decided by Jev | report; the owner reads `node scripts/cv-report.js` |
+| cv-forced-rate-high | more than 35 percent of a queue was decided in real doubt (forced) | report; the owner audits the forced rows |
+| cv-unreadable-rate-high | more than 30 percent of a queue could not be read; those CVs went to Zoho unscreened | report; the CV reader may be broken |
+| cv-shadow-stopped | CV screening (shadow) stopped early: 5 CVs in a row could not be screened, the rest of that queue was not screened; nothing was blocked or lost | report; the owner checks the key, credits and gateway; the next queue tries again by itself |
+| cv-screening-unavailable | CV screening (mode on) could not reach Jev; the queue is held with every CV kept | see Halts; auth or credits need HUMAN; it retries by itself |
+| cv-reject-not-recorded | a CV rejection (mode on) could not be written to `candidates.db`; files kept, decided again next run | report; check `node scripts/preflight-db.js` |
+| cv-review-errors | the CV reviewer process failed on some CVs; they went through like unreadable ones | report the text |
 | phase2-fatal | the Zoho push run aborted | report with the text; recovery runs by itself up to 3 times |
 | stranded-recovered | an interrupted run was pushed | none |
 | stranded-unrecoverable | unlocked candidates could not be pushed after 3 tries | report the queue file name to the owner |
@@ -152,7 +160,7 @@ Any key not in this table: read its text, report it, and only run a command that
 ## What only the owner can do
 
 Enter or rotate any secret; approve a dangerous command prompt; read the Caterer verification e-mail; do the Reed human login;
-change `RESOURCER_SOURCES` (Reed on), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
+change `RESOURCER_SOURCES` (Reed on), `CV_SCREEN` (CV screening: shadow, on or off; it starts in shadow and switching it to `on` rejects candidates), the screening criteria files (`config/screening-criteria.json`, `config/cv-screening.json`), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
 in the portal; buy credits; accept the privacy and data protection steps in docs/SECURITY.md; change code; tear down the old system.
 
 ## What you may do on your own
@@ -160,7 +168,7 @@ in the portal; buy credits; accept the privacy and data protection steps in docs
 Read status, logs (last lines), alerts and reports; run the checks above; request one search
 (`node /opt/data/profiles/resourcer/workspace/tools/request-search.js --job "Sous Chef" --location LS1`); clear a halt after its cause is
 fixed; clear the Caterer back-off after the owner fixed the session; run `node scripts/backup-db.js --restore-test`; produce the screening
-report (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`, read only). Ask before anything that spends credits in bulk.
+report (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`, read only) and the CV screening report (`node scripts/cv-report.js --days 7 --mode shadow`, read only; it holds numbers and candidate ids, no CV text). Ask before anything that spends credits in bulk.
 
 ## Command hygiene on this host
 

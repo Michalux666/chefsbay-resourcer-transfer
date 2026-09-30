@@ -4,29 +4,39 @@ This page is for the owner. It explains, in plain English, how the resourcer dec
 and Reed candidates are worth an unlock (or a profile view), what the criteria are, how borderline
 cases are handled, how we will find out whether the new "Jev" model can be trusted, and what to do
 about privacy. Code: `resourcer/scripts/ai-review.js` and `resourcer/scripts/lib/screening/`.
-Settings: `resourcer/config/screening.json`. Report: `tools/screening-report.js`.
+Settings: `resourcer/config/screening.json` (engine, gateway, injection bar, review policy) and
+`resourcer/config/screening-criteria.json` (the questions, the rules and the operating point; the owner's page for it is
+`docs/SCREENING-CRITERIA.md`). Report: `tools/screening-report.js`.
 
 ## 1. The short version
 
 - Every candidate card is judged **before** we spend an unlock credit (pre-unlock, Caterer and Reed)
   and Caterer candidates are judged **again after** the unlock (post-unlock, with the real job title).
 - **The judge is Jev alone** (engine `jev_only`, the default since 2026-09-30). Jev is TypeSafe AI's
-  model, reached through the Vercel AI Gateway. It answers typed questions about each card and our code
-  turns the answers into approve, reject or "not sure". The owner's Vercel team lets **only Jev** through
-  the gateway, so no language model is used anywhere in screening (section 16).
-- A card Jev is "not sure" about is settled by an explicit setting, the **review policy**: rejected before
-  the unlock and approved after it by default, each one switchable (section 16.3). Those decisions carry
-  their own reason codes and are counted separately, so you can see how much of screening is Jev's
-  confident answer and how much is the policy.
+  model, reached through the Vercel AI Gateway. It answers typed questions about each card, in the words of
+  `config/screening-criteria.json`, and our code turns the answers into **approve or reject**: every card gets one of the two
+  (a forced choice, docs/SCREENING-CRITERIA.md). The owner's Vercel team lets **only Jev** through the gateway, so no language
+  model is used anywhere in screening (section 16).
+- What is a fit is judged **relative to the searched role**: Jev is asked once per search title what kind of role it is (kitchen
+  porter, commis, chef de partie, sous, head chef, front of house ...) and how the candidate's latest job compares. There is no
+  list of job titles in code. The recruiters' own tie-break is built in: **when in doubt, approve; reject only a clear
+  mismatch.**
+- Jev decides at least 99 percent of the cards itself. Only a card that both the keyword filter and Jev flag as an instruction
+  to an AI, a card with no content, and (after the unlock) an unusable answer go to the **review policy**: rejected before the
+  unlock and approved after it by default, each switchable (section 16.3). Those decisions carry their own reason codes and are
+  counted separately, so you can see how much of screening is Jev's and how much is the policy.
+- **A second Jev stage reads the whole CV** after the unlock and the download, before the Zoho push (docs/CV-SCREENING.md). It is a separate
+  stage with its own criteria (`config/cv-screening.json`), settings (`CV_SCREEN`) and report (`scripts/cv-report.js`), and it starts in
+  `shadow` mode: it records what it would have done and blocks nothing until the owner switches it on.
 - The older engines `llm`, `jev_shadow` and `jev` still exist (a language model decides, or Jev runs next
   to it). They call the gateway's chat endpoint, which the owner's team blocks, so they are for tests and
   for a later runtime, not for this install (section 4). The code refuses them unless `SCREEN_ALLOW_LLM=1`
   is set as well: a leftover or mistyped `SCREEN_ENGINE` becomes `jev_only` with a warning, so no other
   model can go through the gateway by accident (section 16.1).
-- Jev's thresholds are placeholders, not fitted to Chefs Bay data (section 7). Jev-only mode runs on them
-  anyway (the owner's choice) and says so once per run; a labelled sample is how to measure it (section
-  16.6). The agreement report of section 9 needs a language model to compare with, so in `jev_only` it
-  says "not applicable".
+- The operating point (reject when the probability of a clear mismatch reaches 0.70 before the unlock, 0.90 after it) was fitted
+  on 452 historical cards against the old model's decisions, not against recruiter labels (docs/SCREENING-CRITERIA.md section 6).
+  Jev-only mode runs on it (the owner's choice) and says so once per run; a labelled sample is how to measure it (section 16.6).
+  The agreement report of section 9 needs a language model to compare with, so in `jev_only` it says "not applicable".
 - If the AI service is down, screening says so (`API_UNAVAILABLE`, exit code 3), the pipeline pauses
   and **no territory or candidate is used up**. A service failure is not turned into rejections: a
   request the gateway refuses (a 4xx), a call in which nothing at all was usable, and a
@@ -44,8 +54,9 @@ Settings: `resourcer/config/screening.json`. Report: `tools/screening-report.js`
 | Post-unlock, Caterer | every unlocked candidate | the same card text plus the job title returned by the unlock |
 
 What the judge is told about the search: the job title (for example "Chef de Partie"), the town or
-postcode area and the radius (context only, never a reason). Jev is told only the job title and a two-line
-description of the agency: the town and the radius are not sent to it.
+postcode area and the radius (context only, never a reason). Jev is told only the job title, a short description of the agency (the `context` of the criteria file) and the card's own
+title and work history: the town, the postcode, the radius, the application count, the update date and the like are read by code and
+never sent to it.
 
 What is **never** used to reject: salary expectations, where the person lives, whether they drive.
 
@@ -109,7 +120,7 @@ Two things are added around the verbatim text, neither changes the criteria:
 
 | Engine | Who decides | Jev | Use |
 |---|---|---|---|
-| `jev_only` (**default**) | Jev; a card it is not sure about by the review policy | decides | this install: no language model at all (section 16) |
+| `jev_only` (**default**) | Jev (approve or reject, forced); the rare fallback lane by the review policy | decides | this install: no language model at all (section 16) |
 | `llm` | the language model | not used | parity with the old system, no Jev traffic |
 | `jev_shadow` | the language model | answers in parallel, logged only | collects the evidence for the go/no-go |
 | `jev` | Jev first (approve or reject when it is clear); the language model for everything unclear | decides | after the gate is passed (section 9) |
@@ -150,9 +161,10 @@ to say `unknown`). If you prefer approve over reject for the fallback, set `batc
 
 ## 5. Tiers
 
-The **search tier** is worked out from the job title being searched, by the same word patterns as
-before. It only decides which over-qualification note the model reads (section 3) and how strict
-Jev's ladder is (section 7).
+The **search tier** is worked out from the job title being searched, by word patterns (`tiers.js`). Since the criteria design
+(docs/SCREENING-CRITERIA.md) **Jev's decision no longer uses it**: Jev is asked once per title what kind of role it is (`role_level`)
+and the tables of `screening-criteria.json` are keyed by that answer. The tier is still worked out for the language-model engines
+(which read it as the over-qualification note of section 3), for the log rows and for the second-opinion request.
 
 | Tier | Meaning | Examples |
 |---|---|---|
@@ -162,121 +174,93 @@ Jev's ladder is (section 7).
 | 3 | senior | Sous Chef, Second Chef, Senior CDP, Junior Sous Chef |
 | 4 | head | Head Chef, Executive Chef, Chef Manager, Catering Manager |
 
-Known quirk, kept on purpose: **"Commis Chef" is tier 2, not tier 1**, because the generic word
-"chef" matches first. So Commis Chef searches have always been told "over-qualification is not a
-reason to reject", while a "Catering Assistant" search is told the strict entry-level rule. About 560
-Commis Chef runs were affected. `SCREEN_TIER_MODE=fixed` makes Commis Chef tier 1 as the comment in
-the old code intended; that changes who is rejected, so it is your decision, not a bug fix.
-"Sous-Chef" written with a hyphen is also tier 2 (it does not match "sous chef").
+In the criteria a **Commis Chef search is an entry-level search** (a design default set on 2026-09-30, editable in `config/screening-criteria.json`, not yet confirmed by the owner): a sous or head chef is over-qualified
+for it, a cook and a commis are fine. The tier-2 quirk of the old code ("Commis Chef" fell in tier 2 because the generic word "chef"
+matched first) only survives in the language-model engines; `SCREEN_TIER_MODE=fixed` makes it tier 1 there as the comment in the old
+code intended, and has no effect on `jev_only`.
 
 ## 6. How borderline and thin cases are handled (not rigid, not over-strict)
 
-Principles, in code, not just in wording:
+Principles, in the criteria and in code, not just in wording (the details and the numbers are in docs/SCREENING-CRITERIA.md):
 
-1. **Missing information is never a reason for a machine rule to reject.** A card with no experience
-   block, or an empty card, goes to a judge; Jev's own answer for "not enough information" is
-   "review" (or "approve" when a hospitality signal is present), never "reject".
-2. **A reject needs positive evidence** of a mismatch (clearly too junior, clearly unrelated,
-   front-of-house only for a kitchen search, and so on) at high probability, **and** a second,
-   independent question must agree (the overall-fit score).
-3. **Counter-evidence blocks a reject.** If the card shows the duties of the role being searched, or
-   any kitchen history while the latest job is something else, it goes to review instead.
-4. **Near a boundary, do not guess.** For senior searches, one tier below (a Sous Chef for a Head Chef
-   search, a CDP for a Sous Chef search) is "uncertain" and goes to the language model; only a gap of
-   two tiers or more is a clear reject. For mid-level searches the ladder table in section 7 applies as
-   written: a Kitchen Porter for a Chef search and a Commis for a Chef de Partie search are clear
-   rejects (as in the owner's rubric), whichever tier they are next to.
-5. **Anything odd is review, not reject:** a missing or malformed Jev answer, a card that tries to
-   give instructions to the reader, a post-unlock title that contradicts the card.
-6. **After the unlock the bar to reject is higher** (the credit is spent; a false reject loses a
-   person, a false approve only costs a recruiter a minute).
-7. **The language model's reject for "no visible background" is the old rule.** In the default
-   engine this is unchanged, because the aim of the first release is parity. If you want thin cards
-   from a hospitality headline to be approved instead (owner decision D6, "recall-tilted"), set
-   `rubric.insufficientEvidence` to `lenient`. That replaces only that one bullet with "a card with
-   very little detail is NOT enough to reject: when the headline or any listed role is in hospitality
-   or catering, approve". The setting is logged with every decision, so you can compare before/after.
-   The opt-in `rubric.staleProfileClause` (default off) adds "profile clearly out of date" as a
-   reject reason; it is off because it can act as an age filter (section 12) and the aim is the
-   widest net.
+1. **The choice is forced, and the tie-break is the recruiters'.** Every card with usable answers is approved or rejected. Code
+   turns Jev's probabilities into the probability of a clear mismatch, R, and rejects at or above the bar (0.70 before the unlock,
+   0.90 after it). In doubt, approve. A decision Jev did not clearly favour (R between 0.3 and 0.7) carries the flag `forced`.
+2. **A reject needs positive evidence** of a clear mismatch (clearly too junior, two or more steps too senior for an entry role,
+   front of house or management only for a kitchen search, an unrelated industry, an empty profile, an out-of-date profile), and
+   for the structural rules a second, independent question must agree (the plain "too junior" and "over-qualified" yes/no answers,
+   "no hospitality anywhere", "no work in the searched area").
+3. **Counter-evidence blocks a reject.** If the history shows the searched kind of work, a too-junior title is not rejected on
+   that alone.
+4. **Near a boundary, do not guess.** One step below a sous or head chef search (a chef de partie for a sous search, a sous for a
+   head search) is a doubt cell: approved unless the three whole-policy readings see a clear mismatch. A kitchen porter for a chef
+   search and a commis for a chef de partie search are clear rejects (as in the owner's rubric). An answer of "cannot tell" is a
+   doubt cell too: it never rejects a card on its own.
+5. **An empty profile is a clear mismatch.** A card with neither a title nor a history, or with nothing stated, is
+   `reject_no_history`, as the recruiters' instructions say. A card with a title and no history is judged on its title (a fitting
+   title is put forward). Missing information alone never rejects a card that has a title or a history.
+6. **Out of date is a reject, unless the card shows a sign of life.** Last updated six years ago or more, or the newest dated job
+   ended six years ago or more, and neither an "Active ... ago" within a year nor an "N applications in last M days" on the card:
+   `reject_stale_profile`, before the unlock only. The card's own application count counts as recent activity (a design choice added
+   on 2026-09-30 during the merge, NOT an owner decision and not yet confirmed by the owner: on the historical sample the rule had
+   ignored it and lost candidates who were applying for jobs that week. It was found on the same cards it is measured on, so the held-out
+   TEST split no longer covers it, and Reed cards carry no application count. Turn it off with `decision.stale.applicationsAreActivity: false`
+   in `config/screening-criteria.json`).
+7. **Anything odd is a fault or the fallback lane, not a reject:** a missing or malformed Jev answer, or a card format the parser does
+   not know (`card_unreadable`), is a fault the run guards see (section 16.5); a card that both filters flag as an instruction to the
+   reader goes to the review policy.
+8. **After the unlock the bar to reject is higher** (the credit is spent; a false reject loses a person, a false approve only costs a
+   recruiter a minute). The real job title decides the level; a title that contradicts the card switches the card readings off, and
+   the out-of-date rule is not applied.
+9. **The language-model engines keep the old wording.** Their rubric rejects for "no visible background" as before. If you want thin
+   cards from a hospitality headline to be approved there instead (owner decision D6, "recall-tilted"), set
+   `rubric.insufficientEvidence` to `lenient`; the opt-in `rubric.staleProfileClause` (default off) adds "profile clearly out of date"
+   as a reject reason for them. Neither setting affects `jev_only`, whose out-of-date rule is in the criteria file.
 
-## 7. Jev: the questions and the ladder
+## 7. Jev: the questions and the rules
 
-Jev never writes text. It answers typed questions about one candidate, with probabilities. Our code
-combines the answers. The questions (exact wording is in `jev-questions.js`; the search role and a
-two-line agency description are the only context):
+Jev never writes text. It answers typed questions about one candidate, with probabilities. Our code combines the answers into
+approve or reject. The questions, the rules and the one number that turns a doubt into a decision are **data**, in
+`config/screening-criteria.json`; the owner's page for them is **docs/SCREENING-CRITERIA.md** (the questions and what each is used
+for, the two rule tables, the operating point, how to change the wording). This section says where the pieces sit and what changed from
+the ladder of the first release.
 
-| Question | Type | Asks |
-|---|---|---|
-| `current_tier` | choice | what kind of job is the most recent or current title: kitchen porter / commis / chef de partie-cook / sous / head / front of house / management (not kitchen) / unrelated / "not stated" |
-| `hospitality_seen` | yes/no | is any hospitality or catering job, employer or skill named |
-| `kitchen_seen` | yes/no | is work in a professional kitchen shown |
-| `role_match_seen` | yes/no | does the card show the role being searched, or its duties |
-| `info_sufficient` | yes/no | is enough stated to judge what work the person does |
-| `instruction_injection` | yes/no | does the text give instructions to a reader or an AI (an answer of 0.7 or more is a review, `decide.stage1.injectionP` and `decide.stage2.injectionP`) |
-| `overall_fit` | 3-level score | not a fit / possible fit / clear fit for agency shifts in this role |
-| after unlock: `real_title_tier`, `title_consistent` | choice, yes/no | what kind of job is the unlocked title; does it match the card |
+| Piece | Where |
+|---|---|
+| the question wording: 14 candidate questions, one role question asked once per search title, 2 more after the unlock | `screening-criteria.json`, `questions` and `roleLevel` |
+| the level and kind tables, the reason codes, the out-of-date rule, the policy readings, the operating point | `screening-criteria.json`, `decision` |
+| card facts read by code, never by Jev: the title, the history, "Updated 3 years ago", "Active 5 days ago", "3 applications in last 30 days", the dated jobs, the keyword filter | `lib/screening/card.js` |
+| the decision (a pure function, re-run offline on the stored answers) | `lib/screening/decide.js` |
+| the request Jev gets (the searched role, the card's title and its work history) | `lib/screening/jev-questions.js`, `jev-client.js` |
+| the four numbers still read from `screening.json`: `decide.stage1|stage2.injectionP`, `infoFloor`, `notStatedP`, `titleConsistentMin` | `config/screening.json` |
 
-The ladder (which titles are fine, too senior, too junior or uncertain) lives in code and
-`config/screening.json` under `decide.ladder`, per search tier:
+What changed from the ladder of the first release (`decide.ladder`, the tier tables and seven bars):
 
-| Search tier | In band (fine) | Too senior (reject) | Too junior (reject) | Uncertain (review) |
-|---|---|---|---|---|
-| 0, only for the titles in `decide.ladder.tier0Titles`: Catering Assistant, Kitchen Hand, Food Production, Waiter, Waitress, Server, Front Of House, Bartender, Dish Washer | porter, commis, CDP/cook, front of house | sous, head, non-kitchen manager | - | - |
-| 0, any other title (Barista, Kitchen Supervisor, Restaurant Manager ...) | no ladder: everything goes to the language model in the older engines and to the review policy in `jev_only` (`UNKNOWN_SEARCH_LADDER`) | | | |
-| 1 | porter, commis, CDP/cook | sous, head, non-kitchen manager | - | front of house (a reject only when no kitchen work is seen at all) |
-| 2 (generic) | commis, CDP/cook, sous, head | - | porter | - |
-| 2 (Chef de Partie, CDP, Line Cook) | CDP/cook, sous, head | - | porter, commis | - |
-| 3 | sous, head | - | porter, commis | CDP/cook |
-| 4 | head | - | porter, commis, CDP/cook | sous |
+- Jev is asked what kind of role the searched title is (`role_level`, once per distinct title per process: one small extra request),
+  instead of code looking the title up. The search tier and `decide.ladder.tier0Titles` are gone from the decision: a new title (Barista,
+  Kitchen Supervisor, a job nobody has searched yet) needs no entry, and K-SCR12 (a search title with no ladder puts every card in the
+  review lane) cannot happen.
+- The decision is a forced choice instead of three lanes: `approve` or `reject` for every card with usable answers. `review` remains
+  only as the fallback lane (`ANSWER_UNUSABLE`, `INJECTION_FLAG`).
+- The bars `rejectP`, `approveP` and the seven other numbers of the ladder are replaced by one operating point per stage
+  (`decision.operatingPoint.stage1.rejectAt` 0.70, `stage2.rejectAt` 0.90). They are no longer in `screening.json`; an older file that
+  still holds them loads, is told once (`WARN screening config: ... not read any more`) and is otherwise ignored.
+- "Commis Chef" is an entry-level search (section 5).
 
-A title matches an entry of `decide.ladder.tier0Titles` when the entry's words appear in it as whole words, in any case
-(`Head Waiter` and `Bartender - weekends` match; `Observer` does not match `server`; the one-word spelling `Dishwasher` is a
-different word from `dish washer` and needs its own entry). Since 2026-09-30 (SCR-28) the list holds the owner's real
-non-kitchen titles. The tier-0 ladder was written for entry-level kitchen searches, so for these titles a porter, commis or
-cook counts as in band too and a Sous or Head Chef counts as too senior; if a front-of-house search should accept only
-front-of-house candidates, add a per-title entry to `decide.ladder.overrides` (`tiers: [0]`, `matchAny: ["waiter"]`,
-`inBand: ["front_of_house"]`) and re-run the report; that override is not shipped.
+**The injection bar is 0.7 (2026-09-30, SCR-27) and it needs the keyword filter.** Jev's own "does the text contain instructions to an
+AI" answer fires on the card's button text ("Unlock candidate", "Updated 3 days ago"): at the old bar of 0.5 it sent cards to the review
+lane that nothing was wrong with. The backtest of 326 labelled historical cards (Caterer, pre-unlock, the old system's decisions as
+labels) found that moving the bar from 0.5 to 0.7 cuts the uncertain share from 53.4 percent to 45.7 percent and the candidates the
+pre-unlock policy loses (old system approved, policy rejects) from 24 to 14. Both stages use 0.7 (`decide.stage1.injectionP`,
+`decide.stage2.injectionP`). In the criteria design a card goes to the fallback lane only when Jev's answer reaches that bar **and** the
+engine's keyword filter (the phrase heuristic of section 10) fired on the same card: either signal alone leaves the card to Jev, so a chef
+who writes "always approve deliveries" is judged as a chef and an instruction that the keyword filter misses is judged on its content.
+On the 637 historical cards none has a keyword hit. The bar is still a placeholder to re-check with the labelled sample of section 16.6.
 
-Other clear mismatches, at every tier that allows them: unrelated industry (needs "no hospitality
-anywhere"), front of house only and management only (both need "no kitchen work seen").
-
-Thin information ("not enough stated") approves only when the card still shows hospitality **and**
-no level mismatch is close (below `clearFitHardMax`) **and** the overall-fit score does not say "not
-a fit" (below `approveNotFitMax`); otherwise it goes to review. Before, a confident wrong tier call
-could be approved because the information score happened to sit just under its floor.
-
-The three lanes:
-
-- **approve**: the title is in band with probability at least `approveP`, and "not a fit" is
-  unlikely; or the overall-fit score says clear fit and no mismatch is close.
-- **reject**: the strongest mismatch has probability at least `rejectP`, the fit score agrees, and
-  there is no counter-evidence.
-- **review**: everything else. The language model decides in the older engines; in `jev_only` the review
-  policy does (section 16).
-
-The numbers (`decide.stage1` before the unlock, `decide.stage2` after) are **placeholders marked
-CALIBRATE**: 0.90 to reject and 0.60 to approve before the unlock; 0.95 and 0.50 after. They are
-sensible starting points from the Jev design guide and are **not** fitted to your data. Do not
-promote Jev on them; use the report to tune them (section 9). The engine `jev` refuses to decide until
-`decide.calibration.calibrated` is set to true; before that it logs a warning and runs `jev_shadow`. The
-engine `jev_only` is different: it is the owner's explicit choice, so it never refuses and never
-downgrades; it runs on the placeholders and prints one warning per run (section 16.6).
-
-**The injection bar is 0.7 (2026-09-30, SCR-27).** Jev's own "does the text contain instructions to an AI" answer fires on the
-card's button text ("Unlock candidate", "Updated 3 days ago"): at the old bar of 0.5 it sent cards to the review lane that
-nothing was wrong with. The backtest of 326 labelled historical cards (Caterer, pre-unlock, the old system's decisions as
-labels) found that moving the bar from 0.5 to 0.7 cuts the uncertain share from 53.4 percent to 45.7 percent and the
-candidates the pre-unlock policy loses (old system approved, policy rejects) from 24 to 14, at the cost of 4 more credits
-spent on cards the old system rejected. Both stages use 0.7. It is still a CALIBRATE placeholder (the phrase heuristic of
-section 10 is unaffected and still routes a card that literally instructs the reader). The sample is small, Caterer only and labelled by the old model, so re-check it with the labelled
-sample of section 16.6.
-
-Jev's own "confidence" number is not used to decide. It is a function of its top probability only,
-independent tests found it no better than the probability itself, and it says nothing about being
-right. We store the raw probabilities and re-run the decision rules offline for any threshold. The language
-model also reports a confidence number; it is self-reported, not calibrated, and is logged but not used
-to decide.
+Jev's own "confidence" number is not used to decide. It is a function of its top probability only, independent tests found it no better
+than the probability itself, and it says nothing about being right. We store the raw probabilities and the numeric card facts (the
+`x_...` keys of the shadow row), so the decision can be re-run offline for any rule or bar. The language model also reports a confidence
+number; it is self-reported, not calibrated, and is logged but not used to decide.
 
 ## 8. Reason codes
 
@@ -294,12 +278,14 @@ still up to 120 characters and nothing depends on its wording.
 | `reject_unrelated_industry` | unrelated industry |
 | `reject_management_only` | management with no hands-on kitchen work |
 | `reject_too_junior` | too junior for the role |
-| `reject_stale_profile` | out of date (only with the opt-in clause) |
+| `reject_stale_profile` | out of date: updated six years ago or more, or the newest dated job ended that long ago, with no sign of life on the card (the language-model engines: only with the opt-in clause) |
 | `reject_wrong_specialism` | specialism does not fit |
 | `reject_overqualified_entry` | massively over-qualified for an entry-level search |
 | `reject_other` | any other reason to reject |
 | `sys_fail_open`, `sys_invalid_result` | the two fallbacks in section 4 (never produced by a model) |
 | `sys_review_policy_reject`, `sys_review_policy_approve` | a decision taken by the review policy of engine `jev_only` (section 16), never produced by a model |
+
+Fallback reasons (`jev.reviewReason` in the log; never a decision): `INJECTION_FLAG` (the keyword filter and Jev both flag the card) and `ANSWER_UNUSABLE` (a missing or malformed answer, or a card the parser cannot read). Flags on a decision (`jev.flags`): `forced` (R between 0.3 and 0.7), `empty_profile`, `stale_profile`, `stale_but_active` (out of date on paper, recently active), `role_unclear`, `title_contradiction`, `card_unreadable`, `injection`. The older reasons of the ladder (`INSUFFICIENT_INFO`, `THIN_CARD`, `TITLE_SNIPPET_MISMATCH`, `AMBIGUOUS_LEVEL`, `<code>_UNCERTAIN`, `UNKNOWN_SEARCH_LADDER`) are gone: each is now a decision with a flag.
 
 ## 9. Calibration, and how to promote from `jev_shadow` to `jev`
 
@@ -329,8 +315,8 @@ node tools/screening-report.js --json               # every number, machine read
 It prints: agreement between Jev and the language model (overall, by Jev confidence band, by source,
 stage, role and tier) with a reliability table; approve rates by role and source; how often Jev would
 approve what the model rejects (wasted credit) or reject what the model approves (lost candidate); a
-threshold sweep (which approve/reject bars would give what coverage and agreement, re-run offline
-on the stored answers, one grid per stage) with a recommended point; per-rule results for the
+bar sweep (what coverage and agreement each value of the one bar, `rejectAt`, would give, re-run offline
+on the stored answers, one table per stage) with a recommended point; per-rule results for the
 stage-1 rules; and the verdict.
 
 **Important:** the language model is the reference, not the truth. "Agreement" means "the same as
@@ -376,8 +362,8 @@ Jev may decide (`jev_shadow` to `jev`) when, over the last 21 days and with enou
 
 The report says `GO`, `NO-GO` or `INSUFFICIENT DATA` and lists each check. Two weeks of normal running
 is about 6,500 cards. If it says NO-GO, use the sweep to see whether other thresholds pass the gate
-(the recommendation now respects the lost-candidate caps and the lane bound as well), change them in
-`decide.stage1` / `decide.stage2`, wait for more data, and run it again. Change one thing at a time and
+(the recommendation now respects the lost-candidate caps and the lane bound as well), change it in
+`decision.operatingPoint` of `screening-criteria.json`, wait for more data, and run it again. Change one thing at a time and
 note it. `--config <file>` with a path that does not exist is an error, not silently the defaults.
 
 ### Promoting
@@ -402,10 +388,10 @@ logged, the judge still decides) or `enforce` (the rule decides and no model is 
 | Rule | Fires when | Default |
 |---|---|---|
 | `S1-NA-NONHOSP` | the card has no experience block at all **and** its headline is not a hospitality title (50 of 50 such cards were rejected by the old model) | `shadow` |
-| `T-ENTRY-OVERQUAL-HEAD`, `T-ENTRY-OVERQUAL-SOUS` | entry-level search and the latest role is clearly head / sous level | `shadow` |
-| `T-UNDER-GAP` | senior or head search and the latest role is porter/commis level (two tiers or more) | `shadow` |
+| `T-ENTRY-OVERQUAL-HEAD`, `T-ENTRY-OVERQUAL-SOUS` | entry-level search and the latest role is clearly head / sous level (built on the title tables of `tiers.js`) | `off` |
+| `T-UNDER-GAP` | senior or head search and the latest role is porter/commis level (two tiers or more) (title tables) | `off` |
 
-No rule rejects for missing information alone: a hospitality headline with no experience block is never
+The three `T-*` rules are `off` since the criteria design, so that no job-title table is consulted by default (Jev's criteria do that work); `shadow` logs them again and `enforce` lets them decide in the engines that run rules. No rule rejects for missing information alone: a hospitality headline with no experience block is never
 rule-rejected; an empty card goes to the judge; a card that contains instructions to a reader is
 flagged and always goes to the language model. A rule should be switched to `enforce` only when the
 report's rule table says **promote: YES** (at least 200 compared hits, 98 percent agreement, no
@@ -415,17 +401,17 @@ high-confidence disagreement). Enforced rules are still audited by the model at 
 
 | To change | Edit | Then |
 |---|---|---|
-| the recruiter wording | `scripts/lib/screening/rubric.js` | it changes who is approved: bump `RUBRIC_VERSION`, run in shadow, read the report |
-| approve/reject bars, ladder, gate numbers | `config/screening.json` | re-run the report; sweep first |
-| Jev's questions | `scripts/lib/screening/jev-questions.js` | bump `QUESTIONS_VERSION`; thresholds do not carry over |
+| Jev's questions, the level and kind tables, the out-of-date rule, the policy readings, the operating point (bars and cost weights) | `config/screening-criteria.json` (docs/SCREENING-CRITERIA.md) | save: the next run uses it and the cache signature and the `qv` of the log change with the file; a wording change changes what Jev answers, so re-run the backtest; a bad file stops screening (exit 3) instead of deciding |
+| the recruiter wording of the language-model engines | `scripts/lib/screening/rubric.js` | it changes who is approved: bump `RUBRIC_VERSION`, run in shadow, read the report |
+| injection bar, empty-profile floor, stage-2 title settings, the gate numbers | `config/screening.json` | re-run the report |
 | a stage-1 rule's mode | `config/screening.json` (`stage1.rules`) | no code change |
 | the models (`SCREEN_LLM_*` matter for the language-model engines only) | `SCREEN_LLM_MODEL`, `SCREEN_LLM_BACKUP_MODEL`, `SCREEN_JEV_MODEL` | run the install canary; the report groups by model |
-| what an unsure card becomes (`jev_only`) | `decide.reviewPolicy` or `SCREEN_REVIEW_PRE` and `SCREEN_REVIEW_POST` | watch the policy share (section 16.4) |
-| Commis Chef tier | `SCREEN_TIER_MODE=fixed` | your decision (section 5) |
+| what a card of the fallback lane becomes (`jev_only`) | `decide.reviewPolicy` or `SCREEN_REVIEW_PRE` and `SCREEN_REVIEW_POST` | watch the policy share (section 16.4) |
+| Commis Chef tier (language-model engines only) | `SCREEN_TIER_MODE=fixed` | your decision (section 5) |
 
 Rules of thumb: change **one** thing per release; keep parity first and improvements second; the two
 policy options that make screening less strict (`lenient`) or stricter (`staleProfileClause`) are off
-by default and must be a conscious choice. Question wording, thresholds and the rubric are the parts
+by default and must be a conscious choice. Question wording, the rules and the operating point are the parts
 worth reviewing by a person.
 
 ## 12. Privacy, hosting and legal notes (not legal advice)
@@ -532,8 +518,8 @@ Environment variables (all optional except the key). Each overrides `config/scre
 | `AI_GATEWAY_API_KEY` | none (required) | Vercel AI Gateway key; read from the profile `.env`; never logged |
 | `SCREEN_ENGINE` | `jev_only` | `jev_only`, `llm`, `jev_shadow` or `jev`; anything but `jev_only` is refused (it becomes `jev_only`, with a warning) unless `SCREEN_ALLOW_LLM=1` |
 | `SCREEN_ALLOW_LLM` | off | `1` lets the engines `llm`, `jev_shadow` and `jev` run (they call the gateway's chat endpoint). Leave it off while the Vercel team allows Jev only (section 16.1) |
-| `SCREEN_TIER_MODE` | `legacy` | `legacy` or `fixed` (Commis Chef tier) |
-| `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` | `reject`, `approve` | `jev_only`: what an unsure card becomes before and after the unlock (`reject` or `approve` each; section 16.3) |
+| `SCREEN_TIER_MODE` | `legacy` | `legacy` or `fixed` (Commis Chef tier of the language-model engines; no effect on `jev_only`) |
+| `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` | `reject`, `approve` | `jev_only`: what a fallback-lane card becomes before and after the unlock (`reject` or `approve` each; section 16.3) |
 | `SCREEN_GATEWAY_ORIGIN` | `https://ai-gateway.vercel.sh` | gateway origin (tests point it at a fake) |
 | `SCREEN_LLM_MODEL`, `SCREEN_LLM_BACKUP_MODEL` | `anthropic/claude-sonnet-5.5`, `anthropic/claude-sonnet-5` | deciding model and backup (not used by `jev_only`) |
 | `SCREEN_JEV_MODEL` | `typesafe-ai/jev` | Jev model |
@@ -547,8 +533,9 @@ Environment variables (all optional except the key). Each overrides `config/scre
 | `SCREEN_CACHE_TTL_SEC` | 3600 | decision cache (decisions only, never text); 0 disables |
 | `SCREEN_PAGE_RETRY_PAUSE_SEC` | 120 | pause the caller takes before retrying a page |
 | `SCREEN_ZDR`, `SCREEN_LLM_ZDR`, `SCREEN_JEV_ZDR` | off | ask for zero data retention: both paths, the language model only, Jev only (only after the canary proves that path; a specific switch beats `SCREEN_ZDR`) |
-| `SCREEN_CALIBRATED` | from file | marks Jev thresholds as calibrated (in `jev_only` it only silences the warning) |
+| `SCREEN_CALIBRATED` | from file | marks the operating point as calibrated against recruiter labels (in `jev_only` it only silences the warning) |
 | `SCREEN_CONFIG_FILE` | `config/screening.json` | alternative settings file |
+| `SCREEN_CRITERIA_FILE` | `<config dir>/screening-criteria.json`, then the file packaged next to the code | alternative criteria file (the questions, the rules, the operating point); a missing or invalid file stops screening (exit 3), never decides |
 | `SCREEN_SOURCE`, `SCREEN_RUN_ID` | detected, none | label rows in the log (also `--source`, `--run-id`) |
 
 Command line (unchanged from the old script, so callers need no change): `node scripts/ai-review.js
@@ -566,10 +553,10 @@ under its old name.
 Other settings live only in `config/screening.json`: `batch.deadlineMs` (600 s), `batch.breakerConsecutive`
 (3), `batch.invalidStreakMax` (3) and `batch.invalidStreakTtlSec` (1800), `batch.onInvalid`,
 `shadow.graceMs` (5 s, the most a slow Jev can delay a run), `shadow.auditRate` (ignored in `jev_only`), `decide.reviewPolicy` (also the two variables above), `shadow.retentionDays`,
-`llm.reasoningEffort` (leave empty unless the model is slow), `decide.ladder.tier0Titles`, `gate.*`
+`llm.reasoningEffort` (leave empty unless the model is slow), `decide.stage1|stage2.injectionP`, `infoFloor`, `notStatedP` and `titleConsistentMin` (the four numbers `decide()` still reads), `gate.*`
 (including `maxJevRejectLlmApprove`, `maxJevRejectOfLlmApproved`, `minLaneAgreementLo`, `minLaneCoverage`,
-`requiredSources`). A setting of the wrong type (in `decide.ladder` too: anything but lists of strings where the ladder needs them) is replaced by its default with a `WARN screening config:`
-line on stderr; `gateway.origin` must be https (plain http only for this machine), and
+`requiredSources`). A setting of the wrong type is replaced by its default with a `WARN screening config:`
+line on stderr; the settings of the retired ladder design (`decide.ladder`, `rejectP`, `approveP` and seven more) are ignored and named in one such line; `gateway.origin` must be https (plain http only for this machine), and
 `SCREEN_CONFIG_FILE` naming a file that does not exist warns.
 
 ## 15. Tests and known limits
@@ -578,8 +565,11 @@ Run (the quoted pattern matters: a bare directory name does not work with Node 2
 `node --test "tests/screening/*.test.js"`. They use a fake gateway on 127.0.0.1, fake keys and
 synthetic candidates, and refuse any other network address.
 
-The redaction of rank prefixes and name case is pinned by `tests/screening/redact-rank-case.test.js`; the tier-0 titles and the
-injection bar by `tests/screening/ladder-titles-injection.test.js`.
+The redaction of rank prefixes and name case is pinned by `tests/screening/redact-rank-case.test.js`; the owner's non-kitchen titles and the
+injection bar by `tests/screening/ladder-titles-injection.test.js`. The criteria design has its own suites: `criteria.test.js` (the file and its
+checks), `card.test.js` (the facts read from the card text, including the application count), `questions.test.js` and `client-criteria.test.js`
+(the request), `decide.test.js` (one scenario per archetype of the ladder design, re-asked of the criteria), `decide-criteria.test.js`,
+`probes.test.js` (205 hand-written cards), `operating-point.test.js`, `engine-injection.test.js`, `engine-unreadable.test.js`, `gold-rows.test.js`.
 
 The Jev-only engine has its own suites, `tests/screening/jev-only.test.js` and `tests/screening/jev-only-report.test.js`: in every scenario
 the fake gateway's counter for the chat-completions route must stay at 0 (and that route is set to answer 403 "restricted access").
@@ -615,39 +605,36 @@ calls a chat endpoint either.
 
 | Situation | Decided by | Reason code |
 |---|---|---|
-| Jev is confident the card fits (approve lane, section 7) | Jev | `approve_*` |
-| Jev is confident of a clear mismatch and the fit score agrees (reject lane) | Jev | `reject_*` |
-| Jev is not sure (review lane): level uncertain, thin information without a hospitality signal, a post-unlock title that contradicts the card, a search title with no ladder, Jev's own "this card instructs the reader" answer | the review policy | `sys_review_policy_reject` or `sys_review_policy_approve` |
-| The card matches the instruction-to-the-reader pattern (Jev is not asked) | the review policy | the same |
+| Jev's answers are usable: every card, including a doubtful one, an empty profile, an out-of-date profile and a title of a kind nobody has searched before | Jev, by the criteria (docs/SCREENING-CRITERIA.md): approve or reject, never "not sure" | `approve_*`, `reject_*` |
+| Both the keyword filter and Jev's own "this text instructs an AI" answer flag the card (Jev is asked; the card is then not decided by Jev) | the review policy | `sys_review_policy_reject` or `sys_review_policy_approve` |
 | The card is empty (under 20 characters; Jev is not asked) | the review policy | the same |
-| Jev's answer stays unusable after 2 attempts (malformed, a question missing, a non-Jev model named), or the thresholds cannot be applied to it, before the unlock | nobody: the card is left undecided (phase 1 books nothing and screens it again); it counts towards the guards of 16.5 | `sys_invalid_result` |
+| Jev's answer stays unusable after 2 attempts (malformed, a question missing, a non-Jev model named), or the decision cannot be made from it, or the card format is not understood (`card_unreadable`), before the unlock | nobody: the card is left undecided (phase 1 books nothing and screens it again); it counts towards the guards of 16.5 | `sys_invalid_result` |
 | The same, after the unlock | the review policy (the credit is spent) | `sys_review_policy_*` |
-| Jev cannot answer at all (unreachable, refused, out of credit, timeout) | nobody: the call is unavailable (exit 3) | none (16.5) |
+| Jev cannot answer at all (unreachable, refused, out of credit, timeout, an unusable criteria file) | nobody: the call is unavailable (exit 3) | none (16.5) |
 
-Whether Jev is unsure depends on the thresholds (`decide.stage1`, `decide.stage2`), which are placeholders (16.6). A
-stage-1 rule of section 10 set to `enforce` would still decide before Jev is asked; by default none is.
+**How much is policy.** Measured offline on the 637 historical cards: none (0.0 percent) went to the fallback lane; on 109 hand-written
+probes 5 did (the injection probes, by design). The ladder design sent 45.7 to 53 percent of the same cards to the review lane, and the
+pre-unlock default (reject) lost about a quarter of the candidates the old system approved. The owner's requirement is that Jev decides at
+least 99 percent of the cards; the report of 16.7 prints the share.
 
-**Searches with no ladder.** A search title on no ladder (search tier 0 other than the three titles in
-`decide.ladder.tier0Titles`: for example Barista, Kitchen Supervisor, Restaurant Manager, Housekeeper) puts EVERY card in the
-review lane (`UNKNOWN_SEARCH_LADDER`), because Jev's ladder does not say what is a fit for such a role. With no other model
-in the system the policy decides all of them: with the default policy every card of such a search is rejected before the
-unlock. The list ships with the owner's real non-kitchen titles (Waiter, Waitress, Server, Front Of House, Bartender, Dish
-Washer; 2026-09-30, SCR-28, closing K-SCR12 for them). For any other title, add it to `decide.ladder.tier0Titles` (it then
-uses the tier-0 ladder, which may need adjusting for front-of-house roles, section 7) or set `SCREEN_REVIEW_PRE=approve` (which
-affects every search). The report shows the symptom as a
-100 percent policy share for that role, and `policy.reviewReason` in the shadow rows says `UNKNOWN_SEARCH_LADDER`.
+A stage-1 rule of section 10 set to `enforce` would still decide before Jev is asked; by default none is.
+
+**A search title needs no list.** The role level of the searched title is asked of Jev once per distinct title (one small extra request per
+process), so a Barista, Kitchen Supervisor or Restaurant Manager search is decided like any other (K-SCR12 is closed by design). The tables
+of the criteria file have a row for a role of "other" kind: every level and kind cell in it is a doubt cell, so the policy readings decide.
 
 ### 16.3 The two policy switches
 
 `decide.reviewPolicy.preUnlock` (environment `SCREEN_REVIEW_PRE`) and `decide.reviewPolicy.postUnlock`
-(`SCREEN_REVIEW_POST`). The defaults reproduce the old system's fail-closed before the unlock and fail-open after it.
+(`SCREEN_REVIEW_POST`). They settle only the fallback lane of 16.2. The defaults reproduce the old system's fail-closed before the unlock
+and fail-open after it.
 
 | Setting | What happens | What it costs |
 |---|---|---|
-| `preUnlock: reject` (**default**) | An unsure card is rejected before the unlock (booked as a rejection for that job title only, so the person stays eligible for other roles). | A person who would have been suitable is not unlocked for this search: a lost candidate. No credit is spent on unsure cards. |
-| `preUnlock: approve` (recall-tilted) | An unsure card is unlocked. | One unlock credit for every unsure card, and a recruiter's minute for each one that turns out unsuitable. While the thresholds are placeholders the review lane can be a large share of the cards: watch the credit balance and the policy share (16.4). |
-| `postUnlock: approve` (**default**) | An unsure unlocked candidate goes to Zoho for a recruiter. | A recruiter's minute for an unsuitable candidate; the credit is spent either way. |
-| `postUnlock: reject` | An unsure unlocked candidate is dropped. | The credit is wasted and the person is lost. Not advised. |
+| `preUnlock: reject` (**default**) | A fallback-lane card is rejected before the unlock (booked as a rejection for that job title only, so the person stays eligible for other roles). | A person whose card contains an instruction to an AI is not unlocked for this search. Rare. No credit is spent on it. |
+| `preUnlock: approve` (recall-tilted) | A fallback-lane card is unlocked. | One unlock credit for every such card, and a recruiter's minute for each one that turns out unsuitable. The share is small by design: watch the policy share (16.4). |
+| `postUnlock: approve` (**default**) | A fallback-lane unlocked candidate goes to Zoho for a recruiter. | A recruiter's minute for an unsuitable candidate; the credit is spent either way. |
+| `postUnlock: reject` | A fallback-lane unlocked candidate is dropped. | The credit is wasted and the person is lost. Not advised. |
 
 Change one at a time and note the date: the shadow rows record which side applied (`policy.side`).
 
@@ -655,16 +642,16 @@ Change one at a time and note the date: the shadow rows record which side applie
 
 Every decision taken by the policy has its own reason code and is counted separately:
 
-- the summary line on stderr of every call, `policy=N (reject=a approve=b share=x) why={...}`, where `why` is `review`,
-  `injection`, `no_content` or, after the unlock only, `invalid` (a decision served from the cache reads `cached`).
+- the summary line on stderr of every call, `policy=N (reject=a approve=b share=x) why={...}`, where `why` is `injection`,
+  `no_content` or, after the unlock only, `invalid` (`review` is kept for a lane a later decision function might add; a decision served from the cache reads `cached`).
   Unusable answers before the unlock are no policy decision: they show as `invalid=N` on the same line;
 - the shadow rows: `used.engine` is `policy`, and `policy` holds `why` and `side`;
 - the run label `SCREENING_MODEL: typesafe-ai/jev+policy` (plain `typesafe-ai/jev` when Jev decided every card);
 - section J of the report (16.7): the policy share overall and by stage, by reason, by role and by source.
 
-There is no target number. A high share means Jev is often unsure, which is a fact about the placeholder thresholds
-or about Jev, not an install fault; the report shows where (role, source, stage, reason), so the thresholds can be
-tuned or the policy changed on purpose.
+The target is near zero: Jev decides at least 99 percent of the cards, so the policy share is the fallback lane only. A share above one
+percent means a change of the card format (`card_unreadable` shows as `invalid`), a wave of cards that contain instructions to an AI, or an
+unusable-answer problem; the report shows where (role, source, stage, reason).
 
 ### 16.5 Failures: never a silent reject, never a fallback
 
@@ -678,45 +665,50 @@ tuned or the policy changed on purpose.
 | every card of a call of two or more unusable, or 5 or more and half of the call, or 3 unusable in a row across calls (`batch.invalidStreakMax`, 30 minutes) | unavailable (exit 3): the same guards as the language-model engines |
 | a missing key | exit 3 before any request, marker `none` |
 
-A policy reject is booked by phase 1 like any other rejection: the owner chose the policy for a card Jev was unsure
-about. An unusable answer is different, it is a fault and not an unsure card: before the unlock it is
+A policy reject is booked by phase 1 like any other rejection: the owner chose the policy for the rare card Jev does not decide (an
+instruction flagged twice, no content). An unusable answer is different, it is a fault and not a card: before the unlock it is
 `sys_invalid_result` (phase 1 books nothing and screens the card again, as with the language-model engines; Reed, like
 the old system, books it as a rejection). The guards above are what stop a systemic Jev fault from turning into a run of
-undecided cards. `decide()` reports any exception (for example a settings error the load check did not catch) as an
-unusable answer, so such a fault feeds the same guards instead of quietly sending every card to the policy.
+undecided cards. `decide()` reports any exception (for example a rule table the criteria check did not catch) and a card format it does not understand as an
+unusable answer, so such a fault feeds the same guards instead of quietly sending every card to the policy. A criteria file that is missing, is not valid JSON or fails its
+checks stops the request before anything is sent (`criteria_invalid`): the run is unavailable (exit 3) and nothing is decided, so a bad edit halts screening loudly and never turns into rejections.
 
 Known gap (docs/KNOWN-LIMITS.md K-SCR13): the guards do not count unusable answers after the unlock (one card per call).
 If Jev's after-unlock questions alone were to fail, every unlocked candidate would be approved by the policy. Section J of
 the report shows it (policy share by stage and reason `invalid`).
 
-### 16.6 Uncalibrated thresholds
+### 16.6 Uncalibrated operating point
 
 `decide.calibration.calibrated` is false, and `jev_only` runs anyway: it never downgrades to another engine (that
-interlock belongs to `jev`). At the start of a screening run the engine writes exactly one line to stderr:
+interlock belongs to `jev`). The operating point (`rejectAt`, the cost weights, the rule tables) was fitted on 452 historical cards against the
+old model's decisions, not against recruiter labels. At the start of a screening run the engine writes exactly one line to stderr:
 
 `WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds ...`
 
 "Run" means one pipeline run when the caller passes `--run-id` (phase 1 does; `runtime/screening-uncalibrated-warned.json`
 remembers the last run id, and phase 1 copies the line into its run log), otherwise one process (Reed passes no run id, so its
 log shows it once per screening call). Every shadow row carries `cal: false`. `SCREEN_CALIBRATED=1` (or
-`decide.calibration.calibrated: true`) only silences the line: set it when the thresholds have been tuned on data.
+`decide.calibration.calibrated: true`) only silences the line: set it when the operating point has been checked against recruiter labels.
 
 There is no language model to compare Jev with in this mode, so calibration means people. Export a sample
-(`node tools/screening-report.js --export-sample 150 --out to-label.jsonl`; it includes the policy decisions), have two
-recruiters label it, and run `--labels`: the report then prints the accuracy of Jev's own decisions and of the policy
-separately. Then tune `decide.stage1` and `decide.stage2` (the bars and the ladder of section 7), one change at a time.
+(`node tools/screening-report.js --export-sample 150 --out to-label.jsonl`; it includes the policy decisions and the `forced` ones), have two
+recruiters label it, and run `--labels`: the report then prints the accuracy of Jev's own decisions and of the policy separately. To choose the bar
+on the labelled cards, turn the labels and the log into rows with `node tools/gold-rows.js --labels labels.jsonl --out rows.jsonl` and run
+`node tools/screening-operating-point.js --rows rows.jsonl` (docs/SCREENING-CRITERIA.md section 6): it prints what every bar costs and writes
+nothing. Change one thing at a time.
 
 ### 16.7 Shadow log and report in this mode
 
 Rows keep the schema of section 9 (redacted, section 12) with `mode: "jev_only"`, `llm: null`, `cal` and, for a policy
 decision, `used.engine: "policy"` and `policy: {why, side}`. The background audit (`shadow.auditRate`) is off.
-`tools/screening-report.js` on such rows prints section J: the Jev lane distribution, the approval rate by role, source
-and stage, a histogram of Jev's confidence in its approve and reject decisions, the policy decisions (share, by reason
-and stage), the cards left undecided, the top reason codes and a what-if grid (re-run offline on the stored answers: how much would go to the
-policy, and what share of Jev's decisions would be approvals, at other approve and reject bars). There is no agreement metric. The verdict line reads "engine promotion
+`tools/screening-report.js` on such rows prints section J: the Jev lane distribution, the share Jev decided itself (against the owner's 99 percent) and the
+forced share, the approval rate by role, source and stage, a histogram of Jev's confidence in its approve and reject decisions, the policy decisions (share,
+by reason and stage), the cards left undecided, the top reason codes and a what-if table (re-run offline on the stored answers: how many cards would be
+approved, rejected and forced at other values of the one bar, `rejectAt`). Rows written by the older question set (no `role_level` answer) are counted and left out of
+the what-if. There is no agreement metric. The verdict line reads "engine promotion
 (jev_shadow -> jev): not applicable in jev_only mode" and `--strict` exits 3.
 
-### 16.8 The extension point: a second opinion for unsure cards
+### 16.8 The extension point: a second opinion for unusable answers
 
 A future runtime (for example a language model reached through Hermes, not through this gateway) can be plugged in
 without touching Jev's logic. `resourcer/scripts/lib/screening/second-opinion.js` defines the interface and nothing
@@ -731,8 +723,9 @@ const provider = {
 // req: { job, stage, searchTier, snippet, title, reviewReason, candidateId }   redacted text only
 ```
 
-The engine asks the provider only about a card Jev could not decide: the review lane or an unusable answer. A card that
-trips the instruction-to-the-reader checks, and an empty card, never leave the engine (they go to the policy). An
+The engine asks the provider only about a card Jev could not decide: an unusable answer (a valid answer always ends in approve or reject). A card that
+trips both instruction-to-the-reader checks, and an empty card, never leave the engine (they go to the policy): a card that tries to instruct an AI must not be
+handed to another one. An
 answer `{approved: boolean, ...}` becomes the decision (source `second_opinion`, model = the provider's name). `null`, a
 throw, a malformed answer or a 30-second timeout all mean "no opinion", and the card falls back to the review policy:
 a provider can never make screening unavailable. The shadow row records `second: {provider, status}`. Whatever the

@@ -90,8 +90,12 @@ test('rows: fixed schema, pseudonymous ids, hash, length and the REDACTED input 
     assert.ok(row.llm && row.llm.model);
     if (row.jev && row.jev.status === 'ok') {
       assert.ok(['approve', 'reject', 'review'].includes(row.jev.lane));
-      assert.equal(typeof row.jev.answers.current_tier.p.cdp_cook, 'number');
-      assert.equal(row.jev.answers.hospitality_seen >= 0, true);
+      assert.equal(typeof row.jev.answers.candidate_kind.p.cook, 'number');
+      assert.equal(row.jev.answers.hospitality_experience >= 0, true);
+      assert.equal(typeof row.jev.answers.role_level.p.chef_generic, 'number', 'the role answer is kept with the candidate answers');
+      assert.equal(typeof row.jev.answers.x_history_chars, 'number', 'and the card facts');
+      assert.ok(Array.isArray(row.jev.flags));
+      assert.match(row.qv, /^s2-[0-9a-f]{12}$/);
     }
   }
   assert.equal(gw.stats().forbiddenHits, 0, 'nothing identifying was sent to either engine');

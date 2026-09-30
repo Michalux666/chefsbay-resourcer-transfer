@@ -1,39 +1,11 @@
 'use strict';
-// decide(): CODE turns Jev's atomic answers into a lane: approve, reject or review.
-// Principles (Jev design guide, owner brief):
-//   1. Jev supplies evidence, code decides; thresholds live in config/screening.json (CALIBRATE).
-//   2. A reject needs POSITIVE evidence of a mismatch at a high probability AND corroboration from an
-//      independent question (the overall_fit score). Missing information never rejects.
-//   3. Anything unclear, missing, malformed or suspicious is REVIEW (the LLM decides), never reject.
-//   4. Probabilities are used, not Jev's `confidence` field (which is a function of the top probability).
-// Pure function: no I/O, deterministic, re-runnable offline on stored answers by the report tool.
 
-const TIER_OF_OPTION = { entry_kp: 1, commis: 1, cdp_cook: 2, sous: 3, head: 4 };
-const FOH_CODE = 'reject_foh_only';
-const MGMT_CODE = 'reject_management_only';
-const UNRELATED_CODE = 'reject_unrelated_industry';
+const criteriaLib = require('./criteria');
+
+// characters of real text on a card that has no title and no history before it counts as unreadable, not empty (thresholds.unreadableMinChars overrides it)
+const UNREADABLE_MIN_CHARS = 300;
 
 function isNum(x) { return typeof x === 'number' && Number.isFinite(x); }
-
-function words(s) {
-  return ' ' + String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
-}
-
-// The ladder rules for a search: a per-title override when one applies, else the search tier's set.
-function ladderFor(searchRole, searchTier, cfg) {
-  const L = cfg.decide.ladder;
-  const w = words(searchRole);
-  for (const ov of L.overrides || []) {
-    if (Array.isArray(ov.tiers) && !ov.tiers.includes(searchTier)) continue;
-    if ((ov.matchAny || []).some(k => w.includes(words(k)))) return ov;
-  }
-  return L.bySearchTier[String(searchTier)] || L.bySearchTier['2'];
-}
-
-function tier0Known(searchRole, cfg) {
-  const w = words(searchRole);
-  return (cfg.decide.ladder.tier0Titles || []).some(k => w.includes(words(k)));
-}
 
 function need(x, name) {
   if (!isNum(x)) throw new Error(`unusable answer: ${name}`);
@@ -45,97 +17,200 @@ function probs(a, name) {
   return a.p;
 }
 
-function review(reason, scores, flags) {
+// two readings that must both say it: the geometric mean is high only when both are, and a strong one can carry a moderate one
+function agree(main, support) {
+  return Math.sqrt(main * support);
+}
+
+function topOf(p) {
+  let best = null;
+  for (const [k, v] of Object.entries(p)) if (best === null || v > p[best]) best = k;
+  return best;
+}
+
+// the only way out of decide() that is not approve or reject: the rare cases a second model settles
+function fallback(reason, scores, flags) {
   return { lane: 'review', reasonCode: null, reviewReason: reason, confidence: null, scores: scores || null, flags: flags || [] };
 }
 
-/**
- * @param {{answers:object, searchRole:string, searchTier:number, stage:1|2}} input
- * @param {object} cfg  full screening config (uses cfg.decide)
- * @returns {{lane:'approve'|'reject'|'review', reasonCode:string|null, reviewReason:string|null, confidence:number|null, scores:object|null, flags:string[]}}
- */
+function criteriaFor(input) {
+  if (input.criteria) return input.criteria;
+  const c = criteriaLib.get();
+  return c.ok && !c.decisionErrors.length ? c.criteria : null;
+}
+
+// mass of the answers a rules row maps to approve and to reject; a doubt cell counts for neither and is left to the policy readings
+function levelMasses(row, p) {
+  const out = { approve: 0, reject: 0, worst: null, approveTop: null };
+  for (const [opt, action] of Object.entries(row)) {
+    const m = p[opt] || 0;
+    if (action === 'approve') {
+      out.approve += m;
+      if (!out.approveTop || m > (p[out.approveTop] || 0)) out.approveTop = opt;
+    } else if (action === 'reject') {
+      out.reject += m;
+      if (!out.worst || m > (p[out.worst] || 0)) out.worst = opt;
+    }
+  }
+  return out;
+}
+
+// mass of the job kinds that fit the searched role (ok) and of those that do not (a reject code, by code)
+function fieldMasses(row, p) {
+  const out = { ok: 0, reject: 0, byCode: {}, worst: null };
+  for (const [kind, verdict] of Object.entries(row)) {
+    const m = p[kind] || 0;
+    if (verdict === 'ok') out.ok += m;
+    else if (verdict !== 'doubt') {
+      out.reject += m;
+      out.byCode[verdict] = (out.byCode[verdict] || 0) + m;
+    }
+  }
+  for (const [code, m] of Object.entries(out.byCode)) if (m > 0 && (!out.worst || m > out.byCode[out.worst])) out.worst = code;
+  return out;
+}
+
+// one reading per kind question (title and history together, first listed job): a reading with no information is skipped and the rest must agree
+function fieldOf(D, row, a) {
+  const readings = D.kindQuestions.map(q => {
+    const p = probs(a[q], q);
+    return { p, blank: (p.cannot_tell || 0) >= 0.5 };
+  });
+  const used = readings.filter(r => !r.blank);
+  const each = (used.length ? used : readings).map(r => ({ m: fieldMasses(row, r.p), top: topOf(r.p) }));
+  const lead = each.reduce((b, e) => (e.m.reject > b.m.reject ? e : b), each[0]);
+  return { ok: Math.min(...each.map(e => e.m.ok)), reject: Math.min(...each.map(e => e.m.reject)), worst: lead.m.worst, tops: each.map(e => e.top) };
+}
+
+// a sign of life inside the window: the "Active" age of the card, or an application it shows (applicationsAreActivity, on unless the file says false)
+function recentlyActive(s, a) {
+  const seen = [a.x_active_days];
+  if (s.applicationsAreActivity !== false) seen.push(a.x_apps_days);
+  return seen.some(d => isNum(d) && d < s.activeDays);
+}
+
+// hard: out of date and no sign of life; soft: out of date but recently active, so the card may be old rather than the person
+function staleness(D, stage, a) {
+  const s = D.stale;
+  if (!s || s.mode === 'off' || !(s.stages || [1]).includes(stage)) return null;
+  const up = a.x_updated_days;
+  const gap = a.x_role_gap_days;
+  if (!((isNum(up) && up >= s.updatedDays) || (isNum(gap) && gap >= s.roleGapDays))) return null;
+  return recentlyActive(s, a) ? 'soft' : 'hard';
+}
+
+// the whole-policy readings: each is a yes/no question, "fit" (yes = suitable) or "mismatch" (yes = clear mismatch); returns P(mismatch)
+function policyMismatch(P, a) {
+  let sum = 0;
+  let w = 0;
+  for (const r of P.readings) {
+    const v = need(a[r.question], r.question);
+    sum += (r.weight === undefined ? 1 : r.weight) * (r.sense === 'mismatch' ? v : 1 - v);
+    w += r.weight === undefined ? 1 : r.weight;
+  }
+  return w > 0 ? sum / w : 0;
+}
+
+function operatingPoint(D, stage) {
+  const op = D.operatingPoint || {};
+  const s = (stage === 2 ? op.stage2 : op.stage1) || {};
+  const f = op.forced || {};
+  return { rejectAt: isNum(s.rejectAt) ? s.rejectAt : 0.75, forcedFrom: isNum(f.from) ? f.from : 0.3, forcedTo: isNum(f.to) ? f.to : 0.7 };
+}
+
 function decide(input, cfg) {
   const stage = input.stage === 2 ? 2 : 1;
   const st = stage === 2 ? cfg.decide.stage2 : cfg.decide.stage1;
   try {
+    const cr = criteriaFor(input);
+    if (!cr) return fallback('ANSWER_UNUSABLE');
+    const D = cr.decision;
+    const S = D.thresholds;
+    const OP = operatingPoint(D, stage);
     const a = input.answers;
     if (!a || typeof a !== 'object') throw new Error('unusable answers');
 
-    let tierAns = a.current_tier;
-    let usedRealTitle = false;
-    if (stage === 2 && a.real_title_tier && need((probs(a.real_title_tier, 'real_title_tier').unclear || 0), 'unclear') <= st.notStatedP) {
-      tierAns = a.real_title_tier;
-      usedRealTitle = true;
-    }
-    const tp = probs(tierAns, usedRealTitle ? 'real_title_tier' : 'current_tier');
-    const hosp = need(a.hospitality_seen, 'hospitality_seen');
-    const kitchen = need(a.kitchen_seen, 'kitchen_seen');
-    const roleMatch = need(a.role_match_seen, 'role_match_seen');
+    const inject = need(a.injection, 'injection');
     const info = need(a.info_sufficient, 'info_sufficient');
-    const inject = need(a.instruction_injection, 'instruction_injection');
-    const fit = probs(a.overall_fit, 'overall_fit');
-    const notFit = need(fit['0'] || 0, 'fit0');
-    const clearFit = need(fit['2'] || 0, 'fit2');
-    const titleOk = usedRealTitle && a.title_consistent !== undefined ? need(a.title_consistent, 'title_consistent') : 1;
+    const area = need(a.same_area_seen, 'same_area_seen');
+    const hosp = need(a[D.hospitalityQuestion || 'hospitality_experience'], 'hospitality question');
+    const rel = probs(a.relevance, 'relevance');
+    const role = probs(a.role_level, 'role_level');
+    const roleTop = topOf(role);
+    const relNot = need(rel['0'], 'relevance0') + need(rel['1'], 'relevance1');
+    const rel3 = need(rel['3'], 'relevance3');
+    const mPolicy = policyMismatch(D.policy, a);
+    const hasHistory = !isNum(a.x_history_chars) || a.x_history_chars > 0;
+    const hasTitle = !isNum(a.x_has_title) || a.x_has_title > 0;
+    const scores = { roleLevel: roleTop, rolePMax: role[roleTop], area, relNot, rel3, hosp, info, inject, mPolicy, rejectAt: OP.rejectAt };
 
-    // Tier 0 is 'not on the kitchen ladder': only searches named in decide.ladder.tier0Titles have a ladder of their own, the rest go to the LLM.
-    if (input.searchTier === 0 && !tier0Known(input.searchRole, cfg)) return review('UNKNOWN_SEARCH_LADDER', null);
-    const ladder = ladderFor(input.searchRole, input.searchTier, cfg);
-    const sum = keys => (keys || []).reduce((s, k) => s + (tp[k] || 0), 0);
+    // a keyword filter that fires alone is not enough: Jev keeps deciding unless it also finds an instruction (a missing fact counts as fired)
+    const keyword = !isNum(a.x_injection_kw) || a.x_injection_kw > 0;
+    if (inject >= st.injectionP && keyword) return fallback('INJECTION_FLAG', scores, ['injection']);
 
-    const masses = [];
-    if ((ladder.tooSenior || []).length) masses.push(['reject_overqualified_entry', sum(ladder.tooSenior)]);
-    if ((ladder.tooJunior || []).length) masses.push(['reject_too_junior', sum(ladder.tooJunior)]);
-    for (const [code, opts] of Object.entries(ladder.mismatch || {})) {
-      let m = sum(opts);
-      if (code === UNRELATED_CODE) m = Math.min(m, 1 - hosp);
-      else if (code === FOH_CODE || code === MGMT_CODE) m = Math.min(m, 1 - kitchen);
-      masses.push([code, m]);
-    }
-    masses.sort((x, y) => y[1] - x[1]);
-    const hard = masses[0] || ['none', 0];
-    const inBand = sum(ladder.inBand);
-
-    const scores = {
-      tierFrom: usedRealTitle ? 'real_title_tier' : 'current_tier',
-      inBand, hard: { code: hard[0], mass: hard[1] }, notFit, clearFit, roleMatch, info, hosp, kitchen, inject, titleOk,
+    const done = (lane, code, r, extra) => {
+      const flags = [...(extra || [])];
+      if (r >= OP.forcedFrom && r < OP.forcedTo) flags.push('forced');
+      scores.R = r;
+      return { lane, reasonCode: code, reviewReason: null, confidence: lane === 'reject' ? r : 1 - r, scores, flags };
     };
 
-    if (inject >= st.injectionP) return review('INJECTION_FLAG', scores, ['injection']);
-    if (usedRealTitle && titleOk < st.titleConsistentMin) return review('TITLE_SNIPPET_MISMATCH', scores);
+    const realTitle = stage === 2 && a.title_seniority !== undefined;
+    const unreadable = isNum(S.unreadableMinChars) ? S.unreadableMinChars : UNREADABLE_MIN_CHARS;
+    // plenty of text but neither a title nor a history: the card parser did not understand the format, a fault for the run guards and never an empty profile
+    if (!realTitle && !hasHistory && !hasTitle && isNum(a.x_content_chars) && a.x_content_chars >= unreadable) return fallback('ANSWER_UNUSABLE', scores, ['card_unreadable']);
+    if (!realTitle && !hasHistory && (!hasTitle || info < st.infoFloor)) return done('reject', 'reject_no_history', 1, ['empty_profile']);
 
-    const noInfo = !usedRealTitle && (info < st.infoFloor || (tp.not_stated || 0) > st.notStatedP);
-    if (noInfo) {
-      // Thin information is only an approve while nothing else objects: a sharp level mismatch or a 'not a fit' score goes to review.
-      if (hosp >= st.noInfoApproveHospP && hard[1] < st.clearFitHardMax && notFit < st.approveNotFitMax) return { lane: 'approve', reasonCode: 'approve_other', reviewReason: null, confidence: hosp, scores, flags: ['insufficient_info'] };
-      return review('INSUFFICIENT_INFO', scores, ['insufficient_info']);
-    }
+    const stale = staleness(D, stage, a);
+    if (stale === 'hard' && D.stale.mode === 'reject') return done('reject', 'reject_stale_profile', 1, ['stale_profile']);
+    const aged = stale === 'soft' ? ['stale_but_active'] : [];
 
-    const corroborated = !st.needCorroboration || notFit >= st.notFitMin;
-    const counter = roleMatch >= st.counterRoleMatch && hard[0] !== 'reject_overqualified_entry';
-    if (hard[1] >= st.rejectP && corroborated && !counter) {
-      return { lane: 'reject', reasonCode: hard[0], reviewReason: null, confidence: hard[1], scores, flags: [] };
+    let lvlAns = a[D.levelQuestion];
+    let contradicted = false;
+    if (stage === 2 && a.title_seniority && a.title_consistent !== undefined) {
+      const tc = need(a.title_consistent, 'title_consistent');
+      const ts = probs(a.title_seniority, 'title_seniority');
+      if ((ts.cannot_tell || 0) <= st.notStatedP) { lvlAns = a.title_seniority; contradicted = tc < st.titleConsistentMin; }
     }
+    const lvl = probs(lvlAns, D.levelQuestion);
+    const roleClear = role[roleTop] >= S.roleLevelMinP;
+    const level = roleClear ? levelMasses(D.rules[roleTop], lvl) : { approve: 0, reject: 0, worst: null, approveTop: null };
+    const field = roleClear ? fieldOf(D, D.fieldRules[roleTop], a) : { ok: 0, reject: 0, worst: null, tops: [] };
+    Object.assign(scores, { lvlTop: topOf(lvl), kindTops: field.tops, approveMass: level.approve, rejectMass: level.reject, fieldOk: field.ok, fieldReject: field.reject });
 
-    if (inBand >= st.approveP && notFit < st.approveNotFitMax) {
-      let seniorOk = false;
-      if (input.searchTier >= 2) {
-        const top = (ladder.inBand || []).filter(k => TIER_OF_OPTION[k]).sort((x, y) => (tp[y] || 0) - (tp[x] || 0))[0];
-        seniorOk = !!top && TIER_OF_OPTION[top] > input.searchTier;
-      }
-      return { lane: 'approve', reasonCode: seniorOk ? 'approve_senior_ok' : 'approve_level_match', reviewReason: null, confidence: inBand, scores, flags: [] };
-    }
-    if (clearFit >= st.clearFitP && hard[1] < st.clearFitHardMax) {
-      return { lane: 'approve', reasonCode: 'approve_relevant_history', reviewReason: null, confidence: clearFit, scores, flags: [] };
-    }
+    const levelCode = D.reasons[level.worst] || 'reject_other';
+    const c = D.corroborate && D.corroborate[levelCode];
+    const levelCorr = c ? need(a[c.question], c.question) : 1;
+    const counter = levelCode === 'reject_too_junior' ? 1 - rel3 : 1;
+    const levelPart = agree(level.reject, Math.min(levelCorr, counter));
+    const hospGate = field.worst === 'reject_unrelated_industry' ? 1 - hosp : 1;
+    const fieldPart = contradicted ? 0 : agree(field.reject, Math.min(relNot, 1 - area, hospGate));
+    const fieldCode = field.worst || 'reject_other';
+    const mStruct = Math.max(fieldPart, levelPart);
+    Object.assign(scores, { mStruct, fieldPart, levelPart });
 
-    return review(hard[1] >= 0.5 ? `${hard[0]}_UNCERTAIN` : 'AMBIGUOUS_LEVEL', scores);
+    let r = Math.max(mStruct, contradicted ? 0 : mPolicy);
+    if (stale === 'hard' && D.stale.mode === 'doubt') r = 1 - (1 - r) * (1 - D.stale.doubtWeight);
+    if (stale === 'soft' && D.stale.recentlyActive === 'doubt') r = 1 - (1 - r) * (1 - D.stale.doubtWeight);
+
+    if (r >= OP.rejectAt) {
+      const unresolved = Math.max(field.reject, level.reject);
+      const open = field.reject >= level.reject ? fieldCode : levelCode;
+      const code = mStruct >= mPolicy && mStruct > 0 ? (fieldPart >= levelPart ? fieldCode : levelCode) : (unresolved >= S.reasonMin ? open : 'reject_other');
+      return done('reject', code, r, [...aged, ...(roleClear ? [] : ['role_unclear'])]);
+    }
+    const clearFit = field.ok >= S.fieldOkMin && level.approve >= S.levelApproveMin;
+    const code = clearFit ? (D.approveReasons && D.approveReasons[level.approveTop]) || 'approve_level_match' : 'approve_other';
+    const notes = [...aged];
+    if (contradicted) notes.push('title_contradiction');
+    if (!roleClear) notes.push('role_unclear');
+    return done('approve', code, r, notes);
   } catch (e) {
-    return review('ANSWER_UNUSABLE', null);
+    return fallback('ANSWER_UNUSABLE');
   }
 }
 
-// Numbers only, rounded: the compact form stored in the shadow log so thresholds can be re-run offline.
+// numbers only, rounded: the compact form stored in the shadow log so the decision can be re-run offline
 function compactAnswers(answers) {
   const out = {};
   const r = x => Math.round(x * 1000) / 1000;
@@ -150,4 +225,4 @@ function compactAnswers(answers) {
   return out;
 }
 
-module.exports = { decide, ladderFor, compactAnswers, TIER_OF_OPTION };
+module.exports = { decide, compactAnswers, operatingPoint };

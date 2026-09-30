@@ -74,7 +74,13 @@ The pipeline is already running when you start (INSTALL step 9 switched it on). 
 | [ ] | SR05 | WATCH | day 1 and 3: command block CB3 (four counts) | `0` for e-mails and for phone numbers; `0` for postcodes (a few false hits are possible: report the count, never the text); `0` for card texts that still start with a rank number (a 1 to 6 digit rank, then a dot: the redactor strips it, and with it the name after it, in any case; SCR-26). This checks the redaction on real cards without printing any candidate text. Names in lower case cannot be counted this way: the owner may look at a few rows with the reviewer present |
 | [ ] | SR06 | GATE | INSTALL 7.5 | the zero-data-retention result and the owner's decision are written down |
 | [ ] | SR07 | WATCH | `stat -c '%a' R/shadow/*.jsonl` | `600` |
-| [ ] | SR08 | WATCH | day 1, 3, 7: command block CB2 (the third count divided by the first) | the share of decisions taken by the review policy instead of a confident Jev answer (docs/SCREENING.md section 16.4). No target; the owner reads it. Above one half: report at once (Jev is unsure about most cards: the placeholder thresholds, or Jev). For the first territory whose search title is Waiter, Waitress, Server, Front Of House, Bartender or Dish Washer (on the tier-0 ladder since SCR-28) the policy share by role in section J of the report must be well below 100 percent; 100 percent means the title is not on the ladder (KNOWN-LIMITS K-SCR12). The instruction-to-an-AI flag fires at 0.7 (SCR-27): a policy share that stays high with reason `INJECTION_FLAG` is worth a report |
+| [ ] | SR08 | WATCH | day 1, 3, 7: command block CB2 (the third count divided by the first) and `node W/tools/screening-report.js --since 7d` | the share taken by the review policy should be near zero: Jev decides at least 99 percent of the cards (OD-J); above 1 percent report it (a change of card format shows as `why=invalid`, a wave of instruction-looking text as `why=injection`). Also read the forced share (about a sixth of decisions on the historical sample) and audit a sample of forced approvals (`--export-sample`, owner only). Above one half in policy: report at once (Jev's answers are unusable or the card format changed) |
+| [ ] | SR09 | GATE | INSTALL 7.6 (an installed instance: docs/UPDATE-B.md step 7) | the two CV canaries: exit 0 each; the chef is `{"decision":"pass","final":"approve","lane":"jev"...`, the retail assistant `{"decision":"reject","final":"reject","lane":"jev"...`; `SCREENING_MODEL: typesafe-ai/jev` on stderr; the invented files are deleted |
+| [ ] | SR10 | WATCH | day 1: `node R/scripts/cv-report.js --days 1 --mode shadow` | the CV stage (shadow) screened the CVs of every run that approved candidates: `screened` above 0 and the WHO DECIDED block prints; every candidate still went to Zoho. Zero rows after a full day with approved candidates: report (has `CV_SCREEN` been set to `off`?) |
+| [ ] | SR11 | WATCH | day 3 and 7: `node R/scripts/cv-report.js --days 7 --mode shadow` | `Jev-decided` reads `ok (99% or more)` and `fallback lane` reads `ok (1% or less)` (the owner rule, OD-J, CVS-5); unreadable about 5 to 8 percent of all CVs (fails the check above 12); would-be rejects 1 to 5 percent (2 to 4 expected); forced about 6 percent. Outside: report the numbers and the reason codes, change nothing |
+| [ ] | SR12 | WATCH | day 1, 3, 7: the alert list | no `cv-fallback-rate-high`, `cv-reject-rate-high`, `cv-forced-rate-high`, `cv-unreadable-rate-high`, `cv-shadow-stopped` or `cv-review-errors` (`cv-screening-unavailable` and `cv-reject-not-recorded` belong to mode `on` only). One alert on one queue is a note; repeats are reported |
+| [ ] | SR13 | WATCH (HUMAN) | day 7, or after 300 screened CVs: `node R/scripts/cv-report.js --days 14 --mode shadow --forced --rejects` | the SWITCH-ON CHECK reads `numbers OK: only the panel review is left`, and a panel of two or more recruiters, opening each candidate in Zoho, agrees with EVERY would-be reject of the period and with the 30 lowest-confidence forced decisions. One reject the panel would not have made is a stop: change one number (`docs/CV-SCREENING.md` section 5), wait for a new period. Only then may the owner decide DC9 |
+| [ ] | SR14 | GATE | day 1: `stat -c '%a' R/shadow/cv-*.jsonl` and command block CB4 | `600`; CB4 prints `0`, `0`, `0`: no e-mail and no postcode in the CV log, and no results file with a positive `cvRejected` (in shadow the stage never blocks a candidate) |
 
 ## 4b. Command blocks used by the tables
 
@@ -123,6 +129,22 @@ cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/screening-*.jsonl | 
 ```
 
 Never print the matching lines: they would be candidate text.
+
+CB4 (SR14), three numbers, each expected `0`:
+
+```
+cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/cv-*.jsonl | grep -c -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+.[A-Za-z]{2,}'
+```
+
+```
+cat /opt/data/profiles/resourcer/workspace/resourcer/shadow/cv-*.jsonl | grep -c -E '[A-Z]{1,2}[0-9][0-9A-Z]? ?[0-9][A-Z]{2}'
+```
+
+```
+cat /opt/data/profiles/resourcer/workspace/resourcer/downloads/phase2-results-*.json | grep -c -E '"cvRejected": ?[1-9]'
+```
+
+The CV log holds numbers, reason codes and the platform candidate id only; the third command counts and never prints the results files, which hold candidate names.
 
 ## 5. Supervision, alerts, backups
 
@@ -190,11 +212,11 @@ Never print the matching lines: they would be candidate text.
 
 | Day | Operator runs | Owner looks at |
 |---|---|---|
-| 1 (first full day, after 22:00) | GL02, GL04, GL11, GL12, PH04, SU08, SU09, HF03, SR05, BC05, CO06 | the numbers of the digest; three Zoho records; the alert channel got the 07:00 and 18:00 messages |
+| 1 (first full day, after 22:00) | GL02, GL04, GL11, GL12, PH04, SU08, SU09, HF03, SR05, SR10, SR12, SR14, BC05, CO06 | the numbers of the digest; three Zoho records; the alert channel got the 07:00 and 18:00 messages |
 | 2 | GL04, backup age (`node R/scripts/backup-db.js --check-age` exit 0) | alerts received during the night |
-| 3 | GL02, GL11, SR02, SR05, CO04b, PH03, DA06 | pulled count so far against 181 a day |
+| 3 | GL02, GL11, SR02, SR05, SR11, SR12, CO04b, PH03, DA06 | pulled count so far against 181 a day |
 | 5 | GL04, GL12, IN05 | any `run-failures` or `territory-quarantined` alert |
-| 7 | GL02, GL11, SR02, SR04, PH05, PH06, SU10, SU11, HF01 | weekly count against 1,269; decision to retire the old system; decision on Reed timing and on `BACKUP_UPLOAD_CMD` |
+| 7 | GL02, GL11, SR02, SR04, SR11, SR12, PH05, PH06, SU10, SU11, HF01 | weekly count against 1,269; decision to retire the old system; decision on Reed timing and on `BACKUP_UPLOAD_CMD`; the recruiter panel of SR13 and the decision DC9 |
 
 If a WATCH item goes wrong, do not fix anything yourself. Report: what you ran, what it printed, the time, and the one action you recommend. The alert table in `hermes/AGENTS.md` says what each alert means.
 
@@ -217,6 +239,7 @@ If a WATCH item goes wrong, do not fix anything yourself. Report: what you ran, 
 | DC6 | Shadow log keeps card text 180 days (IN06) | |
 | DC7 | Scale-to-zero and always-awake cost (HF01) | |
 | DC8 | When the old laptop system is retired (`docs/TEARDOWN.md`) | |
+| DC9 (BLOCKED: known limit K-CV8 must be fixed and re-verified before `on`) | CV screening from `shadow` to `on` (SR13) and the three decisions of `docs/CV-SCREENING.md` section 9: whether a person may be turned down automatically, whether porter-only histories may be rejected for a chef search, and that a rejected person is not offered again for another role (DECISIONS OD-L, CVS-8) | |
 
 ## 12. Sign-off and waivers
 

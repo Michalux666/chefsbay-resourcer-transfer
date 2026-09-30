@@ -3,8 +3,9 @@
 Legacy sources (read-only): `scripts/ai-review.js`, `scripts/caterer-ai-review.js`,
 `scripts/lib/screening-health.js`, `scripts/ai-review-abtest.js`; callers `phase1-scrape.ps1`,
 `reed-phase1.js`. New code: `resourcer/scripts/ai-review.js`, `caterer-ai-review.js`,
-`lib/screening-health.js`, `lib/screening/*`, `config/screening.json`, `tools/screening-report.js`.
-Tests: `tests/screening/*.test.js`, `tests/fake-gateway/*` (204 tests after the review-fix pass, 253 after the Jev-only build of 2026-09-30, section 6; see the end of this file).
+`lib/screening-health.js`, `lib/screening/*`, `config/screening.json`, `config/screening-criteria.json`, `tools/screening-report.js`, `tools/gold-rows.js`,
+`tools/screening-operating-point.js`.
+Tests: `tests/screening/*.test.js`, `tests/fake-gateway/*` (204 tests after the review-fix pass, 253 after the Jev-only build of 2026-09-30, section 6, and the criteria design of section 7; see the end of this file).
 
 ## 1. Map: legacy file:line -> new file:function
 
@@ -139,7 +140,7 @@ Numbers D1 to D11 refer to `research/screening-contract.md` 6.11 with the defaul
     DOB and age with a keyword, comma-written postcodes and GIR 0AA, particle chains (van der, dos, de la); the input is bounded before any
     pattern runs (a 400 KB single token took 138 s). Not done: masking every capitalised token after the first name (it would delete the job title
     of cards whose title word is not in the role-word list), street addresses, numbers without + or a leading 0. docs/SCREENING.md says so.
-21. **Stage 1 and Jev decisions** (engine `jev` only, after promotion): `S1-NA-NONHOSP` no longer treats waiter, bar, hotel, reception or dish titles as
+21. **Stage 1 and Jev decisions** (engine `jev` only, after promotion; the ladder part is superseded by section 7, items 42 to 45): `S1-NA-NONHOSP` no longer treats waiter, bar, hotel, reception or dish titles as
     non-hospitality (still shadow); the injection heuristic folds zero-width and look-alike characters and spaced letters and knows more phrasings (a
     heuristic, the flag only routes to the LLM); `decide()` sends searches with no ladder of their own (tier 0 except `decide.ladder.tier0Titles`:
     Catering Assistant, Kitchen Hand, Food Production) to review, and the thin-information approve now needs no close level mismatch and no
@@ -219,12 +220,12 @@ suites run unchanged under `jev_shadow`, given by `tests/screening/helpers.js` t
     `llm-client.js` refuses to be constructed (DECISIONS SCR-23). Tests: `jev-only.test.js` (leftover engines at settings, CLI, health and client level), `e2e/13-jev-only.e2e.js` 13c.
 35. **An unusable Jev answer before the unlock is `sys_invalid_result`, not a policy decision** (DECISIONS SCR-24; `engine.js decideJevOnly()` and `resolveByPolicy()`); after the unlock
     the policy decides. An exception inside `decide()` (`ANSWER_UNUSABLE`) counts as an unusable answer. Items 25, 27 and 29 are amended accordingly.
-36. **`decide.ladder` is validated when the settings load** (`config.js repairLadder()`, DECISIONS SCR-25).
+36. **`decide.ladder` is validated when the settings load** (`config.js repairLadder()`, DECISIONS SCR-25). Superseded by section 7 item 44: the ladder is gone and an old file is tolerated with one warning.
 37. **Halt remedy for an opt-in language-model engine on a team that blocks it** (`screening-health.js`, `LLM_RESTRICTED_REMEDY`): set `SCREEN_ALLOW_LLM 0` and `SCREEN_ENGINE jev_only`.
 38. **Report**: section J counts the cards left undecided (`jevOnly.undecided`).
 39. **Redaction (go-live round 2026-09-30, DECISIONS SCR-26)**: the rank prefix is 1 to 6 digits and a name in lower case is removed like one in capitals (`redact.js nameForm()`; the text is not re-cased; role words and the surname rules are unchanged). Backtest: 149 of 952 cards had a 4-digit rank and 132 a lower-case name. Test: `tests/screening/redact-rank-case.test.js`.
-40. **Injection bar 0.7 (SCR-27)**: `decide.stage1.injectionP` and `decide.stage2.injectionP` (file and `config.js` defaults). Backtest on 326 labelled cards: the uncertain share fell from 53.4 to 45.7 percent and the candidates lost before the unlock from 24 to 14. Test: `tests/screening/ladder-titles-injection.test.js`.
-41. **Six non-kitchen titles on the tier-0 ladder (SCR-28)**: waiter, waitress, server, front of house, bartender, dish washer (KNOWN-LIMITS K-SCR12). The tests that pinned Waiter and Bartender as no-ladder titles (`decide.test.js`, `jev-only.test.js`, `config-cache.test.js`) were updated; Barista is the no-ladder example now.
+40. **Injection bar 0.7 (SCR-27; since section 7 item 43 it needs the keyword filter as well)**: `decide.stage1.injectionP` and `decide.stage2.injectionP` (file and `config.js` defaults). Backtest on 326 labelled cards: the uncertain share fell from 53.4 to 45.7 percent and the candidates lost before the unlock from 24 to 14. Test: `tests/screening/ladder-titles-injection.test.js`.
+41. **Six non-kitchen titles on the tier-0 ladder (SCR-28; superseded by section 7 item 42: no title list exists any more)**: waiter, waitress, server, front of house, bartender, dish washer (KNOWN-LIMITS K-SCR12). The tests that pinned Waiter and Bartender as no-ladder titles (`decide.test.js`, `jev-only.test.js`, `config-cache.test.js`) were updated; Barista is the no-ladder example now.
 
 ### 6.4 Test evidence (Jev-only build)
 
@@ -238,3 +239,80 @@ failed once on a process-count assertion during its freeze (timing) and passed o
 decision; adding a request to the chat route from the review path; switching the engine refusal off; sending a before-unlock unusable answer to the policy; dropping the `decide()` exception mapping; skipping the ladder
 validation; reverting the phase 1 warning filter to `WARN screening:`; removing the lock in the language-model client; dropping the restricted-model remedy. UNVERIFIED-LIVE: that the owner's team really answers 403 to a chat call and lets Jev through
 (INSTALL 7.2 and 7.4), Jev's real answer shape and the real share of review-lane cards under the placeholder thresholds (ACCEPTANCE SR08).
+
+## 7. Criteria design (2026-09-30: the snippet criteria patch merged onto the Jev-only engine)
+
+The owner wanted Jev to decide at least 99 percent of the cards, relative to the searched role, from criteria he can edit. The lab (`screening-lab/`, run log `runs.md`) built and measured
+a forced-choice replacement of the ladder; this section records how it was merged onto the Jev-only engine of section 6. The owner's page is docs/SCREENING-CRITERIA.md.
+
+### 7.1 Map
+
+| Was | Now |
+|---|---|
+| `decide.js` `decide()` (ladder per search tier, `ladderFor`, `TIER_OF_OPTION`, seven bars) | `decide()` reads `config/screening-criteria.json` (level and kind tables, corroboration, policy readings, stale rule, operating point); `approve` or `reject` for every card with usable answers; `review` only as the fallback lane (`ANSWER_UNUSABLE`, `INJECTION_FLAG`); exports `decide`, `compactAnswers`, `operatingPoint` |
+| `jev-questions.js` (`TIER_OPTIONS`, 8 questions, wording per search tier, `QUESTIONS_VERSION = q1`) | `buildRequest`, `buildQuestions`, `buildRoleQuestions`, `buildState` (state: the role, the card's title and work history); questions are constant per candidate; `QUESTIONS_VERSION` is `s2-<hash of the criteria file>` |
+| `jev-client.js` `evaluate` (one request) | `evaluate` (one candidate request plus one cached role request per distinct title per client), `criteria_invalid` failure, card facts merged into the answers |
+| (none) | `criteria.js` (load, validate, hash, re-read on change), `card.js` (card facts), `operating-point.js` (cost, sweep, pick) |
+| `engine.js` `decideJevOnly()` and the `jev` branch skip Jev on a keyword hit | Jev is always asked (two lines); comments and the uncalibrated-warning text updated |
+| `config.js` `decide.stage1|2` (13 keys), `decide.ladder`, `repairLadder()`, tier rules `shadow` | four keys (`injectionP`, `infoFloor`, `notStatedP`, `titleConsistentMin`); `legacyKeys()` names retired keys of an old file in one warning; the three `T-*` rules default `off`; `config/screening.json` follows |
+| (none) | `config/screening-criteria.json` (the single editable source), `SCREEN_CRITERIA_FILE` |
+| `tools/screening-report.js` (rejectP by approveP sweep and what-if grid) | bar sweep and what-if table over `rejectAt`; forced share and Jev-decided share; rows of the older question set counted and skipped; `--criteria`; the export offers forced cards |
+| (none) | `tools/gold-rows.js` (labels + shadow log -> rows), `tools/screening-operating-point.js` (the cost curve of the bar; never writes) |
+| `tests/fake-gateway/server.js` (answers for the old questions) | the same server, plus `criteria-answers.js`: the shared gateway answers the criteria questions from the scenario tokens |
+
+### 7.2 Preserved (verified by the suites named)
+
+The CLI contract (`cli-contract.test.js`, unchanged); zero requests to a chat-completions endpoint in `jev_only`, checked in every scenario of `jev-only.test.js`; every Jev failure form is
+`ScreeningUnavailable`, exit 3 and halt, never a fallback or a reject (`jev-only.test.js`, unchanged expectations); the guards on unusable answers and the streak; an unusable answer is a fault (before the
+unlock `sys_invalid_result`, after it the policy); a card the parser cannot read is a fault, never a page of empty profiles (`engine-unreadable.test.js`); redaction before Jev and before the log; the shadow
+row schema (additions: `qv` `s2-...`, `jev.flags` with `forced`, the `x_...` card facts, `role_level`); the second-opinion interface; the health check (Jev only; the canary now takes two requests);
+the review policy switches (for the fallback lane); `jev_only` as the default and the `allowLlm` lock.
+
+### 7.3 Deliberate deviations
+
+42. **Forced choice** (owner requirement: Jev decides at least 99 percent). The review lane of the ladder is gone; historical fallback share 0 of 637 cards, 5 of 109 probes (injection). DECISIONS SCR-18 now settles only the fallback lane.
+    The search tier, `decide.ladder` and `tier0Titles` no longer decide anything; K-SCR12 cannot occur; SCR-28 is superseded.
+43. **A keyword hit alone no longer skips Jev** (two lines of `engine.js`); a card goes to the fallback lane only when Jev's injection answer reaches `injectionP` (0.7) and the keyword filter fired (`x_injection_kw`, a missing fact
+    counts as fired). The fallback lane goes to the review policy, not to a second-opinion provider: the engine keeps its rule that a card that instructs an AI is never handed to another model (differs from APPLY.md section 4, which
+    assumed the provider would see it; no provider ships).
+44. **Config**: the nine retired keys and `decide.ladder` are removed from `DEFAULTS` and `screening.json`; an old file loads with one `WARN screening config:` line naming them; `repairLadder()` (item 36) is removed. The three `T-*`
+    stage-1 rules default to `off` so no job-title table is consulted (they stay available as `shadow` or `enforce`). The `WARN screening: ... UNCALIBRATED placeholder thresholds` prefix is unchanged.
+45. **An empty profile is rejected** (`reject_no_history`: no title and no history, or a title, no history and nothing stated), as the recruiters' instructions say. This narrows SCR-14's "missing information is never a reason to
+    reject" to: missing information alone never rejects a card that has a title or a history; a missing or malformed answer, a card with no content (under 20 characters) and a card format the parser does not know (300 characters or more of text and no
+    title or history, `card_unreadable`) are faults or policy cases, never rejections. Residual risk: a page of cards that all lose their title and history but stay under 300 characters would be rejected as empty.
+46. **Owner decisions applied**: stage-1 `rejectAt` 0.70 and stage-2 0.90; a commis chef search is entry level (the `junior_cook` role level uses the entry rules); an out-of-date profile (updated, or newest dated job ended, six years ago or more)
+    is rejected before the unlock unless it shows a sign of life; **the card's own "N applications in last M days" is recent activity**: `card.js appliedDays()` gives the fact `x_apps_days` (only when N is at least 1),
+    `decide.js recentlyActive()` treats it like an "Active" age inside `stale.activeDays` (switch `stale.applicationsAreActivity`, default true, optional in the file), and the decision carries the flag `stale_but_active`.
+    Offline re-check on the stored Jev answers (`screening-lab/harness` `lab-report`, no call; card facts recomputed from the sample text): TRAIN headline (230) lost 4 to 2, wasted 21 to 24, weighted cost 33 to 30; TRAIN all (452) lost 16 to 6, wasted 43 to 51,
+    cost 91 to 69; TEST headline (96) lost 1 to 0, wasted 11 to 12, cost 14 to 12; TEST all (185) lost 5 to 2, wasted 17 to 18, cost 32 to 24; the cost curve over `rejectAt` stays lowest at 0.70 on TRAIN; probes A2 109 of 109 unchanged.
+47. **Probe fixture**: two probes (B023, C024) whose card carried an application count were re-stated to "No applications" (their intent was an inactive profile); Jev's answers do not depend on the count, so B2 and C re-decide to 95 of 96 offline
+    (204 of 205 in all, as before). `probes.test.js` runs them with keyword answers and pins the mechanics only.
+48. **Health canary**: `jevCanary` sends the canary card and its role request (2 requests); it is still rejected, never approved; `screening-health.js` is unchanged.
+49. **Test rewrites** (92 tests of eight files, each ported to assert the new behaviour): `decide.test.js` (48 scenarios re-asked of the criteria: 58 tests), `ladder-titles-injection.test.js`, `jev-stage.test.js`, `jev-only.test.js` (request counts split into
+    candidate and role requests; the fallback lane reached with a card both filters flag), `jev-only-report.test.js`, `report.test.js`, `shadow.test.js`, `stage1-rules.test.js`; `config-cache.test.js` gained the old-file tests. Removed because the subject is gone:
+    the per-title ladder override test (`ladderFor`), the whole-word title match test, the `tier0Titles` shipped-list test, `UNKNOWN_SEARCH_LADDER`, the valid-custom-ladder test and the ladder validation loop (replaced by the old-settings-file and criteria-file tests). `tests/phase1/harness.js`
+    copies the criteria file into its fake home. New: `gold-rows.test.js` and the criteria assertions on the stale rule and the applications fact.
+50. **Mutation checks**, each fails the suite: a keyword hit skipping Jev again; applications not counting as activity; a missing keyword fact counting as not fired; the forced marker never set; stage 2 using the stage 1 bar; a second opinion asked about an
+    injection card; the role asked for every candidate; retired keys silently ignored; zero applications counting as activity; the tier rules back to `shadow`; a criteria failure turned into a per-card unusable answer; the sweep back on one bar.
+
+### 7.4 Test evidence (criteria design)
+
+Windows Node 25.6.1: `node --test "tests/screening/*.test.js"` 474 of 474 (283 before the merge; 92 of them were rewritten); `tests/phase1` 176 pass, 5 skipped (they need `better-sqlite3`), 0 fail; `tests/docs` 34 of 36, the two failures come from the CV stage
+(its `cv-*` alert keys and its `CV_SCREEN` and `CV_PDF_PARSE_DIR` variables are not in AGENTS.md, OPERATIONS and ENV.md yet), none from screening; `tests/reed` does not load on this laptop (no `ws` module without an `npm install` in `resourcer/`).
+WSL Ubuntu 24.04, Node 22.22.1, a fresh copy under the home directory with `npm install` in `resourcer/`: `tests/screening` 474 of 474, `tests/phase1` 181 of 181 (the harness one-liner of APPLY.md section 5 is in), `tests/reed` 212 pass, 4 skipped (real Chromium), 0 fail
+(`screening-contract.test.js` passes), `tests/docs` 33 pass, 1 skipped, the same 2 CV-only failures, `tests/supervision/status-contract.test.js` passes. The docs suite needs the docImpacts of this package (ENV.md row for `SCREEN_CRITERIA_FILE`, DECISIONS, KNOWN-LIMITS, ACCEPTANCE, INSTALL 7.3);
+none of its failures depends on them today.
+End-to-end (`bash tests/e2e-linux.sh --only`, a private root under the home directory): scenario 02 (happy path, engine `jev_shadow`) PASS; scenario 03 (screening outage) PASS; scenario 13 (default engine): 13b (Jev refused, halt, resume) and 13c (leftover `SCREEN_ENGINE`) pass, and 13a passes every screening assertion
+(the numbers of scenario 2, no chat request, only Jev on the wire, shadow rows, label, database and queue) and fails only its "nothing reached the internet" check on one blocked `CandidateDownloadCV.aspx` request of the in-flight CV-stage change in `process-approved-queue.js` (not screening). Scenario 08 (needs a fastapi venv) and the others were not run.
+Mutation checks (item 50): 12 of 12 killed, on a scratch copy of the repo.
+Offline measurement (item 46): `screening-lab/harness` `lab-report --live` on a scratch copy of the lab work directory and of the merged `resourcer/`; no request was made; the TEST split was read for confirmation after the operating point was fixed by the owner's decisions (the read is logged in the scratch copy only).
+UNVERIFIED-LIVE: Jev's real answers to the criteria questions through the gateway on today's cards (the lab measured them on 637 historical Caterer cards; no Reed card was in the sample), the latency of the extra role request per title, and the real share of forced decisions (ACCEPTANCE SR08).
+
+
+### 7.5 Finalizer round (Update B, 2026-09-30)
+
+- The documents that the merge left to the finalizer are applied: `docs/ENV.md` (`SCREEN_CRITERIA_FILE`, the files a setting can name, the reworded `SCREEN_TIER_MODE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST`, `SCREEN_CALIBRATED`), `docs/DESIGN.md` sections 3, 6 and 8, `docs/DECISIONS.md` (`OD-J` Jev decides at least 99 percent, `OD-K` the cost weights 1 and 3, SCR-14, SCR-18, SCR-25, SCR-27 and SCR-28 amended or marked superseded, new SCR-29 to SCR-33), `docs/KNOWN-LIMITS.md` (K-SCR3, K-SCR5, K-SCR6, K-SCR7, K-SCR10, K-SCR11 reworded, K-SCR12 closed by design, new K-SCR14 to K-SCR16), `docs/ACCEPTANCE.md` SR08, `docs/INSTALL.md` 7.3, `docs/OPERATIONS.md` section 13, `docs/SCREENING-CRITERIA.md` section 1 (the double-flag card goes to the review policy, never to a second model), `hermes/.env.example`.
+- One test-fake fidelity bug found by the full end-to-end run and fixed at its root. Scenario 13a (the shipped engine) failed its "nothing reached the internet" check: the shared fake gateway's criteria adaptor (`tests/fake-gateway/criteria-answers.js`) honoured `[[REJECT]]` and `[[APPROVE]]` for the card questions but not for the two stage-2 questions (`title_seniority`, `title_consistent`), so candidate 71000008 (unlocked title `Bank Clerk [[REJECT]]`, no CV in the fake world) was approved after the unlock, reached Phase 2, and its CV download fell back to a direct fetch of the blocked Caterer host; and candidate 71000007 (a kitchen porter, correctly "too junior" for a Chef search under the criteria) was rejected before the unlock instead of being approved as in scenario 2. The count assertions of 13a (approved 6, five records) held by coincidence, which hid it. The adaptor now sets the stage-2 answers from the tokens, candidate 71000007 carries `[[APPROVE]]`, and 13a asserts the same five people as scenario 2. Regression tests (mutation-checked: removing the adaptor lines fails the first): `tests/screening/jev-stage.test.js` (the tokens after the unlock) and the people assertion of `tests/e2e/13-jev-only.e2e.js`. The baseline (commit d60d917) passes 13 unchanged, so this was a consequence of the criteria merge and not of the old ladder.
+- `engine.js` header comment: the fallback lane is settled by `decide.reviewPolicy` only; a second-opinion provider is asked about an unusable answer, never about a card that instructs an AI.
+- Scenario 3c (Jev down, engine `jev_shadow`) now expects the one WARN alert `cv-shadow-stopped` (the CV stage runs in shadow by default, needs Jev and finds it down, stops after five CVs and blocks nothing): see docs/parity/cv-stage.md section 10.
+- Test evidence of the finalizer (fresh copy of the tree in WSL Ubuntu 24.04, Node 22.22.1, `npm install` in `resourcer/`, a fastapi venv, `NODE_PATH`): `node --test --test-concurrency=4 "tests/**/*.test.js"` **2,482 tests, 2,476 pass, 0 fail, 6 skipped** (four real-Chromium Reed tests, and the two tests that need the git history, which pass on the laptop). Before the fixes of this round 2 failed (the two docs tests that wait for the CV settings and alert keys).

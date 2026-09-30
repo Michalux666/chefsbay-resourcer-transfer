@@ -16,10 +16,14 @@ test('config/screening.json is the owner-facing copy of the built-in defaults (n
   const file = path.join(h.REPO, 'resourcer', 'config', 'screening.json');
   const json = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.deepEqual(config.stripUnderscore(json), config.stripUnderscore(config.DEFAULTS));
-  // thresholds are clearly marked as placeholders to calibrate
-  assert.match(json.decide.stage1._CALIBRATE, /CALIBRATE/);
-  assert.match(json.decide.stage2._CALIBRATE, /CALIBRATE/);
+  // the bar and the rules moved to screening-criteria.json: only the four keys decide() still reads are left, and they say so
+  for (const st of ['stage1', 'stage2']) {
+    assert.match(json.decide[st]._note, /screening-criteria.json/);
+    assert.deepEqual(Object.keys(config.stripUnderscore(json.decide[st])).sort(), ['infoFloor', 'injectionP', 'notStatedP', 'titleConsistentMin'], st);
+  }
+  assert.equal(json.decide.ladder, undefined, 'the ladder of the retired design is gone');
   assert.equal(json.decide.calibration.calibrated, false);
+  assert.deepEqual(json.stage1.rules, { 'S1-NA-NONHOSP': 'shadow', 'T-ENTRY-OVERQUAL-HEAD': 'off', 'T-ENTRY-OVERQUAL-SOUS': 'off', 'T-UNDER-GAP': 'off' }, 'no title table is consulted by default');
   assert.equal(json.engine, 'jev_only');
   assert.deepEqual(json.decide.reviewPolicy, { preUnlock: 'reject', postUnlock: 'approve' });
   assert.equal(json.tierMode, 'legacy');
@@ -158,7 +162,7 @@ test('cache: a different signature (models, rubric, thresholds) is a different k
 });
 
 test('config hardening: file values are normalised, wrong-typed sections and bad thresholds fall back with a warning', () => {
-  const f = h.writeConfig({ engine: ' LLM ', tierMode: 'FIXED', llm: null, shadow: null, batch: null, cache: null, redact: null, stage1: null, decide: { stage1: { rejectP: null, approveP: 2, injectionP: 'x', needCorroboration: 'no' } } });
+  const f = h.writeConfig({ engine: ' LLM ', tierMode: 'FIXED', llm: null, shadow: null, batch: null, cache: null, redact: null, stage1: null, decide: { stage1: { infoFloor: null, notStatedP: 2, injectionP: 'x', titleConsistentMin: '' } } });
   const c = config.load({ getEnv: noEnv, file: f });
   assert.equal(c.engine, 'llm', 'a file value is trimmed and lower-cased like the environment one');
   assert.equal(c.tierMode, 'fixed');
@@ -166,14 +170,47 @@ test('config hardening: file values are normalised, wrong-typed sections and bad
   assert.equal(c.batch.breakerConsecutive, 3);
   assert.equal(c.cache.ttlSec, 3600);
   assert.equal(c.redact.enabled, true);
-  assert.equal(c.decide.stage1.rejectP, 0.9, 'null would have rejected with zero evidence');
-  assert.equal(c.decide.stage1.approveP, 0.6);
-  assert.equal(c.decide.stage1.injectionP, 0.7, 'a value above 1 would have disabled the injection guard');
-  assert.equal(c.decide.stage1.needCorroboration, false);
+  assert.equal(c.decide.stage1.infoFloor, 0.5, 'null would have turned the empty-profile floor off');
+  assert.equal(c.decide.stage1.notStatedP, 0.5, 'a value above 1 is out of range');
+  assert.equal(c.decide.stage1.injectionP, 0.7, 'a text would have disabled the injection guard');
+  assert.equal(c.decide.stage1.titleConsistentMin, 0.3);
   for (const s of ['llm', 'shadow', 'batch', 'cache', 'redact', 'stage1']) assert.ok(c.warnings.some(w => w.includes('section ' + s)), s);
-  assert.ok(c.warnings.some(w => /decide.stage1.rejectP/.test(w)));
+  assert.ok(c.warnings.some(w => /decide.stage1.infoFloor/.test(w)));
   const arr = config.load({ getEnv: noEnv, file: h.writeConfig({ decide: [] }) });
-  assert.equal(arr.decide.stage2.rejectP, 0.95);
+  assert.equal(arr.decide.stage2.injectionP, 0.7);
+});
+
+// the file of Update A (and of the first release) still holds the ladder and the old bars: it must load, keep working and name what is dead
+const OLD_DECIDE = {
+  stage1: { rejectP: 0.9, approveP: 0.6, needCorroboration: true, notFitMin: 0.6, counterRoleMatch: 0.6, noInfoApproveHospP: 0.5, clearFitP: 0.6, clearFitHardMax: 0.5, approveNotFitMax: 0.5, injectionP: 0.6 },
+  stage2: { rejectP: 0.95, approveP: 0.5 },
+  ladder: { tier0Titles: ['waiter'], bySearchTier: { 0: { inBand: ['front_of_house'] } }, overrides: [{ name: 'mine', tiers: [2], matchAny: ['pastry'] }] },
+};
+
+test('an old-design file loads: retired keys are ignored and named in one warning, the keys still read keep their effect', () => {
+  const c = config.load({ getEnv: noEnv, file: h.writeRawConfig({ decide: OLD_DECIDE }) });
+  assert.equal(c.decide.stage1.injectionP, 0.6, 'a key decide() still reads keeps its effect');
+  assert.equal(c.decide.stage1.infoFloor, 0.5);
+  const line = c.warnings.filter(w => /not read any more/.test(w));
+  assert.equal(line.length, 1, c.warnings.join(' | '));
+  for (const k of ['decide.ladder', 'decide.stage1.rejectP', 'decide.stage1.approveP', 'decide.stage1.clearFitHardMax', 'decide.stage2.rejectP']) assert.ok(line[0].includes(k), k);
+  assert.ok(!line[0].includes('injectionP'), 'a key that is still read is not named');
+  assert.match(line[0], /screening-criteria.json/);
+  assert.equal(c.engineEffective, 'jev_only');
+  assert.equal(config.load({ getEnv: noEnv, file: 'none.json' }).warnings.length, 0, 'the built-in defaults and the shipped file are silent');
+  assert.equal(config.load({ getEnv: noEnv, file: path.join(h.REPO, 'resourcer', 'config', 'screening.json') }).warnings.length, 0);
+});
+
+test('an old-design file with a wrong-typed ladder or retired bars never crashes the loader and never changes how a card is decided', () => {
+  for (const ladder of [null, [], 'x', 7, { bySearchTier: null }, { bySearchTier: { 2: 'sous' } }, { tier0Titles: 'waiter' }, { overrides: 'x' }, { overrides: [null] }]) {
+    for (const bar of [null, 'x', 5, -1]) {
+      const c = config.load({ getEnv: noEnv, file: h.writeRawConfig({ decide: { ladder, stage1: { rejectP: bar, approveP: bar } } }) });
+      assert.equal(c.engineEffective, 'jev_only');
+      assert.equal(c.decide.stage1.injectionP, 0.7);
+      assert.ok(c.warnings.some(w => /not read any more/.test(w)), JSON.stringify(ladder));
+      assert.equal(c.warnings.filter(w => /ladder|rejectP|approveP/.test(w) && !/not read any more/.test(w)).length, 0, 'no per-key repair warnings for retired keys');
+    }
+  }
 });
 
 test('config hardening: empty model names, a missing explicit config file, and the gateway origin', () => {

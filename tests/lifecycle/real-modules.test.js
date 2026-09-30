@@ -41,6 +41,7 @@ test.after(async () => {
 
 function realDepsOverrides() {
   return {
+    cvScreenMode: () => 'off', // the CV stage is tested in tests/cv; this suite is the real Zoho lifecycle
     refreshToken: async () => {},
     fetchCv: async () => fakeResponse(),
     loadCookieHeader: () => 'a=b',

@@ -12,7 +12,10 @@ const ENGINES = ['llm', 'jev_shadow', 'jev', 'jev_only'];
 const REVIEW_SIDES = ['reject', 'approve'];
 const TIER_MODES = ['legacy', 'fixed'];
 
-const CAL = 'CALIBRATE: placeholder from the Jev design guide, not fitted to Chefs Bay data. Tune with tools/screening-report.js (threshold sweep) before trusting it.';
+const STAGE_NOTE = 'Only these four are read by decide(): injectionP (a card goes to the fallback lane only when Jev scores an instruction at least this high AND the keyword filter fired), infoFloor (below it a card with no history is an empty profile), notStatedP (after the unlock a title Jev cannot place above this is ignored), titleConsistentMin (below it the unlocked title contradicts the card). The bar that turns a card into approve or reject is decision.operatingPoint in screening-criteria.json (docs/SCREENING-CRITERIA.md).';
+
+// keys of the ladder design that decide() no longer reads: an old file may still hold them, they are ignored and named in one warning
+const UNUSED_DECIDE_KEYS = ['rejectP', 'approveP', 'needCorroboration', 'notFitMin', 'counterRoleMatch', 'noInfoApproveHospP', 'clearFitP', 'clearFitHardMax', 'approveNotFitMax'];
 
 const DEFAULTS = {
   version: 1,
@@ -49,92 +52,27 @@ const DEFAULTS = {
   stage1: {
     rules: {
       'S1-NA-NONHOSP': 'shadow',
-      'T-ENTRY-OVERQUAL-HEAD': 'shadow',
-      'T-ENTRY-OVERQUAL-SOUS': 'shadow',
-      'T-UNDER-GAP': 'shadow',
+      'T-ENTRY-OVERQUAL-HEAD': 'off',
+      'T-ENTRY-OVERQUAL-SOUS': 'off',
+      'T-UNDER-GAP': 'off',
     },
   },
   decide: {
     calibration: { calibrated: false, reportId: null, date: null },
     reviewPolicy: { preUnlock: 'reject', postUnlock: 'approve' },
     stage1: {
-      _CALIBRATE: CAL,
-      rejectP: 0.9,
-      approveP: 0.6,
-      needCorroboration: true,
-      notFitMin: 0.6,
-      counterRoleMatch: 0.6,
+      _note: STAGE_NOTE,
       injectionP: 0.7,
       infoFloor: 0.5,
       notStatedP: 0.5,
-      noInfoApproveHospP: 0.5,
-      clearFitP: 0.6,
-      clearFitHardMax: 0.5,
-      approveNotFitMax: 0.5,
       titleConsistentMin: 0.3,
     },
     stage2: {
-      _CALIBRATE: CAL + ' Stage 2 is after the credit is spent, so the reject bar is higher and the approve bar lower.',
-      rejectP: 0.95,
-      approveP: 0.5,
-      needCorroboration: true,
-      notFitMin: 0.6,
-      counterRoleMatch: 0.6,
+      _note: STAGE_NOTE,
       injectionP: 0.7,
       infoFloor: 0.5,
       notStatedP: 0.5,
-      noInfoApproveHospP: 0.5,
-      clearFitP: 0.6,
-      clearFitHardMax: 0.5,
-      approveNotFitMax: 0.5,
       titleConsistentMin: 0.3,
-    },
-    ladder: {
-      tier0Titles: ['catering assistant', 'kitchen hand', 'food production', 'waiter', 'waitress', 'server', 'front of house', 'bartender', 'dish washer'],
-      _note: 'Candidate title options the Jev tier question can return, grouped per search tier. inBand = acceptable. tooSenior and tooJunior = clear level mismatches. mismatch = other clear mismatches, by reason code. Anything not listed is an uncertain level and goes to review. A search tier is the legacy role tier of the search title (0 unknown/non-kitchen, 1 entry, 2 mid, 3 senior, 4 head).',
-      bySearchTier: {
-        '0': {
-          inBand: ['entry_kp', 'commis', 'cdp_cook', 'front_of_house'],
-          tooSenior: ['sous', 'head', 'management_non_kitchen'],
-          tooJunior: [],
-          mismatch: { reject_unrelated_industry: ['unrelated'] },
-        },
-        '1': {
-          inBand: ['entry_kp', 'commis', 'cdp_cook'],
-          tooSenior: ['sous', 'head', 'management_non_kitchen'],
-          tooJunior: [],
-          mismatch: { reject_unrelated_industry: ['unrelated'], reject_foh_only: ['front_of_house'] },
-        },
-        '2': {
-          inBand: ['commis', 'cdp_cook', 'sous', 'head'],
-          tooSenior: [],
-          tooJunior: ['entry_kp'],
-          mismatch: { reject_unrelated_industry: ['unrelated'], reject_foh_only: ['front_of_house'], reject_management_only: ['management_non_kitchen'] },
-        },
-        '3': {
-          inBand: ['sous', 'head'],
-          tooSenior: [],
-          tooJunior: ['entry_kp', 'commis'],
-          mismatch: { reject_unrelated_industry: ['unrelated'], reject_foh_only: ['front_of_house'], reject_management_only: ['management_non_kitchen'] },
-        },
-        '4': {
-          inBand: ['head'],
-          tooSenior: [],
-          tooJunior: ['entry_kp', 'commis', 'cdp_cook'],
-          mismatch: { reject_unrelated_industry: ['unrelated'], reject_foh_only: ['front_of_house'], reject_management_only: ['management_non_kitchen'] },
-        },
-      },
-      overrides: [
-        {
-          name: 'cdp-specific',
-          tiers: [2],
-          matchAny: ['chef de partie', 'cdp', 'line cook'],
-          inBand: ['cdp_cook', 'sous', 'head'],
-          tooSenior: [],
-          tooJunior: ['entry_kp', 'commis'],
-          mismatch: { reject_unrelated_industry: ['unrelated'], reject_foh_only: ['front_of_house'], reject_management_only: ['management_non_kitchen'] },
-        },
-      ],
     },
   },
   gate: {
@@ -211,7 +149,7 @@ function originOk(origin) {
 // A section of the wrong type (null, array, string) would crash later code; it is replaced by the default section.
 function repairSections(cfg, defaults, prefix, warnings) {
   for (const [k, def] of Object.entries(defaults)) {
-    if (k.startsWith('_') || k === 'ladder' || k === 'rules') continue;
+    if (k.startsWith('_') || k === 'rules') continue;
     if (!isPlain(def)) continue;
     if (!isPlain(cfg[k])) {
       warnings.push(`section ${prefix}${k} has the wrong type; using the defaults`);
@@ -222,50 +160,16 @@ function repairSections(cfg, defaults, prefix, warnings) {
   }
 }
 
-const LADDER_SETS = ['inBand', 'tooSenior', 'tooJunior'];
-
-function strList(v) { return Array.isArray(v) && v.every(x => typeof x === 'string'); }
-
-function ladderEntryOk(e) {
-  if (!isPlain(e)) return false;
-  if (!LADDER_SETS.every(k => e[k] === undefined || strList(e[k]))) return false;
-  return e.mismatch === undefined || (isPlain(e.mismatch) && Object.values(e.mismatch).every(strList));
-}
-
-// decide() turns any exception into "answer unusable", so a wrong-typed ladder would send every card of a tier to the review policy.
-function repairLadder(cfg, warnings) {
-  const def = DEFAULTS.decide.ladder;
-  if (!isPlain(cfg.decide.ladder)) {
-    warnings.push('decide.ladder has the wrong type; using the defaults');
-    cfg.decide.ladder = clone(def);
-    return;
+// names of the settings of the retired ladder design that an old file still holds (never read; the file is not changed)
+function legacyKeys(fromFile) {
+  const d = fromFile && isPlain(fromFile.decide) ? fromFile.decide : {};
+  const found = [];
+  if (d.ladder !== undefined) found.push('decide.ladder');
+  for (const stage of ['stage1', 'stage2']) {
+    if (!isPlain(d[stage])) continue;
+    for (const k of UNUSED_DECIDE_KEYS) if (d[stage][k] !== undefined) found.push(`decide.${stage}.${k}`);
   }
-  const L = cfg.decide.ladder;
-  if (!strList(L.tier0Titles)) {
-    warnings.push('decide.ladder.tier0Titles must be a list of strings; using the defaults');
-    L.tier0Titles = clone(def.tier0Titles);
-  }
-  if (!isPlain(L.bySearchTier)) {
-    warnings.push('decide.ladder.bySearchTier has the wrong type; using the defaults');
-    L.bySearchTier = clone(def.bySearchTier);
-  } else {
-    for (const k of Object.keys(def.bySearchTier)) {
-      if (!ladderEntryOk(L.bySearchTier[k])) {
-        warnings.push(`decide.ladder.bySearchTier.${k} has the wrong shape; using the default for that tier`);
-        L.bySearchTier[k] = clone(def.bySearchTier[k]);
-      }
-    }
-  }
-  if (L.overrides !== undefined && !Array.isArray(L.overrides)) {
-    warnings.push('decide.ladder.overrides must be a list; using the defaults');
-    L.overrides = clone(def.overrides);
-  } else if (Array.isArray(L.overrides)) {
-    L.overrides = L.overrides.filter((ov, i) => {
-      const ok = ladderEntryOk(ov) && (ov.tiers === undefined || Array.isArray(ov.tiers)) && (ov.matchAny === undefined || strList(ov.matchAny));
-      if (!ok) warnings.push(`decide.ladder.overrides[${i}] has the wrong shape; ignored`);
-      return ok;
-    });
-  }
+  return found;
 }
 
 function configFile(getEnv) {
@@ -292,6 +196,8 @@ function load(opts) {
     else if (explicitFile) warnings.push(`config file ${path.basename(file)} was named explicitly but does not exist; using built-in defaults`);
   }
   if (fromFile) cfg = merge(cfg, fromFile);
+  const retired = legacyKeys(fromFile);
+  if (retired.length) warnings.push(`${retired.join(', ')} ${retired.length === 1 ? 'is' : 'are'} not read any more (the criteria in screening-criteria.json decide, docs/SCREENING-CRITERIA.md); remove ${retired.length === 1 ? 'it' : 'them'} from the file`);
   if (o.overrides) cfg = merge(cfg, o.overrides);
   // Before the environment is applied: an override on a section that is null in the file would otherwise throw.
   repairSections(cfg, DEFAULTS, '', warnings);
@@ -440,7 +346,6 @@ function load(opts) {
       } else D[k] = n;
     }
   }
-  repairLadder(cfg, warnings);
   const G = cfg.gate;
   for (const k of ['maxJevApproveLlmReject', 'maxJevRejectLlmApprove', 'maxJevRejectOfLlmApproved', 'minLaneAgreementLo', 'minLaneCoverage', 'minAgreement']) G[k] = num(G[k], DEFAULTS.gate[k], 0, 1);
   G.requiredSources = Array.isArray(G.requiredSources) ? G.requiredSources.filter(x => x === 'caterer' || x === 'reed') : [];

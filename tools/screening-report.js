@@ -9,21 +9,23 @@
  *   2. agreement Jev vs the deciding LLM, by Jev confidence band, with a reliability table
  *   3. approve rate by role and by source (LLM vs the promoted system)
  *   4. false-approve / false-reject estimates against the LLM (a proxy, NOT ground truth)
- *   5. a threshold sweep that re-runs decide() offline on the stored answers
+ *   5. a sweep of the one operating point (decision.operatingPoint.stageN.rejectAt of config/screening-criteria.json) that re-runs decide() offline on the stored answers
  *   6. per-rule agreement for the stage-1 rules and their promotion check
  *   7. the go / no-go verdict against the gate (config.gate; see docs/SCREENING.md)
  * Rows written by engine jev_only carry no LLM answer, so there is nothing to compare: for them the report prints the
- * Jev lane distribution, approval rate by role and source, a confidence-band histogram, the share of decisions taken by
- * the review policy, the top reason codes and a what-if grid of the bars, and the verdict says "not applicable in jev_only mode".
+ * Jev lane distribution, the share Jev decided itself (the owner requires at least 99 percent) and the forced share, approval
+ * rate by role and source, a confidence-band histogram, the share of decisions taken by the review policy, the top reason codes
+ * and a what-if table of the bar, and the verdict says "not applicable in jev_only mode".
  *
  * Usage:
  *   node tools/screening-report.js [--dir <shadow dir>] [--since 14d|YYYY-MM-DD] [--until YYYY-MM-DD]
  *        [--source caterer|reed] [--stage pre_unlock|post_unlock] [--config <screening.json>]
- *        [--labels <file.jsonl>] [--json] [--strict]
+ *        [--labels <file.jsonl>] [--criteria <screening-criteria.json>] [--json] [--strict]
  *        [--export-sample N [--seed S] [--out <file.jsonl>]]
  *   --strict  exit 0 = GO, 1 = NO-GO, 2 = INSUFFICIENT DATA, 3 = not applicable (only jev_only rows); default exit code is 0
  *   --export-sample  write N redacted inputs (no model answers) for recruiters to label; fill in the label field
  *            (approve|reject) and feed the file back with --labels
+ *   --criteria  re-decide the stored answers with another criteria file (the bar sweep uses its operating point); default: the packaged one
  *   --labels  JSONL of human labels: {"candidateId":"123","jobTitle":"Chef","label":"approve|reject"}
  *
  * Neither engine is ground truth. The numbers compare Jev with the LLM that currently decides.
@@ -43,6 +45,28 @@ function resolveLib() {
     if (fs.existsSync(path.join(home, marker))) return require(path.join(home, 'scripts', 'lib', 'screening'));
   }
   throw new Error('cannot find the screening library (looked in: ' + candidates.join(', ') + ')');
+}
+
+// the packaged criteria file, for a caller that did not pass one (the sweeps re-decide with another bar)
+function defaultCriteria() {
+  const c = resolveLib().criteria.get();
+  return c.ok && !c.decisionErrors.length ? c.criteria : null;
+}
+
+// answers written by the current question set: the older set has other keys and cannot be re-decided
+const hasNewAnswers = r => !!(r.jev && r.jev.status === 'ok' && r.jev.answers && r.jev.answers.role_level);
+
+const BARS = [0.4, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9];
+
+function withBar(criteria, stage, rejectAt) {
+  const c = JSON.parse(JSON.stringify(criteria));
+  c.decision.operatingPoint[stage === 2 ? 'stage2' : 'stage1'].rejectAt = rejectAt;
+  return c;
+}
+
+function currentBar(criteria, stage) {
+  const o = criteria && criteria.decision && criteria.decision.operatingPoint;
+  return o && o[stage === 2 ? 'stage2' : 'stage1'] ? o[stage === 2 ? 'stage2' : 'stage1'].rejectAt : null;
 }
 
 // ---------- statistics ----------
@@ -126,29 +150,20 @@ function compare(items) {
 
 // ---------- analysis ----------
 
-function withDecideOverrides(cfg, stage, over) {
-  const c = JSON.parse(JSON.stringify(cfg));
-  const key = stage === 2 ? 'stage2' : 'stage1';
-  Object.assign(c.decide[key], over);
-  return c;
-}
-
-function sweep(items, cfg, decideFn, stage) {
-  const rejectPs = [0.8, 0.85, 0.9, 0.95, 0.99];
-  const approvePs = [0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-  const rows = items.filter(x => x.d.llmOk && x.r.jev && x.r.jev.status === 'ok' && x.r.jev.answers && (x.r.jev.stage === 2 ? 2 : 1) === stage);
+function sweep(items, cfg, decideFn, stage, criteria) {
+  const rows = items.filter(x => x.d.llmOk && hasNewAnswers(x.r) && (x.r.jev.stage === 2 ? 2 : 1) === stage);
   const out = [];
-  for (const rejectP of rejectPs) {
-    for (const approveP of approvePs) {
-      const c = withDecideOverrides(cfg, stage, { rejectP, approveP });
+  if (criteria && typeof decideFn === 'function') {
+    for (const rejectAt of BARS) {
+      const c = withBar(criteria, stage, rejectAt);
       const re = rows.map(x => {
-        const dec = decideFn({ answers: x.r.jev.answers, searchRole: x.r.jobTitle, searchTier: x.r.searchTier, stage }, c);
+        const dec = decideFn({ answers: x.r.jev.answers, searchRole: x.r.jobTitle, searchTier: x.r.searchTier, stage, criteria: c }, cfg);
         return { r: x.r, d: { llmOk: true, jevOk: true, pair: true, lane: dec.lane, ref: x.d.ref, conf: dec.confidence, system: dec.lane === 'approve' ? true : dec.lane === 'reject' ? false : x.d.ref } };
       });
-      out.push({ rejectP, approveP, ...compare(re) });
+      out.push({ rejectAt, ...compare(re) });
     }
   }
-  return { stage, rows: rows.length, grid: out };
+  return { stage, rows: rows.length, current: currentBar(criteria, stage), grid: out };
 }
 
 // A lost candidate (Jev rejects, LLM approves) and a wasted credit (the reverse) are capped separately; they never offset each other.
@@ -289,15 +304,16 @@ function analyze(allRows, cfg, deps) {
   }
   const topDisagreements = [...reasonPairs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, n]) => ({ pair: k, n }));
 
+  const criteria = deps.criteria || (typeof deps.decide === 'function' ? defaultCriteria() : null);
   const sweeps = [];
   for (const stage of [1, 2]) {
-    const s = sweep(items, cfg, deps.decide, stage);
+    const s = sweep(items, cfg, deps.decide, stage, criteria);
     if (s.rows > 0) { s.recommended = recommend(s.grid, gate); sweeps.push(s); }
   }
 
   const rules = ruleTable(rows, gate);
   const labels = labelStats(allRows, deps.labels);
-  const jevOnly = jevOnlyRows.length ? analyzeJevOnly(jevOnlyRows, cfg, deps.decide) : null;
+  const jevOnly = jevOnlyRows.length ? analyzeJevOnly(jevOnlyRows, cfg, deps.decide, criteria) : null;
   const verdict = !rows.length && jevOnly ? notApplicable(cfg) : verdictOf(bySource, byRole, cfg, overall);
 
   return { volume, overall, confusion, byBand, bySource, byStage, byRole, byTier, topDisagreements, sweeps, rules, labels, verdict, gate, jevOnly };
@@ -331,23 +347,24 @@ function shareTable(rows, keyFn) {
 }
 
 // What the lanes would have been at other bars, re-run offline on the stored answers (no reference to compare with: it shows the cost side only).
-function whatIf(rows, cfg, decideFn, stage) {
-  const use = rows.filter(r => r.jev && r.jev.status === 'ok' && r.jev.answers && (r.jev.stage === 2 ? 2 : 1) === stage);
-  if (!use.length || typeof decideFn !== 'function') return null;
+function whatIf(rows, cfg, decideFn, stage, criteria) {
+  const use = rows.filter(r => hasNewAnswers(r) && (r.jev.stage === 2 ? 2 : 1) === stage);
+  if (!use.length || typeof decideFn !== 'function' || !criteria) return null;
   const grid = [];
-  for (const rejectP of [0.8, 0.85, 0.9, 0.95, 0.99]) {
-    for (const approveP of [0.4, 0.5, 0.6, 0.7, 0.8, 0.9]) {
-      const c = withDecideOverrides(cfg, stage, { rejectP, approveP });
-      const n = { approve: 0, reject: 0, review: 0 };
-      for (const r of use) n[decideFn({ answers: r.jev.answers, searchRole: r.jobTitle, searchTier: r.searchTier, stage }, c).lane]++;
-      grid.push({ rejectP, approveP, ...n, reviewShare: pct(n.review, use.length), approveShareOfDecided: pct(n.approve, n.approve + n.reject) });
+  for (const rejectAt of BARS) {
+    const c = withBar(criteria, stage, rejectAt);
+    const n = { approve: 0, reject: 0, review: 0, forced: 0 };
+    for (const r of use) {
+      const dec = decideFn({ answers: r.jev.answers, searchRole: r.jobTitle, searchTier: r.searchTier, stage, criteria: c }, cfg);
+      n[dec.lane]++;
+      if ((dec.flags || []).includes('forced')) n.forced++;
     }
+    grid.push({ rejectAt, ...n, reviewShare: pct(n.review, use.length), rejectShare: pct(n.reject, use.length), approveShareOfDecided: pct(n.approve, n.approve + n.reject) });
   }
-  const cur = cfg.decide[stage === 2 ? 'stage2' : 'stage1'];
-  return { stage, rows: use.length, current: { rejectP: cur.rejectP, approveP: cur.approveP }, grid };
+  return { stage, rows: use.length, current: currentBar(criteria, stage), grid };
 }
 
-function analyzeJevOnly(rows, cfg, decideFn) {
+function analyzeJevOnly(rows, cfg, decideFn, criteria) {
   const bands = cfg.gate.confidenceBands;
   const n = rows.length;
   const policyRows = rows.filter(r => r.used && r.used.engine === 'policy');
@@ -358,8 +375,15 @@ function analyzeJevOnly(rows, cfg, decideFn) {
     histogram.push({ band: `${bands[i]}-${Math.min(1, bands[i + 1])}`, n: inBand.length, approve: inBand.filter(r => r.jev.lane === 'approve').length, reject: inBand.filter(r => r.jev.lane === 'reject').length });
   }
   const codes = [...group(rows, r => (r.used && r.used.reasonCode) || 'none').entries()].map(([code, v]) => ({ code, n: v.length, share: pct(v.length, n) })).sort((a, b) => b.n - a.n || a.code.localeCompare(b.code));
+  const jevDecided = rows.filter(r => r.used && r.used.engine === 'jev');
+  const forced = jevDecided.filter(r => r.jev && Array.isArray(r.jev.flags) && r.jev.flags.includes('forced'));
   return {
     rows: n,
+    jevDecided: jevDecided.length,
+    jevDecidedShare: pct(jevDecided.length, n),
+    forced: forced.length,
+    forcedShare: pct(forced.length, jevDecided.length),
+    oldDesignRows: rows.filter(r => r.jev && r.jev.status === 'ok' && !hasNewAnswers(r)).length,
     calibrated: count(rows, r => (r.cal === true ? 'calibrated' : 'uncalibrated')),
     lanes: count(rows, laneOfRow),
     decidedBy: count(rows, r => (r.used ? r.used.engine : 'none')),
@@ -378,7 +402,7 @@ function analyzeJevOnly(rows, cfg, decideFn) {
       byStage: count(policyRows, r => r.stage),
     },
     topReasonCodes: codes.slice(0, 10),
-    whatIf: [1, 2].map(stage => whatIf(rows, cfg, decideFn, stage)).filter(Boolean),
+    whatIf: [1, 2].map(stage => whatIf(rows, cfg, decideFn, stage, criteria)).filter(Boolean),
   };
 }
 
@@ -505,16 +529,14 @@ function render(a) {
     out.push(`human labels matched: ${a.labels.matched}   LLM accuracy ${fmtPct(a.labels.llmAccuracy)} (n=${a.labels.llmN})   Jev-lane accuracy ${fmtPct(a.labels.jevLaneAccuracy)} (n=${a.labels.jevDecided})   system accuracy ${fmtPct(a.labels.systemAccuracy)}`);
   }
   out.push('');
-  out.push('5. THRESHOLD SWEEP (decide() re-run offline on the stored answers)');
-  if (!a.sweeps.length) out.push('no rows with stored Jev answers yet');
-  for (const s of a.sweeps) {
-    out.push(`stage ${s.stage} (${s.rows} rows): rows are rejectP, columns approveP; cell = coverage / system agreement / Jev-approve-LLM-reject rate`);
-    const aps = [...new Set(s.grid.map(g => g.approveP))];
-    const rps = [...new Set(s.grid.map(g => g.rejectP))];
-    out.push(table(['rejectP / approveP', ...aps.map(String)], rps.map(rp => [String(rp), ...aps.map(ap => { const g = s.grid.find(x => x.rejectP === rp && x.approveP === ap); return `${fmtPct(g.coverage)}/${fmtPct(g.systemAgreement)}/${fmtPct(g.falseApproveRate)}`; })])));
-    out.push(s.recommended
-      ? `recommended (max coverage within the gate): rejectP ${s.recommended.rejectP}, approveP ${s.recommended.approveP} -> coverage ${fmtPct(s.recommended.coverage)}, system agreement ${fmtPct(s.recommended.systemAgreement)}, Jev-approve-LLM-reject ${fmtPct(s.recommended.falseApproveRate)}, approve delta ${s.recommended.approveDeltaPts.toFixed(1)} pts`
-      : 'no grid point satisfies the gate yet');
+  out.push('5. BAR SWEEP (decide() re-run offline on the stored answers with another decision.operatingPoint rejectAt)');
+  if (!a.sweeps.length) out.push('no rows with stored Jev answers of the current question set yet');
+  for (const sw of a.sweeps) {
+    out.push(`stage ${sw.stage} (${sw.rows} rows; the current bar is rejectAt ${sw.current}): cell = coverage / system agreement / Jev-approve-LLM-reject rate`);
+    out.push(table(['rejectAt', 'coverage', 'system agreement', 'Jev approves / LLM rejects', 'Jev rejects / LLM approves'], sw.grid.map(g => [String(g.rejectAt), fmtPct(g.coverage), fmtPct(g.systemAgreement), fmtPct(g.falseApproveRate), fmtPct(g.falseRejectRate)])));
+    out.push(sw.recommended
+      ? `recommended (max coverage, then lane agreement, within the gate): rejectAt ${sw.recommended.rejectAt} -> coverage ${fmtPct(sw.recommended.coverage)}, system agreement ${fmtPct(sw.recommended.systemAgreement)}, Jev-approve-LLM-reject ${fmtPct(sw.recommended.falseApproveRate)}, approve delta ${sw.recommended.approveDeltaPts.toFixed(1)} pts`
+      : 'no bar satisfies the gate yet');
   }
   out.push('');
   out.push('6. STAGE-1 RULES');
@@ -532,6 +554,8 @@ function renderJevOnly(j, out, labels) {
   out.push(`J. JEV-ONLY MODE (${j.rows} rows; no LLM in this mode, so there is no agreement to measure)`);
   out.push(`thresholds: ${JSON.stringify(j.calibrated)}   decided by: ${JSON.stringify(j.decidedBy)}   overall approve rate: ${fmtPct(j.approveRate)}`);
   out.push(`Jev lane distribution: ${JSON.stringify(j.lanes)}`);
+  out.push(`decided by Jev itself (approve or reject, no policy): ${j.jevDecided} = ${fmtPct(j.jevDecidedShare)} of rows (owner requirement: at least 99%)   forced by the operating point (R between the forced band edges): ${j.forced} = ${fmtPct(j.forcedShare)} of Jev's decisions`);
+  if (j.oldDesignRows) out.push(`rows of the older question set (no role_level answer; not re-decided below): ${j.oldDesignRows}`);
   out.push(`cards left undecided (unusable Jev answer before the unlock; the caller screens them again later): ${j.undecided}`);
   out.push(`policy decisions (the review policy, not a confident Jev answer): ${j.policy.total} = ${fmtPct(j.policy.share)} of rows   approve ${j.policy.approve}   reject ${j.policy.reject}   why: ${JSON.stringify(j.policy.byWhy)}   by stage: ${JSON.stringify(j.policy.byStage)}`);
   const share = (title, list) => {
@@ -550,12 +574,10 @@ function renderJevOnly(j, out, labels) {
   for (const c of j.topReasonCodes) out.push(`  ${String(c.n).padStart(5)}  ${fmtPct(c.share).padStart(6)}  ${c.code}`);
   for (const w of j.whatIf) {
     out.push('');
-    out.push(`what-if, stage ${w.stage} (${w.rows} rows with a stored Jev answer; the current bars are rejectP ${w.current.rejectP} and approveP ${w.current.approveP}): rows are rejectP, columns approveP; cell = share sent to the review policy / approve share of Jev's decisions`);
-    const aps = [...new Set(w.grid.map(g => g.approveP))];
-    const rps = [...new Set(w.grid.map(g => g.rejectP))];
-    out.push(table(['rejectP / approveP', ...aps.map(String)], rps.map(rp => [String(rp), ...aps.map(ap => { const g = w.grid.find(x => x.rejectP === rp && x.approveP === ap); return `${fmtPct(g.reviewShare)}/${fmtPct(g.approveShareOfDecided)}`; })])));
+    out.push(`what-if, stage ${w.stage} (${w.rows} rows with stored answers of the current question set; the current bar is rejectAt ${w.current}): share sent to the fallback lane / rejected / forced, and the approve share of Jev's decisions`);
+    out.push(table(['rejectAt', 'approve', 'reject', 'fallback', 'forced', 'reject share', 'approve share of decided'], w.grid.map(g => [String(g.rejectAt), g.approve, g.reject, g.review, g.forced, fmtPct(g.rejectShare), fmtPct(g.approveShareOfDecided)])));
   }
-  if (j.whatIf.length) out.push('there is no reference in this mode: the grid shows how much would go to the policy, not which bars are right (label a sample, docs/SCREENING.md 16.6).');
+  if (j.whatIf.length) out.push('there is no reference in this mode: the table shows how the lanes move with the bar, not which bar is right (label a sample, docs/SCREENING.md 16.6; then tools/gold-rows.js and tools/screening-operating-point.js).');
   if (labels && labels.jevOnly) {
     const lo = labels.jevOnly;
     out.push('');
@@ -597,7 +619,7 @@ function shuffle(list, rnd) {
 
 /**
  * A stratified sample for recruiters to label, WITHOUT the model answers (independent labels): a third
- * disagreements between Jev and the LLM, a third uncertain (review lane or Jev confidence < 0.8), the
+ * disagreements between Jev and the LLM, a third uncertain (review lane, forced marker or Jev confidence < 0.8), the
  * rest random. Only rows that kept their redacted input (shadow.storeText) can be exported.
  */
 function exportSample(rows, n, seed) {
@@ -607,7 +629,7 @@ function exportSample(rows, n, seed) {
   const key = r => r.candidateId + '|' + r.jobTitle;
   const items = withText.map(r => ({ r, d: derive(r) }));
   const disagree = items.filter(x => x.d.pair && x.d.lane !== 'review' && (x.d.lane === 'approve') !== x.d.ref);
-  const uncertain = items.filter(x => (x.r.used && x.r.used.engine === 'policy') || (x.d.jevOk && (x.d.lane === 'review' || (x.d.conf !== null && x.d.conf < 0.8))));
+  const uncertain = items.filter(x => (x.r.used && x.r.used.engine === 'policy') || (x.r.jev && Array.isArray(x.r.jev.flags) && x.r.jev.flags.includes('forced')) || (x.d.jevOk && (x.d.lane === 'review' || (x.d.conf !== null && x.d.conf < 0.8))));
   const per = Math.max(1, Math.floor(n / 3));
   const pick = [];
   const take = (list, k) => {
@@ -654,7 +676,7 @@ function parseArgs(argv) {
 
 const HELP = `Usage: node tools/screening-report.js [--dir <shadow dir>] [--since 14d|YYYY-MM-DD] [--until YYYY-MM-DD]
        [--source caterer|reed] [--stage pre_unlock|post_unlock] [--config <screening.json>]
-       [--labels <file.jsonl>] [--json] [--strict]
+       [--labels <file.jsonl>] [--criteria <screening-criteria.json>] [--json] [--strict]
        [--export-sample N [--seed S] [--out <file.jsonl>]]
 Reads the shadow log and prints the calibration report. --strict: exit 0 GO, 1 NO-GO, 2 INSUFFICIENT DATA, 3 not applicable (jev_only rows only).
 `;
@@ -691,7 +713,17 @@ function main(argv, io) {
       labels = fs.readFileSync(path.resolve(args.labels), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
     } catch (e) { w.err(`WARN could not read labels file: ${e.message}\n`); }
   }
-  const result = analyze(rows, cfg, { decide: lib.decide.decide, labels });
+  let criteria;
+  if (args.criteria) {
+    const loaded = lib.criteria.load({ file: path.resolve(args.criteria) });
+    if (!loaded.ok || loaded.decisionErrors.length) {
+      w.err(`FATAL --criteria file unusable: ${(loaded.ok ? loaded.decisionErrors : loaded.errors).join('; ').slice(0, 200)}
+`);
+      return 1;
+    }
+    criteria = loaded.criteria;
+  }
+  const result = analyze(rows, cfg, { decide: lib.decide.decide, labels, criteria });
   w.out(args.json ? JSON.stringify(result, null, 2) + '\n' : render(result));
   if (args.strict) return result.verdict.status === 'GO' ? 0 : result.verdict.status === 'NO-GO' ? 1 : result.verdict.status === 'NOT APPLICABLE' ? 3 : 2;
   return 0;

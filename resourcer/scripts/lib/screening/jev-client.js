@@ -1,18 +1,11 @@
 'use strict';
-// Jev (TypeSafe System One) through the AI Gateway: POST {origin}/typesafe/v1/systemone.
-// One request per candidate, all atomic questions in it. Defensive by design: the docs leave some
-// response details unverified, so
-//   - confidence is read from the answer, else from provider metadata, else computed from the
-//     probabilities as (N*pmax-1)/(N-1);
-//   - any missing, malformed or sentinel answer (probabilities absent) is an INVALID answer, which
-//     the caller treats as "review", never as a reject;
-//   - only the TypeSafe-compatible response shape is parsed (noul / choice / score), never the
-//     Vercel-native /v1/evaluate one.
 
 const http = require('./http');
 const { HttpFailure, InvalidAnswer } = require('./errors');
 const { apiKey } = require('./llm-client');
 const Q = require('./jev-questions');
+const criteriaLib = require('./criteria');
+const { cardFacts } = require('./card');
 
 const EPS = 0.02;
 
@@ -53,11 +46,7 @@ function argmax(p) {
   return best;
 }
 
-/**
- * Validate and normalise a systemone response.
- * @returns {{answers:Object<string,any>, model:string}}
- * @throws {InvalidAnswer}
- */
+// a missing, malformed or sentinel answer is INVALID: the caller sends the card to review, never to reject
 function parseAnswers(json, shape) {
   if (!json || typeof json !== 'object' || !json.answers || typeof json.answers !== 'object') throw new InvalidAnswer('no answers in response', 'no_answers');
   if (typeof json.model === 'string' && json.model && !/jev/i.test(json.model)) throw new InvalidAnswer('answered by a non-Jev model', 'not_jev');
@@ -85,30 +74,20 @@ function parseAnswers(json, shape) {
   return { answers: out, model: typeof json.model === 'string' ? json.model : '' };
 }
 
+const roleKey = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
 class JevClient {
   constructor(deps) {
     this.cfg = deps.cfg;
     this.log = deps.log || (() => {});
     this.rng = deps.rng;
+    this.roles = new Map();
   }
 
-  /**
-   * @param {{searchRole:string, searchTier:number, snippet:string, realJobTitle?:string, stage:1|2,
-   *          signal?:AbortSignal, maxAttempts?:number, timeoutMs?:number}} p  (snippet and title already redacted)
-   * @returns {Promise<{ok:true, answers:object, meta:object}|{ok:false, kind:string, code:string, message:string}>}
-   */
-  async evaluate(p) {
+  async post(body, p, label) {
     const cfg = this.cfg;
-    const snippet = String(p.snippet || '').slice(0, cfg.jev.maxSnippetChars);
-    const hasRealTitle = !!(p.stage === 2 && p.realJobTitle);
-    const questions = Q.buildQuestions({ stage: p.stage, searchTier: p.searchTier, hasRealTitle });
-    const state = Q.buildState({ searchRole: p.searchRole, searchTier: p.searchTier, snippet, realJobTitle: hasRealTitle ? p.realJobTitle : '' });
-    const body = { model: cfg.jev.model, state, questions };
-    if (cfg.jev.zeroDataRetention) body.providerOptions = { gateway: { zeroDataRetention: true } };
-
-    let res;
     try {
-      res = await http.request('POST', `${cfg.gateway.origin}/typesafe/v1/systemone`, {
+      const res = await http.request('POST', `${cfg.gateway.origin}/typesafe/v1/systemone`, {
         headers: { Authorization: `Bearer ${apiKey()}`, 'User-Agent': 'chefsbay-resourcer-screening/1' },
         body,
         timeoutMs: p.timeoutMs || cfg.jev.timeoutMs,
@@ -116,34 +95,80 @@ class JevClient {
         retry: cfg.retry,
         signal: p.signal,
         log: this.log,
-        label: 'Jev',
+        label: label || 'Jev',
         rng: this.rng,
       });
+      return { res };
     } catch (err) {
       if (err instanceof HttpFailure && err.kind !== 'aborted') {
-        return { ok: false, kind: err.kind, code: `http_${err.status || err.kind}`, message: err.message, status: err.status, attempts: err.attempts };
+        return { fail: { ok: false, kind: err.kind, code: `http_${err.status || err.kind}`, message: err.message, status: err.status, attempts: err.attempts } };
       }
       throw err;
     }
+  }
+
+  async askRole(criteria, p) {
+    const questions = Q.buildRoleQuestions(criteria);
+    const body = { model: this.cfg.jev.model, state: Q.buildRoleState(p.searchRole, criteria), questions };
+    if (this.cfg.jev.zeroDataRetention) body.providerOptions = { gateway: { zeroDataRetention: true } };
+    const r = await this.post(body, p, 'Jev role');
+    if (r.fail) return r.fail;
+    try {
+      const parsed = parseAnswers(r.res.json, Q.expectedShape(questions));
+      return { ok: true, answers: parsed.answers };
+    } catch (err) {
+      if (err instanceof InvalidAnswer) return { ok: false, kind: 'invalid', code: err.code, message: err.message, attempts: r.res.attempts };
+      throw err;
+    }
+  }
+
+  // one request per distinct search title for the life of the client; a failure is never cached
+  roleProfile(criteria, p) {
+    const key = roleKey(p.searchRole);
+    let pending = this.roles.get(key);
+    if (!pending) {
+      pending = this.askRole(criteria, p).then(r => { if (!r.ok) this.roles.delete(key); return r; }, e => { this.roles.delete(key); throw e; });
+      this.roles.set(key, pending);
+    }
+    return pending;
+  }
+
+  async evaluate(p) {
+    const cfg = this.cfg;
+    const loaded = criteriaLib.get();
+    if (!loaded.ok || loaded.decisionErrors.length) {
+      const why = loaded.ok ? loaded.decisionErrors : loaded.errors;
+      return { ok: false, kind: 'config', code: 'criteria_invalid', message: `screening-criteria.json: ${why.join('; ').slice(0, 200)}`, attempts: 0 };
+    }
+    const criteria = loaded.criteria;
+    const built = Q.buildRequest({
+      searchRole: p.searchRole, snippet: p.snippet, realJobTitle: p.realJobTitle, stage: p.stage, model: cfg.jev.model,
+      zdr: cfg.jev.zeroDataRetention, maxChars: cfg.jev.maxSnippetChars, criteria, asOf: p.asOf,
+    });
+
+    const role = await this.roleProfile(criteria, p);
+    if (!role.ok) return role;
+    const res = await this.post(built.body, p, 'Jev');
+    if (res.fail) return res.fail;
 
     try {
-      const parsed = parseAnswers(res.json, Q.expectedShape(questions));
-      const rid = res.headers && res.headers.get ? res.headers.get('x-typesafe-request-id') : null;
+      const parsed = parseAnswers(res.res.json, Q.expectedShape(built.questions));
+      const rid = res.res.headers && res.res.headers.get ? res.res.headers.get('x-typesafe-request-id') : null;
       return {
         ok: true,
-        answers: parsed.answers,
+        answers: { ...parsed.answers, ...role.answers, ...cardFacts(built.card) },
         meta: {
           model: parsed.model || cfg.jev.model,
           requestId: rid || null,
-          usage: res.json.usage || null,
-          ms: res.ms,
-          attempts: res.attempts,
-          qhash: Q.questionSetHash(questions),
-          hasRealTitle,
+          usage: res.res.json.usage || null,
+          ms: res.res.ms,
+          attempts: res.res.attempts,
+          qhash: built.qh,
+          hasRealTitle: built.hasRealTitle,
         },
       };
     } catch (err) {
-      if (err instanceof InvalidAnswer) return { ok: false, kind: 'invalid', code: err.code, message: err.message, attempts: res.attempts };
+      if (err instanceof InvalidAnswer) return { ok: false, kind: 'invalid', code: err.code, message: err.message, attempts: res.res.attempts };
       throw err;
     }
   }

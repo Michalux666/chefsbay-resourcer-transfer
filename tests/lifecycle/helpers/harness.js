@@ -56,6 +56,7 @@ function buildDeps(ws, opts = {}) {
   const calls = { fetchCv: 0, upsert: [], fill: 0, reedDownloads: [], refresh: 0, attach: 0, create: 0 };
   const deps = {
     config: { concurrency: 2 },
+    cvScreenMode: () => 'off', // these suites test the Zoho lifecycle as before; the CV stage has its own suite (tests/cv)
     sleep: async ms => { sleeps.push(ms); },
     refreshToken: async () => { calls.refresh++; if (hooks.refreshThrows) throw new Error('token endpoint down'); },
     createCandidate: async p => { calls.create++; return client.createCandidate(p); },

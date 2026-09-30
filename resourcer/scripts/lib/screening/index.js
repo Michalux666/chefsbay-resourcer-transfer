@@ -19,6 +19,9 @@ const rules = require('./rules');
 const decide = require('./decide');
 const shadow = require('./shadow');
 const jevQuestions = require('./jev-questions');
+const criteria = require('./criteria');
+const card = require('./card');
+const operatingPoint = require('./operating-point');
 
 module.exports = {
   loadConfig: config.load,
@@ -34,4 +37,7 @@ module.exports = {
   decide,
   shadow,
   jevQuestions,
+  criteria,
+  card,
+  operatingPoint,
 };

@@ -1,9 +1,13 @@
 'use strict';
 // The screening engine. Four selectable engines (config engine / SCREEN_ENGINE):
 //   jev_only    (default) Jev is the only model, and no request to any chat-completions endpoint is ever
-//               made. approve and reject lanes are final; the review lane, an injection flag and an empty card
-//               are resolved by decide.reviewPolicy (reasonCode sys_review_policy_*). An answer that stays unusable
-//               is sys_invalid_result before the unlock (left undecided by the caller) and the policy after it.
+//               made. decide() forces approve or reject for every card with usable answers (the criteria in
+//               config/screening-criteria.json, docs/SCREENING-CRITERIA.md); those lanes are final. The rare
+//               fallback lane (a card flagged as an injection by BOTH the keyword filter and Jev, a card of
+//               fewer than 20 characters) is resolved by decide.reviewPolicy (reasonCode sys_review_policy_*),
+//               never by a second-opinion provider: a card that instructs an AI is not handed to another model.
+//               An answer that stays unusable is offered to a second-opinion provider if one is installed; without
+//               one it is sys_invalid_result before the unlock (left undecided by the caller) and the policy after it.
 //               A Jev outage is ScreeningUnavailable, never a fallback and never a reject.
 //               The other three engines need allowLlm (SCREEN_ALLOW_LLM=1); config.load forces jev_only without it.
 //   llm         the normal LLM decides, using the legacy recruiter prompt (shared rubric).
@@ -11,7 +15,7 @@
 //               LOGGED (shadow/screening-*.jsonl). Jev can never change a decision, an exit code or
 //               (beyond a small bounded grace wait) the run time.
 //   jev         Jev first: atomic questions -> decide() lanes. approve and reject are final; review,
-//               injection flags, invalid answers and a Jev outage go to the LLM. A small share of Jev
+//               injection flags (both filters), invalid answers and a Jev outage go to the LLM. A small share of Jev
 //               decisions is re-checked by the LLM in the background (audit) and logged.
 // Stage-1 rules (rules.js) run first in every engine; only rules set to 'enforce' decide.
 //
@@ -335,7 +339,7 @@ function createEngine(cfg, deps) {
         fsx.writeJsonAtomic(UNCALIBRATED_FILE, { runId, at: new Date().toISOString() }, 0o600);
       }
     } catch (e) { /* the warning is still worth more than the de-duplication */ }
-    log('WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds (decide.stage1 and decide.stage2 are not fitted to Chefs Bay data); watch the policy share in the summary line and see docs/SCREENING.md section 16.');
+    log('WARN screening: engine jev_only is running on UNCALIBRATED placeholder thresholds (the operating point in screening-criteria.json was fitted on old-model labels, not on recruiter labels); the policy share in the summary line should stay near zero, see docs/SCREENING.md section 16.');
   }
 
   // Second opinion (extension point, no provider ships): only for a valid but uncertain Jev answer or an unusable one.
@@ -367,9 +371,9 @@ function createEngine(cfg, deps) {
 
   // jev_only: Jev decides approve and reject; everything else goes to resolveByPolicy. Jev unavailable trips or fails the run, it never decides anything.
   async function decideJevOnly(run, prep, row) {
-    const jr = prep.rules.flags.includes('injection') ? { status: 'skipped', why: 'injection' } : await runJev(run, prep, false);
+    const jr = await runJev(run, prep, false);
     row.jev = jr;
-    // decide() reports any exception (a bad ladder in the settings, a missing number) as ANSWER_UNUSABLE: a fault, so it feeds the guards
+    // decide() reports any exception (a missing or malformed answer) and an unreadable card as ANSWER_UNUSABLE: a fault, so it feeds the guards
     const unusable = jr.status === 'invalid' || (jr.status === 'ok' && jr.reviewReason === 'ANSWER_UNUSABLE');
     let why;
     if (jr.status === 'ok' && !unusable) {
@@ -441,9 +445,7 @@ function createEngine(cfg, deps) {
       used = await decideJevOnly(run, prep, row);
       if (!used) return;
     } else if (eff === 'jev') {
-      let jr;
-      if (prep.rules.flags.includes('injection')) jr = { status: 'skipped', why: 'injection' };
-      else jr = await runJev(run, prep, false);
+      const jr = await runJev(run, prep, false);
       row.jev = jr;
       if (jr.status === 'ok' && jr.lane !== 'review') {
         used = decisionOf('jev', { approved: jr.lane === 'approve', reasonCode: jr.reasonCode, confidence: jr.confidence, model: jr.model, job });

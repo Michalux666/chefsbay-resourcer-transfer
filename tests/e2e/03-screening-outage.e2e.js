@@ -162,7 +162,10 @@ test('3c a Jev outage in shadow mode never blocks the run: the LLM decides and t
   assert.equal(w.lastRun().approved, 6);
   assert.equal(w.svc.zoho.created().length, 5);
   assert.equal(w.json('runtime/pipeline-halt.json'), null);
-  assert.deepEqual(w.alerts().filter((a) => a.severity !== 'info'), []);
+  // the CV stage runs in shadow by default, needs Jev too and finds it down: it stops after five CVs, says so once and blocks nothing (all five records above reached Zoho)
+  const alerts = w.alerts().filter((a) => a.severity !== 'info');
+  assert.deepEqual(alerts.map((a) => [a.key, a.severity]), [['cv-shadow-stopped', 'warn']]);
+  assert.deepEqual(w.list('shadow', /^cv-d{4}/), [], 'no CV was screened, so no CV row exists');
   const rows = w.jsonl(`shadow/${w.list('shadow', /^screening-/)[0]}`);
   assert.ok(rows.length >= 9);
   assert.ok(rows.every((r) => r.used.engine === 'llm' && r.jev && r.jev.status !== 'ok'), 'Jev failed, the LLM decided');

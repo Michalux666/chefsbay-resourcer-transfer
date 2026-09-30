@@ -8,12 +8,12 @@ The CV-sourcing pipeline (Caterer.com and Reed.co.uk, AI screening, unlock and d
 
 | Part | Where | What it does |
 |---|---|---|
-| The pipeline | `resourcer/` | Phase 1 (search and scrape), screening, Phase 2 (unlock, download, Zoho push), supervision, alerts, backups, retention |
+| The pipeline | `resourcer/` | Phase 1 (search and scrape), screening, Phase 2 (unlock, download, CV screening, Zoho push), supervision, alerts, backups, retention |
 | The cron jobs | `hermes/cron/jobs.json`, `hermes/scripts/` | Eight small no-agent jobs; no AI is involved in supervision |
 | The operator | `hermes/AGENTS.md`, `hermes/SOUL.md`, `hermes/skills/resourcer-ops/` | The standing instructions of the Hermes agent that installs and watches it. It operates; it never edits code |
 | The dashboard tab | `plugin/resourcer/` | Live progress, targets, halt banner, search request form, inside the Hermes dashboard |
 | Tools | `tools/` | Data bundle (make, restore, verify), code manifest, environment probes (`preflight.sh`), search request, screening report, legacy archive |
-| Tests | `tests/` | About 1,900 offline tests and 13 end-to-end scenarios; all pass (`README.md` has the commands) |
+| Tests | `tests/` | About 2,500 offline tests and 14 end-to-end scenarios; all pass (`README.md` has the commands) |
 
 ## 2. How far it is proven
 
@@ -35,6 +35,8 @@ While the install runs (`docs/INSTALL.md` section 0.4 lists them as H1 to H11; C
 
 Before the laptop is wiped or leaves you (`docs/CUTOVER.md` step 9, `docs/TEARDOWN.md`, `docs/SECURITY.md` section 10): revoke the GitHub token that sat in the old repository's address, rotate the Reed password and the Zoho refresh token, purge the old transcripts and notes that contain credentials, and only then delete the old system. Do not wipe before the gate in CUTOVER 11.1 is true; the laptop is your rollback path (`docs/ROLLBACK.md`).
 
+Already installed from Update A (commit `d60d917`, Jev-only screening)? Push this release, give the operator its manifest digest and follow `docs/UPDATE-B.md`: forced-choice screening criteria and the CV stage (shadow by default), with no setting to change.
+
 Already installed from the first release (the one whose screening engine was `jev_shadow`)? Do not run the install again: push this release, give the operator its manifest digest and follow `docs/UPDATE-JEV-ONLY.md` (the operator does the steps; the only thing that can need you is allowing `typesafe-ai/jev` in the Vercel team if its deep check says "restricted access").
 
 If time is short, the honest minimum is in the table in CUTOVER section 1: fence, verify idle, build the bundle, copy it off the laptop, store the passphrase, revoke the token. The pipeline is then down until Hermes is installed from the bundle, but nothing is lost.
@@ -47,7 +49,8 @@ If time is short, the honest minimum is in the table in CUTOVER section 1: fence
 | Off-instance copy of the nightly backups (`BACKUP_UPLOAD_CMD`) and an external dead-man monitor | recommended; a backup on the same volume does not survive losing the instance | INSTALL 6.1, OPERATIONS section 14 |
 | Reed before or after the first cycle | after (Caterer only at first; Reed needs you for about 30 minutes) | INSTALL 9.8 and step 12 |
 | Zero data retention at the AI Gateway | decided from the result of INSTALL 7.5 | SCREENING section 12 |
-| Screening engine: Jev alone (the Vercel AI Gateway carries no other model; no language model in screening); an unsure card is settled by the review policy (reject before the unlock, approve after it) | `jev_only`, decided 2026-09-30; other models later through the Hermes runtime | SCREENING section 16, DECISIONS OD-I, INSTALL 13 |
+| Screening engine: Jev alone (the Vercel AI Gateway carries no other model; no language model in screening); Jev decides every card by forced choice from the editable criteria (approve, or reject a clear mismatch) and the review policy settles only the rare fallback card | `jev_only`, decided 2026-09-30; other models later through the Hermes runtime | SCREENING section 16, SCREENING-CRITERIA, DECISIONS OD-I and SCR-29, INSTALL 13 |
+| CV screening after the unlock: shadow first (records what it would do, blocks nothing), then `CV_SCREEN=on` only after a recruiter panel audited every would-be reject; the three questions of CV-SCREENING section 9 (automated rejection, porter-only histories, a rejected person not offered again for another role) | `shadow` from the first run after Update B; the owner decides `on` after the shadow week | CV-SCREENING section 10, DECISIONS OD-L and CVS-4, ACCEPTANCE SR13 and DC9, KNOWN-LIMITS K-CV1 |
 | Whether the data bundle travels through git or out of band | git, protected by its passphrase (permanent in history) | CUTOVER step 5, SECURITY section 5 |
 | When the old laptop system is retired | after the acceptance gate | TEARDOWN |
 
@@ -59,4 +62,4 @@ If time is short, the honest minimum is in the table in CUTOVER section 1: fence
 
 ## 6. Reading order
 
-`README.md` (map of the repository), `docs/CUTOVER.md` (you, today), `OPERATOR-PROMPT.md` (what you paste), `docs/INSTALL.md` (what the operator does), `docs/ACCEPTANCE.md` (go-live checks), `docs/OPERATIONS.md` (day to day), `docs/KNOWN-LIMITS.md`, `docs/ROLLBACK.md`, `docs/TEARDOWN.md`, `docs/SECURITY.md`, `docs/ENV.md`, `docs/SCREENING.md`, `docs/UPDATE-JEV-ONLY.md` (updating an instance that is already installed), `docs/DECISIONS.md`, `docs/LEGACY-MAP.md`, `docs/DESIGN.md`.
+`README.md` (map of the repository), `docs/CUTOVER.md` (you, today), `OPERATOR-PROMPT.md` (what you paste), `docs/INSTALL.md` (what the operator does), `docs/ACCEPTANCE.md` (go-live checks), `docs/OPERATIONS.md` (day to day), `docs/KNOWN-LIMITS.md`, `docs/ROLLBACK.md`, `docs/TEARDOWN.md`, `docs/SECURITY.md`, `docs/ENV.md`, `docs/SCREENING.md`, `docs/SCREENING-CRITERIA.md`, `docs/CV-SCREENING.md`, `docs/UPDATE-JEV-ONLY.md` and `docs/UPDATE-B.md` (updating an instance that is already installed), `docs/DECISIONS.md`, `docs/LEGACY-MAP.md`, `docs/DESIGN.md`.

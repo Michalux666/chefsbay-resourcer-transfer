@@ -12,8 +12,12 @@ const OWNED = [
   'resourcer/scripts/caterer-ai-review.js',
   'resourcer/scripts/lib/screening-health.js',
   'resourcer/config/screening.json',
+  'resourcer/config/screening-criteria.json',
   'tools/screening-report.js',
+  'tools/screening-operating-point.js',
+  'tools/gold-rows.js',
   'docs/SCREENING.md',
+  'docs/SCREENING-CRITERIA.md',
   'docs/parity/screening.md',
 ];
 function collect(dir, out) {

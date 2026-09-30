@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -161,7 +161,7 @@ test('docs/ENV.md documents every environment variable the code reads, and names
       while ((m = re.exec(s))) used.add(m[1]);
     }
     // Local aliases such as E('SCREEN_ENGINE') or envNum('RESOURCER_X', 5): a setting family name as the first argument of a call.
-    const fam = /^(RESOURCER|SCREEN|PHASE1|BACKUP|BUNDLE|CHROMIUM|AI_GATEWAY|HERMES|PLUGIN|CATERER|REED|SMOKE|PF|E2E|SUP|P1)_/;
+    const fam = /^(RESOURCER|SCREEN|CV|PHASE1|BACKUP|BUNDLE|CHROMIUM|AI_GATEWAY|HERMES|PLUGIN|CATERER|REED|SMOKE|PF|E2E|SUP|P1)_/;
     const markers = /^(REED_AUTH_FAILED|REED_CRED_OK|REED_LOGIN_BLOCKED_TURNSTILE|REED_LOGIN_OK|REED_RELOGIN_NEEDED|REED_TOKEN_REFRESHED)$/;
     for (const m of s.matchAll(/[A-Za-z_.\]]\(\s*(['"])([A-Z][A-Z0-9_]{4,})\1\s*[,)]/g)) {
       if (fam.test(m[2]) && !m[2].endsWith('_') && !markers.test(m[2])) used.add(m[2]);
@@ -400,4 +400,84 @@ test('UPDATE-JEV-ONLY.md copies exactly the installed files that changed since t
     assert.ok(note.split(cp).length >= 3, `the note must copy ${f} on update and again on rollback`);
   }
   assert.ok(!/dashboard plugin are unchanged/.test(note), 'the plugin changed: the note may not say it did not');
+});
+
+// ---- Update B (screening criteria and the CV stage) ---------------------------------------------------
+
+const noQuotes = (b) => b.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+
+test('UPDATE-B.md: only commands this operator may run, code before canaries before resume, no setting is changed, and a rollback that needs none', () => {
+  const t = read('docs/UPDATE-B.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 30, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    if (/^(Sam Sampleperson|Robin Roleplay)\n/.test(b)) continue;
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the update changes no setting: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  const prose = t.split('/opt/hermes/bin/hermes -p resourcer').join('').split('hermes -p resourcer config set CV_SCREEN on').join('');
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(prose), 'a bare hermes command');
+  const at = (needle) => { const i = t.indexOf(needle); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const copy = at('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md');
+  const full = at('check-manifest.js --expect <NEW_DIGEST>');
+  const batch = at('scripts/ai-review.js --mode batch');
+  const cvCanary = at('scripts/cv-review.js --job "Chef de Partie" --cv-file /opt/data/profiles/resourcer/install-work/canary-cv.txt --no-shadow');
+  const cvCanaryNo = at('canary-cv-no.txt --no-shadow');
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
+  const report = at('scripts/cv-report.js --days 1 --mode shadow');
+  assert.ok(pause < pull && pull < verify && verify < copy && copy < full && full < batch && batch < cvCanary && cvCanary < cvCanaryNo && cvCanaryNo < resume && resume < report,
+    'order: pause, pull, verify, copy, full check, canaries, resume, report');
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/canary-cv\.txt/);
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/canary-cv-no\.txt/);
+  assert.match(t, /never set `CV_SCREEN`/);
+  assert.match(t, /start with `d60d917`/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(rollback, /nothing to set back/);
+});
+
+test('UPDATE-B.md canary commands and invented CVs are character for character those of INSTALL 7.3 and 7.6', () => {
+  const note = fences(read('docs/UPDATE-B.md'));
+  const install = fences(read('docs/INSTALL.md'));
+  const canaries = note.filter((b) => /scripts\/(?:ai-review|cv-review)\.js/.test(b) || /^(Sam Sampleperson|Robin Roleplay)\n/.test(b));
+  assert.equal(canaries.length, 6, 'batch, single, two CV files and two CV runs');
+  for (const b of canaries) assert.ok(install.includes(b), `not in INSTALL: ${b.slice(0, 100)}`);
+});
+
+test('UPDATE-B.md copies exactly the installed files that changed since Update A, and says nothing else changed', (t) => {
+  const changed = gitLines(['diff', '--name-only', 'd60d917']);
+  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+  if (!changed || !added) { t.skip('no git history with Update A here'); return; }
+  const files = changed.concat(added);
+  const note = read('docs/UPDATE-B.md');
+  const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');
+  assert.deepEqual(wrappers, [], 'a cron wrapper, the job list or SOUL.md changed: the note says they did not');
+  assert.deepEqual(files.filter((f) => f.startsWith('plugin/')), [], 'the dashboard plugin changed: the note says it did not');
+  assert.ok(!files.includes('resourcer/package.json'), 'package.json changed: the note says no npm install');
+  const installed = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example');
+  assert.deepEqual(installed.sort(), ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md']);
+  assert.ok(note.includes('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md'));
+  assert.ok(note.includes('hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/'));
+  assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
+});
+
+test('CV_SCREEN defaults to shadow in the code and in every document that gives its default', () => {
+  const { screenMode } = require(path.join(REPO, 'resourcer/scripts/lib/cv/config.js'));
+  assert.equal(screenMode(undefined).mode, 'shadow');
+  assert.equal(screenMode('').mode, 'shadow');
+  assert.equal(screenMode('sahdow').mode, 'shadow');
+  assert.equal(screenMode('off').mode, 'off');
+  assert.equal(screenMode('on').mode, 'on');
+  assert.match(read('docs/ENV.md'), /^\| `CV_SCREEN` \| `shadow` /m);
+  assert.match(read('docs/CV-SCREENING.md'), /`CV_SCREEN` \(profile `\.env`\) \| `shadow` \(default/);
+  for (const f of LIVE_DOCS.concat(['docs/CV-SCREENING.md', 'docs/DECISIONS.md', 'docs/parity/cv-stage.md'])) {
+    assert.ok(!/CV_SCREEN[^\n]{0,40}(?:default `?off|\(default\) `?off|defaults to `?off)/i.test(read(f)), `${f} says CV_SCREEN defaults to off`);
+  }
 });
