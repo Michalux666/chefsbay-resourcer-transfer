@@ -4,11 +4,12 @@
  *
  *   node scripts/cv-review.js --job "<searched role>" --cv-file <path> [--file-type pdf|docx|doc|rtf|txt]
  *   node scripts/cv-review.js --job "<searched role>" --record-file <json>      (an already parsed, redacted record)
+ *   node scripts/cv-review.js --self-test      (no network: the PDF and Word readers on two invented files; one line, CV_SELF_TEST_OK pdf docx)
  *   stdout   one JSON line: {decision, final, lane, forced, confidence, pReject, reasonCodes, finalReasonCodes, policy, evidence, searchLevel, model, ...}
  *            Jev unavailable: API_UNAVAILABLE:<detail>   (no newline, nothing before it: the same contract as ai-review.js)
  *   stderr   SCREENING_MODEL: <label>   (on success AND on failure), the token API_UNAVAILABLE on failure, and then
- *            SCREENING_REASON: unreachable|auth|credits|error   (which fixed halt reason applies; Phase 2 reads it)
- *   exit     0 a decision was made (any decision), 1 usage or internal error, 3 Jev unavailable
+ *            SCREENING_REASON: unreachable|auth|credits|error|cvconfig   (which fixed halt reason applies; Phase 2 reads it; cvconfig = the criteria file is broken or missing)
+ *   exit     0 a decision was made (any decision), 1 usage or internal error, 3 Jev unavailable (or a broken criteria file: nothing is decided)
  *
  * The CV is read from the file, personal data is removed, the work history is structured and only that structured, redacted
  * history goes to Jev. Nothing of the CV or the redacted text is ever written to disk. One aggregate row per decision is
@@ -26,7 +27,7 @@ const cv = require('./lib/cv');
 const { maybePrune } = require('./lib/cv/shadow');
 
 const VALUE_FLAGS = new Set(['job', 'cv-file', 'file-type', 'record-file', 'known-file', 'candidate-id', 'source', 'run-id', 'mode', 'now', 'config']);
-const BOOL_FLAGS = new Set(['help', 'h', 'no-shadow', 'prune']);
+const BOOL_FLAGS = new Set(['help', 'h', 'no-shadow', 'prune', 'self-test']);
 const FILE_TYPES = ['pdf', 'docx', 'doc', 'rtf', 'txt'];
 const MAX_CV_BYTES = 12 * 1024 * 1024;
 
@@ -35,6 +36,7 @@ function usageLines() {
     'Usage:',
     '  node scripts/cv-review.js --job "<searched role>" --cv-file <path> [--file-type pdf|docx|doc|rtf|txt]',
     '  node scripts/cv-review.js --job "<searched role>" --record-file <json>',
+    '  node scripts/cv-review.js --self-test',
     '  node scripts/cv-review.js --help',
   ];
 }
@@ -56,6 +58,9 @@ function helpText() {
     '  --no-shadow                Do not write the shadow row.',
     '  --config <file>            Criteria file (default config/cv-screening.json).',
     '  --prune                    Only delete shadow rows older than the retention (180 days) and exit.',
+    '  --self-test                No network, no key, no config: builds a tiny invented PDF and Word file in memory, runs the real readers on them and prints one line,',
+    '                             CV_SELF_TEST_OK pdf docx (exit 0) or CV_SELF_TEST_FAILED <file type>:<reason code> (exit 1). Run it at install: a reader that cannot load',
+    '                             (pdf-parse, mammoth) would otherwise turn every PDF into "unreadable", a pass, and only show after ten CVs.',
     '',
     'Environment: AI_GATEWAY_API_KEY (required, read from the profile .env), SCREEN_GATEWAY_ORIGIN, SCREEN_JEV_MODEL, SCREEN_JEV_TIMEOUT_MS,',
     '  SCREEN_MAX_ATTEMPTS, SCREEN_ZDR / SCREEN_JEV_ZDR (as for screening), CV_FALLBACK_POLICY (approve|reject), CV_REJECT_ABOVE (0 to 1),',
@@ -68,7 +73,7 @@ function helpText() {
     'Exit codes:',
     '  0  a decision was made',
     '  1  usage or internal error',
-    '  3  Jev unavailable (API_UNAVAILABLE)',
+    '  3  Jev unavailable (API_UNAVAILABLE), or the criteria file config/cv-screening.json is broken or missing (SCREENING_REASON: cvconfig): nothing is decided',
     '',
   ].join('\n');
 }
@@ -123,8 +128,14 @@ async function main(argv, io) {
   try {
     const args = parseArgs(argv);
     if (args.help || args.h) { w.err(helpText()); return 0; }
+    if (args['self-test']) {
+      const selftest = require('./lib/cv/selftest');
+      const st = await selftest.run();
+      await w.out(`${selftest.line(st)}\n`);
+      return st.ok ? 0 : 1;
+    }
 
-    const cfg = cv.loadConfig(args.config && args.config !== true ? { file: String(args.config) } : undefined);
+    const cfg = cv.loadConfig(args.config && args.config !== true ? { file: String(args.config), fileRequired: true } : undefined);
     for (const warning of cfg.warnings) log(`WARN cv config: ${warning}`);
     try { maybePrune({ days: cfg.shadow.retentionDays }); } catch (e) { /* best effort */ }
     if (args.prune) return 0;

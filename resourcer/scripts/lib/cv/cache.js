@@ -82,7 +82,40 @@ class AnswersCache {
   }
 }
 
-const titleKey = t => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+/**
+ * Runs fn while holding a lock file (created exclusively, stolen when older than 10 s, waited for at most 3 s; after that fn runs without the
+ * lock: a cache write must never block or fail a decision). Synchronous, so a put() is one step for its caller.
+ */
+function withFileLock(lockFile, fn) {
+  let fd = null;
+  const token = `${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      fd = fs.openSync(lockFile, 'wx', 0o600);
+      try { fs.writeSync(fd, token); } catch (e) { /* an unreadable token only means the lock is left for its age limit */ }
+      break;
+    } catch (e) {
+      if (!e || e.code !== 'EEXIST') break; // cannot lock here (read-only folder): go on without
+      try {
+        if (Date.now() - fs.statSync(lockFile).mtimeMs > 10000) { fs.unlinkSync(lockFile); continue; }
+      } catch (e2) { /* the lock vanished or cannot be inspected: the wait bound below still applies */ }
+      if (Date.now() - t0 > 3000) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 + Math.floor(Math.random() * 15));
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (e) { /* gone */ }
+      // only our own lock: one that was stolen after 10 s now belongs to another writer
+      try { if (fs.readFileSync(lockFile, 'utf8') === token) fs.unlinkSync(lockFile); } catch (e) { /* gone */ }
+    }
+  }
+}
+
+const titleKey = (t) => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
 class SearchLevels {
   /**
@@ -97,10 +130,15 @@ class SearchLevels {
     this.data = null;
   }
 
+  // The file as it is on disk now (an empty store when it is absent, unreadable, of another version or written for another question wording).
+  readFile() {
+    const raw = fsx.readJson(this.file, null);
+    return raw && raw.v === 1 && raw.qhash === this.qhash && raw.entries && typeof raw.entries === 'object' && !Array.isArray(raw.entries) ? raw : { v: 1, qhash: this.qhash, entries: {} };
+  }
+
   load() {
     if (this.data) return;
-    const raw = fsx.readJson(this.file, null);
-    this.data = raw && raw.v === 1 && raw.qhash === this.qhash && raw.entries && typeof raw.entries === 'object' ? raw : { v: 1, qhash: this.qhash, entries: {} };
+    this.data = this.readFile();
   }
 
   get(title) {
@@ -113,15 +151,29 @@ class SearchLevels {
     return Number.isFinite(at) && this.now() - at < this.ttlMs ? entry : null;
   }
 
+  /**
+   * Remembers one title. Phase 2 runs up to four reviewer processes at once, and each of them used to write its whole in-memory copy, so the
+   * processes erased each other's titles and asked Jev for the same level again (16 requests for 5 titles in the rehearsal). The file is
+   * therefore read again under a short lock file, merged (the newer entry of a title wins) and only then written atomically.
+   */
   put(title, entry) {
     this.load();
-    this.data.entries[titleKey(title)] = { ...entry, at: new Date(this.now()).toISOString() };
-    const keys = Object.keys(this.data.entries);
-    if (keys.length > 500) {
-      keys.sort((a, b) => String(this.data.entries[a].at).localeCompare(String(this.data.entries[b].at)));
-      for (const k of keys.slice(0, keys.length - 500)) delete this.data.entries[k];
-    }
-    try { fsx.writeJsonAtomic(this.file, this.data, 0o600); } catch (e) { /* best effort */ }
+    const key = titleKey(title);
+    this.data.entries[key] = { ...entry, at: new Date(this.now()).toISOString() };
+    try {
+      fsx.ensureDir(path.dirname(this.file), 0o700);
+      withFileLock(`${this.file}.lock`, () => {
+        // what this process knew, then what is on disk now (other processes' titles win for their own keys), then the title just asked
+        const entries = { ...this.data.entries, ...this.readFile().entries, [key]: this.data.entries[key] };
+        const keys = Object.keys(entries);
+        if (keys.length > 500) {
+          keys.sort((a, b) => String(entries[a].at).localeCompare(String(entries[b].at)));
+          for (const k of keys.slice(0, keys.length - 500)) delete entries[k];
+        }
+        this.data = { v: 1, qhash: this.qhash, entries };
+        fsx.writeJsonAtomic(this.file, this.data, 0o600);
+      });
+    } catch (e) { /* best effort: the next request asks again */ }
   }
 }
 
@@ -146,4 +198,4 @@ function recordStreak(o) {
   return { count, trip: count >= o.max };
 }
 
-module.exports = { AnswersCache, SearchLevels, recordStreak, answersKey, titleKey, sha, answersFile, levelsFile, streakFile };
+module.exports = { AnswersCache, SearchLevels, withFileLock, recordStreak, answersKey, titleKey, sha, answersFile, levelsFile, streakFile };

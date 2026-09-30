@@ -7,6 +7,7 @@ const { dbWrite, idStr } = require('./db');
 const { writeCheckpoint, writeStatus } = require('./queue');
 const { argVal, screeningModelFrom } = require('./screen');
 const { KINDS, markIncomplete, raiseAlert } = require('./incomplete');
+const cvHold = require('./cv-hold');
 const cities = require('./cities');
 const { safeText, maskEmail, parseFailure } = require('./util');
 
@@ -102,6 +103,8 @@ async function unlockPass(ctx, cardsForUnlock) {
       out('STOPPING unlocks: candidates.db is not usable');
       break;
     }
+    // the halt may have been raised by a Phase 2 of another run while this loop was running: no credit is spent after it
+    if (cvHold.stopIfBlocked(ctx, 'before an unlock')) break;
     const cardId = idStr(card.id);
     const cardPc = card.postcode;
 

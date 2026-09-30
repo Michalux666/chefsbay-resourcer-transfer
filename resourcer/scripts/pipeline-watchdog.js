@@ -35,6 +35,7 @@ const timeLib = require('./lib/time');
 const tick = require('./lib/tick');
 const runnerLib = require('./watchdog-runner');
 const pendingGate = require('./pending-gate');
+const { PHASE2_HELD_EXIT } = require('./lib/phase2-exit');
 
 const C = {
   OPEN_HOUR: 6,
@@ -60,6 +61,11 @@ const C = {
   PROBE_FAILS_BEFORE_HALT: 2,
   PROBE_STREAK_EXPIRE_MS: 5 * 60000,
   HALT_PROBE_MS: 60000,
+  // A halt that was cleared twice within this window while a CV-held queue was waiting, and was raised again, is not cleared a third time by the supervisor:
+  // the CV canary (one small invented request) passes while real CVs still fail, so the clear would only start another run that unlocks credits and holds again.
+  FLAP_WINDOW_MS: 6 * 3600000,
+  FLAP_MAX_CLEARS: 2,
+  FLAP_PROBE_MS: 15 * 60000,
   MIN_MEM_MB: 700,
   ORPHAN_MIN_AGE_MS: 120000,
   REGISTER_WAIT_MS: 15000,
@@ -190,6 +196,7 @@ function defaultState() {
     launchNotBefore: 0,
     probeFail: { count: 0, lastAt: 0 },
     haltProbeAt: 0,
+    heldClears: [],
     lastMaintenanceAt: 0,
     lastSlowCheckAt: 0,
     handledRunNonce: null,
@@ -506,6 +513,16 @@ function handleResult(ctx, state, res) {
         meta: { reason: res.reason || null, retryAfter: new Date(state.staleCooldownUntil).toISOString() },
       });
     }
+    return;
+  }
+  if (code === PHASE2_HELD_EXIT) {
+    // The run unlocked its candidates but Phase 2 was HELD: CV screening (CV_SCREEN=on) could not reach Jev (or its criteria file is not usable).
+    // Not a success (no failure counter is cleared, the never-screened check does not see it) and not a failure either: the territory is not at
+    // fault, so no failure count, no quarantine and no run-failures alert, and no long back-off. Phase 2 raised the screening halt and its one
+    // critical alert; the halt keeps every new run (and so every new unlock) from starting until the CV route answers a canary, and the queue
+    // is retried by the stranded-run recovery once it clears.
+    state.launchNotBefore = Math.max(state.launchNotBefore || 0, endedMs + C.POLL_MS);
+    ctx.log('runner finished a run whose Phase 2 was HELD (CV screening could not run; nothing was lost) - no new run starts while the screening halt is up');
     return;
   }
   if (code === 0) {
@@ -873,7 +890,7 @@ async function preflight(ctx, state, gate) {
       ctx.log(`still HALTED: ${deep.reason}`, 'error');
       return { ok: false, reason: 'halted' };
     }
-    ctx.halt.clearHalt();
+    if (!clearVerifiedHalt(ctx, state)) return { ok: false, reason: 'halted' };
     ctx.log('screening healthy again - halt cleared, queue resumes');
   }
 
@@ -884,6 +901,63 @@ async function preflight(ctx, state, gate) {
     return { ok: false, reason: 'low-memory' };
   }
   return { ok: true, job, queueDepth };
+}
+
+// Clear the screening halt after a healthy verification, unless that would be the third clear within FLAP_WINDOW_MS while a held queue is waiting
+// (see FLAP_MAX_CLEARS). Clears with no held queue (a snippet outage, a key problem) are never counted. Returns true when the halt was cleared.
+function clearVerifiedHalt(ctx, state) {
+  const now = ctx.now();
+  if (hasHeldQueue(ctx)) {
+    state.heldClears = (Array.isArray(state.heldClears) ? state.heldClears : []).filter((t) => Number.isFinite(t) && t <= now && now - t < C.FLAP_WINDOW_MS);
+    if (state.heldClears.length >= C.FLAP_MAX_CLEARS) {
+      state.haltProbeAt = now + C.FLAP_PROBE_MS;
+      ctx.halt.setHalt('screening halt keeps returning',
+        `The supervisor cleared the screening halt ${state.heldClears.length} times in the last ${Math.round(C.FLAP_WINDOW_MS / 3600000)} h and CV screening held the queue again each time: the CV route answers its small test request but fails on real CVs. Nothing more is unlocked and the held queue is kept.`,
+        { remedy: 'Look at the CV route (the Phase 2 log and node scripts/cv-report.js --days 1 --mode on), fix the cause, then node scripts/pipeline-halt-cli.js clear (docs/OPERATIONS.md section 6). Or set CV_SCREEN shadow.' });
+      ctx.log('screening verifies healthy, but the halt has returned after every clear: NOT clearing it again (needs a manual clear)', 'error');
+      return false;
+    }
+    state.heldClears.push(now);
+  } else {
+    state.heldClears = [];
+  }
+  ctx.halt.clearHalt();
+  return true;
+}
+
+// A queue that CV screening HELD (phase2Hold in its status file) is retried by the stranded-run recovery only once the screening halt is gone, and the halt
+// is otherwise re-verified only when a READY pending search exists. With the queue empty (the held run's own pending search was consumed) the halt would
+// wait for the next queued territory, so the tick verifies it on the same 60 s rate when a held queue is waiting.
+function hasHeldQueue(ctx) {
+  let names;
+  try { names = fs.readdirSync(ctx.dirs.runs); } catch { return false; }
+  for (const f of names) {
+    if (!/^phase1-.*\.json$/.test(f)) continue;
+    try {
+      const raw = fs.readFileSync(path.join(ctx.dirs.runs, f), 'utf8');
+      const d = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+      if (d && d.phase2Hold && d.status !== 'complete' && !d.phase2Complete) return true;
+    } catch { /* unreadable: skip */ }
+  }
+  return false;
+}
+
+async function verifyHeldHalt(ctx, state) {
+  const halted = ctx.halt.getHalt();
+  if (!halted || !halted.halted) return { checked: false };
+  if (ctx.now() < state.haltProbeAt) return { checked: false };
+  if (!hasHeldQueue(ctx)) return { checked: false };
+  state.haltProbeAt = ctx.now() + C.HALT_PROBE_MS;
+  ctx.log(`halted (${halted.reason}) and a held queue is waiting - verifying screening before it is retried`);
+  const deep = await screeningCheck(ctx, true);
+  if (!deep.ok) {
+    ctx.halt.setHalt(deep.reason || 'screening gateway unreachable', deep.detail || '', { remedy: deep.remedy || REMEDY });
+    ctx.log(`still HALTED: ${deep.reason}`, 'error');
+    return { checked: true, ok: false };
+  }
+  if (!clearVerifiedHalt(ctx, state)) return { checked: true, ok: false };
+  ctx.log('screening healthy again - halt cleared, the held queue is retried by the recovery');
+  return { checked: true, ok: true };
 }
 
 async function launchRunner(ctx, state, gate, info) {
@@ -1005,7 +1079,10 @@ async function iterate(ctx, state, o) {
   } else {
     state.gateErrors = 0;
   }
-  if (gate.status !== 'READY') return { exit: true, reason: `gate-${gate.status.toLowerCase()}` };
+  if (gate.status !== 'READY') {
+    try { await verifyHeldHalt(ctx, state); } catch { /* a failed verification is retried on the next tick */ }
+    return { exit: true, reason: `gate-${gate.status.toLowerCase()}` };
+  }
 
   const pf = await preflight(ctx, state, gate);
   if (!pf.ok) return { exit: true, reason: pf.reason };
@@ -1240,7 +1317,7 @@ async function main(argv) {
 module.exports = {
   C, NONTERMINAL_STATUSES, PIPELINE_PROC_RE: runnerLib.PIPELINE_PROC_RE,
   inOperatingHours, tickLimits, makeCtx, dbFitCheck, streakDue, recordTerritoryFailure, guardRunLogs, releaseClaim, clearStaleBrowserLock, loadState, saveState, defaultState, checkGate, releaseOrphanedLocks, cullGhost, runQueueDue,
-  checkPushDrought, slowChecks, handleResult, reconcileRun, superviseRun, settleAfterResume, noteClockJump, preflight, launchRunner, iterate, runTick, statusReport,
+  checkPushDrought, slowChecks, handleResult, reconcileRun, superviseRun, settleAfterResume, noteClockJump, preflight, verifyHeldHalt, clearVerifiedHalt, hasHeldQueue, launchRunner, iterate, runTick, statusReport,
 };
 
 if (require.main === module) {

@@ -46,11 +46,13 @@ class UsageError extends Error {
   }
 }
 
-// The fixed reason key (see screening-health.js REASONS) for a failure.
+// The fixed reason key (see screening-health.js REASONS) for a failure: unreachable, auth, credits, error, config.
 function reasonKeyOf(err) {
   if (!err) return 'error';
   if (err.kind === 'auth') return 'auth';
   if (err.kind === 'credits') return 'credits';
+  if (err.kind === 'config') return 'config'; // a broken or missing criteria file: our own fault, not the gateway's
+  if (err.kind === 'cvconfig') return 'cvconfig'; // the same for config/cv-screening.json
   if (err.kind === 'transient') return err.status ? 'error' : 'unreachable';
   return 'error';
 }

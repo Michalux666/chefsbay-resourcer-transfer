@@ -21,7 +21,8 @@
 #
 # Scenarios (tests/e2e/NN-*.e2e.js): 01 install path, 02 happy path, 03 screening outage, 04 Caterer session paths,
 # 05 kill -9 recovery, 06 suspend/resume, 07 Reed off/on, 08 dashboard, 09 backup, 10 retention and maintenance,
-# 11 secrets hygiene, 12 missing database guard, 13 the Jev-only default engine, 14 CV screening after the unlock (shadow by default, on, off).
+# 11 secrets hygiene, 12 missing database guard, 13 the Jev-only default engine, 14 CV screening after the unlock (shadow by default, on, off),
+# 15 CV_SCREEN=on with the CV route refusing while the snippet route is healthy (one hold, the halt stays, no unlock after it, the recovery completes the queue).
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
 # at $E2E_VENV, default ~/hermes-sim-venv, and filled with pip), E2E_SEED (random-kill seed, default 20260929),

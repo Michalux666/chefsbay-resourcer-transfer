@@ -429,8 +429,8 @@ typed in lower case within the first two words after the rank (or after the card
 (2026-09-30, SCR-26: before that only capitalised names after a 1 to 3 digit rank were, and a backtest of 952 historical cards
 found 149 with a 4-digit rank and 132 with a lower-case name, whose names would have been sent to Jev; a lower-case word
 that follows the name and is not a job word is taken for a surname too, so an unusual lower-case headline word right after
-the name can be removed with it). Numbers written
-without a leading 0 or +, street addresses, obfuscated e-mails and uncased scripts are not caught.
+the name can be removed with it). Two more classes were closed in Update C (2026-09-30; a scan of 952 real cards, counts only, had left one card whose leading name was not removed and one 13-digit number behind a label): a leading name that starts with a particle (De La ...), an initial (J. R. ...), an honorific (Mr, Dr), a typographic apostrophe (O', D'), a separate accent mark or a script without capitals is removed as one to four name tokens up to the job title (with a name cue at the start even when the title does not begin with a job word), and a number of ten or more digits, or nine or more behind a label (Mobile, Tel, Phone, Contact, WhatsApp, Call), is masked. A plain name of four capitalised words still loses only its first two (docs/KNOWN-LIMITS.md K-CV14). Numbers written
+without a leading 0 or +, street addresses, obfuscated e-mails and any name in a script without capitals that does not stand first on the card are not caught.
 Tests plant a fake name and postcode and check that neither reaches the model, Jev or the log. Treat the
 shadow log as personal data (below).
 
@@ -565,7 +565,7 @@ Run (the quoted pattern matters: a bare directory name does not work with Node 2
 `node --test "tests/screening/*.test.js"`. They use a fake gateway on 127.0.0.1, fake keys and
 synthetic candidates, and refuse any other network address.
 
-The redaction of rank prefixes and name case is pinned by `tests/screening/redact-rank-case.test.js`; the owner's non-kitchen titles and the
+The redaction of rank prefixes and name case is pinned by `tests/screening/redact-rank-case.test.js`, and the Update C classes by `tests/screening/redact-leaks.test.js` (invented examples of the same shapes, and proofs that job titles and dates are not cut); the owner's non-kitchen titles and the
 injection bar by `tests/screening/ladder-titles-injection.test.js`. The criteria design has its own suites: `criteria.test.js` (the file and its
 checks), `card.test.js` (the facts read from the card text, including the application count), `questions.test.js` and `client-criteria.test.js`
 (the request), `decide.test.js` (one scenario per archetype of the ladder design, re-asked of the criteria), `decide-criteria.test.js`,

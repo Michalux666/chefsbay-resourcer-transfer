@@ -33,7 +33,8 @@ alerts; it changes nothing. Live files you may read with the file viewer: `R/run
 login_failed, relogin), `R/runtime/reed-status.json` (`ok`, `auth_failed`, `disabled`), `R/runtime/backup-status.json`,
 `R/runtime/pipeline-halt.json`, `R/runtime/last-run.json` (result of the last run: `exitCode`, `reason`, `pool`, `approved`).
 Runner exit codes in `last-run.json`: 0 done, 10 nothing to do or browser busy, 11 Caterer session stale (reasons safelist, login,
-session-timeout, cvdb-module, phase1-session-stale), 12 phase 1 failed, 13 killed at 70 minutes, 1 runner error.
+session-timeout, cvdb-module, phase1-session-stale), 12 phase 1 failed, 13 killed at 70 minutes, 14 Phase 2 held (reason phase2-held: CV screening
+in mode on could not run, nothing was lost, the halt is up; neither a success nor a failure), 1 runner error.
 
 ## 2. Request one search
 

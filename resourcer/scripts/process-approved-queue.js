@@ -675,6 +675,11 @@ async function run(queuePathArg, injected) {
       }
       return { code: 2, reason: 'cv-screening-unavailable', held, runId };
     };
+    // A criteria file that is broken or missing never decides anything (fail closed, like the snippet criteria): mode on holds the queue, shadow
+    // skips the stage with one warning alert below; neither ever rejects a candidate on the strength of a broken file.
+    const cvFault = cvCfg && cvCfg.fault ? cvCfg.fault : null;
+    if (cvFault) console.log(`[Phase 2] WARN CV screening criteria are not usable: ${cvFault.detail}`);
+    if (cvMode === 'on' && candidates.length > 0 && cvFault) return holdRun(cvFault.detail, candidates.length, cvFault.key);
     if (cvMode === 'on' && candidates.length > 0 && cvStage.screeningHalted()) return holdRun('the screening halt is up', candidates.length);
 
     // Refresh the Zoho token once so child calls do not trigger their own refreshes.
@@ -859,7 +864,13 @@ async function run(queuePathArg, injected) {
     let cvSummary = null;
     const cvShadowHalted = cvMode === 'shadow' && cvStage.screeningHalted();
     if (cvShadowHalted) console.log('\n[Phase 2] WARN CV screening (shadow) skipped: the screening halt is up, so Jev is not reachable; nothing was blocked');
-    if (cvMode !== 'off' && !cvShadowHalted) {
+    if (cvMode === 'shadow' && cvFault && !cvShadowHalted) {
+      // shadow (mode on returned above, or has nothing to screen): the stage does not run on a broken file, and blocks nothing
+      const pending = candidates.filter(c => !toSkipZoho.has(c.id) && retention.isSafeId(c.id)).length;
+      console.log(`\n[Phase 2] WARN CV screening (${cvMode}) skipped: ${cvFault.detail}; ${pending} candidate(s) were not screened; nothing was blocked`);
+      cvSummary = { ...cvStage.newStats(cvMode), configInvalid: true, unscreened: pending };
+      for (const a of cvStage.alertsFor(cvSummary, cvCfg, jobTitle, location)) notify(a);
+    } else if (cvMode !== 'off' && !cvFault && !cvShadowHalted) {
       // cfg.cvScreenConcurrency is only a test seam; the setting is CV_SCREEN_CONCURRENCY / jev.concurrency of the criteria file
       const cvConcurrency = Math.max(1, Math.round(Number(cfg.cvScreenConcurrency) || cvCfg.jev.concurrency));
       console.log(`\n[Phase 2] Step 4.6 - CV screening (${cvMode}, up to ${cvConcurrency} at a time)...`);
@@ -885,7 +896,9 @@ async function run(queuePathArg, injected) {
         const held = [...cvRun.outcomes.values()].filter(o => o.action === 'held').length;
         return holdRun(cvRun.unavailable.detail || 'Jev unavailable', held, cvRun.unavailable.reasonKey);
       }
-      if (cvRun.shadowStopped) console.log(`[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.failures} CVs in a row could not be screened (${cvRun.shadowStopped.detail}); ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`);
+      if (cvRun.shadowStopped) console.log(cvRun.shadowStopped.kind === 'time'
+        ? `[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.seconds} seconds (phase2.shadowMaxSeconds): ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`
+        : `[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.failures} CVs in a row could not be screened (${cvRun.shadowStopped.detail}); ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`);
       else if (cvMode === 'shadow' && cvSummary.unscreened) console.log(`[Phase 2] WARN CV screening (shadow) could not reach Jev for ${cvSummary.unscreened} candidate(s); nothing was blocked`);
       for (const cand of candidates) {
         const o = cvRun.outcomes.get(String(cand.id));
@@ -1146,6 +1159,8 @@ async function run(queuePathArg, injected) {
     const dupCount = phaseResults.filter(r => r.status === 'duplicate').length;
     const skipCount = phaseResults.filter(r => r.status === 'skipped').length;
     const cvRejectedCount = phaseResults.filter(r => r.status === 'cv_rejected').length;
+    // of those, the ones a run before a hold (or an earlier run of this queue) had already rejected: cvScreen counts this run's decisions only
+    const cvRejectedEarlier = phaseResults.filter(r => r.status === 'cv_rejected' && cvRejected.has(r.id) && cvRejected.get(r.id).earlier).length;
     const pushErrCount = phaseResults.filter(r => r.status === 'error').length;
     const dlErrCount = dlTimings.filter(t => t.error).length;
     const totalErrCount = pushErrCount + dlErrCount;
@@ -1240,7 +1255,10 @@ async function run(queuePathArg, injected) {
       errors: totalErrCount,
       downloadErrors: dlErrCount,
       pushErrors: pushErrCount,
-      ...(cvSummary ? { cvRejected: cvRejectedCount, cvScreen: cvSummary } : {}),
+      // cvRejected is the TOTAL of the queue: every candidate rejected by CV screening, including those rejected before a hold. cvScreen counts the
+      // decisions taken in THIS run only (reject = would reject/rejected now); rejectedEarlier is the difference, so the two always reconcile:
+      // cvRejected = cvScreen.rejected + cvScreen.rejectedEarlier in mode on. run_results.skipped carries cvRejected (the dashboard funnel explains every candidate).
+      ...(cvSummary ? { cvRejected: cvRejectedCount, cvScreen: { ...cvSummary, rejectedEarlier: cvRejectedEarlier, scope: 'decisions taken in this run only; cvRejected is every candidate of the queue that CV screening rejected, including rejections made before a hold (rejectedEarlier)' } } : {}),
       // Per-source breakdown: always emitted for caterer/both (reed/both) runs even with 0 candidates.
       catererStats: (() => {
         const catCands = phaseResults.filter(r => !r.source || r.source === 'caterer');
@@ -1362,7 +1380,7 @@ async function run(queuePathArg, injected) {
           candidateCount,
           newToZoho: newCount,
           duplicates: dupCount,
-          skipped: skipCount,
+          skipped: skipCount + cvRejectedCount,
           errors: totalErrCount,
           creditsRemaining,
           lastSearched: today,
@@ -1501,6 +1519,7 @@ async function run(queuePathArg, injected) {
           const existing = JSON.parse(fs.readFileSync(phase1File, 'utf8'));
           const now = new Date().toISOString();
           Object.assign(existing, { status: 'complete', completedAt: now, updatedAt: now, phase2Complete: true });
+          delete existing.phase2Hold; // a hold of an earlier attempt of this queue ended with this run
           safeAtomicWrite(phase1File, existing);
           console.log(`[Phase 2] Phase1 status file updated to "complete": ${path.basename(phase1File)}`);
         } catch (e) {

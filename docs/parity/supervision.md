@@ -83,7 +83,8 @@ Liveness is by PID plus identity, never by command line: a record `{pid, token}`
 
 | Legacy | New | Status |
 |---|---|---|
-| 37-44 exit codes 0/10/11/12/13/1 | `EXIT` | identical |
+| 37-44 exit codes 0/10/11/12/13/1 | `EXIT` | identical; Update C adds 14 (`phase2-held`: Phase 2 held by CV screening in mode `on`; faultless, recorded without a failure count, no quarantine, no alert; `lib/phase2-exit.js`) |
+| (new in Update C) halt of a held queue | `verifyHeldHalt`, `clearVerifiedHalt`, `hasHeldQueue` in `pipeline-watchdog.js` | a halt is re-verified on a tick with no READY search while a queue with `phase2Hold` waits; after two clears within 6 hours with a held queue the third clear is refused (halt `screening halt keeps returning`, K-CV15) |
 | 68 `MAX_RUN_MS` 70 min | `MAX_RUN_MS` (timer armed at phase1 spawn; on firing it re-checks running time and re-arms when the instance was frozen) | identical on a normal day; plus a tick-level backstop (running time + 2 min grace, with the heartbeat read twice before a kill) |
 | 70-77 `log(event, data)` -> `logs/watchdog-runner.jsonl` + console | `makeLogger` | same file and shape `{ts, event, ...}`; redacted |
 | 79-83 `runNode` | `execNode` / `mustRun` | argument arrays, 30 s default |

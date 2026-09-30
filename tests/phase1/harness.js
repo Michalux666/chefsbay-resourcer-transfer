@@ -49,7 +49,7 @@ function makeHome(scenario, opts) {
   fs.mkdirSync(path.join(home, 'scripts', 'lib'), { recursive: true });
   fs.copyFileSync(path.join(SRC, 'scripts', 'phase1.js'), path.join(home, 'scripts', 'phase1.js'));
   copyDir(path.join(SRC, 'scripts', 'phase1'), path.join(home, 'scripts', 'phase1'));
-  for (const lib of ['paths', 'env', 'fsx', 'notify', 'time']) {
+  for (const lib of ['paths', 'env', 'fsx', 'notify', 'time', 'phase2-exit']) {
     fs.copyFileSync(path.join(SRC, 'scripts', 'lib', `${lib}.js`), path.join(home, 'scripts', 'lib', `${lib}.js`));
   }
 

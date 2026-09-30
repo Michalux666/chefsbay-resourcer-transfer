@@ -5,6 +5,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The shipped criteria file: every instance has it (it is part of the release), and a missing file at the default path is a fault (fail closed),
+// so a test home starts with a copy, like an installed instance does. A test of the missing-file case removes it (home.removeConfig()).
+const SHIPPED_CONFIG = path.resolve(__dirname, '..', '..', '..', 'resourcer', 'config', 'cv-screening.json');
+
 function makeHome(prefix) {
   const base = process.env.LIFECYCLE_TEST_TMP || os.tmpdir();
   fs.mkdirSync(base, { recursive: true });
@@ -39,7 +43,9 @@ function makeHome(prefix) {
         fs.mkdirSync(path.join(home, d), { recursive: true });
       }
       for (const f of ['candidates.db', 'candidates.db-wal', 'candidates.db-shm']) fs.rmSync(path.join(home, f), { force: true });
+      fs.copyFileSync(SHIPPED_CONFIG, path.join(home, 'config', 'cv-screening.json'));
     },
+    removeConfig() { fs.rmSync(path.join(home, 'config', 'cv-screening.json'), { force: true }); },
     writeConfig(obj) {
       fs.mkdirSync(path.join(home, 'config'), { recursive: true });
       fs.writeFileSync(path.join(home, 'config', 'cv-screening.json'), typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2));

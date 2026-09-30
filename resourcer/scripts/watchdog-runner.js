@@ -20,6 +20,8 @@
  *   11  Caterer session stale, safe-list blocked or CV Database module failing (phase1 exit 2, or the pre-run session check)
  *   12  phase1 exited non-zero for another reason (params/url/territory/lock/fatal)
  *   13  phase1 exceeded the 70-minute ceiling and was killed
+ *   14  Phase 2 was HELD: CV screening (CV_SCREEN=on) could not reach Jev or its criteria file is not usable; nothing was lost, the screening halt
+ *       is up and the queue is retried once it clears. Neither a success nor a failure: the territory is not at fault (docs/CV-SCREENING.md)
  *   1   runner-level error (gate/init/spawn failure) before or around the run
  */
 const fs = require('fs');
@@ -31,7 +33,9 @@ const fsx = require('./lib/fsx');
 const tick = require('./lib/tick');
 const gate = require('./pending-gate');
 
-const EXIT = { OK: 0, NO_WORK: 10, SESSION_STALE: 11, PHASE1_FAILED: 12, KILLED: 13, ERROR: 1 };
+const { PHASE2_HELD_EXIT } = require('./lib/phase2-exit');
+
+const EXIT = { OK: 0, NO_WORK: 10, SESSION_STALE: 11, PHASE1_FAILED: 12, KILLED: 13, HELD: PHASE2_HELD_EXIT, ERROR: 1 };
 // Outer bound for one run: phase1's own watchdog is shorter, so hitting this means it is wedged.
 const MAX_RUN_MS = 70 * 60 * 1000;
 const SETTLE_MS = 5000;
@@ -46,7 +50,7 @@ const PIPELINE_PROC_RE = 'phase1[.]js|run-pipeline|reed-phase1|process-approved-
 
 const USAGE = [
   'Usage: node scripts/watchdog-runner.js [--from-gate | --pending <file>] [--dry-run] [--help]',
-  'Runs one pipeline territory. Exit: 0 done, 10 no work/busy, 11 session stale, 12 phase1 failed, 13 killed at 70 min, 1 runner error.',
+  'Runs one pipeline territory. Exit: 0 done, 10 no work/busy, 11 session stale, 12 phase1 failed, 13 killed at 70 min, 14 Phase 2 held (CV screening), 1 runner error.',
 ].join('\n');
 
 function argFlag(argv, flag) {
@@ -306,6 +310,7 @@ function mapPhase1Exit(res) {
   if (res.aborted) return { code: EXIT.ERROR, event: 'phase1-aborted', reason: `signal-${res.aborted}` };
   if (res.killed) return { code: EXIT.KILLED, event: 'phase1-killed-timeout', reason: 'timeout' };
   if (res.code === 2) return { code: EXIT.SESSION_STALE, event: 'session-stale', reason: 'phase1-session-stale' };
+  if (res.code === PHASE2_HELD_EXIT) return { code: EXIT.HELD, event: 'phase2-held', reason: 'phase2-held' };
   if (res.code !== 0) return { code: EXIT.PHASE1_FAILED, event: 'phase1-nonzero', reason: `phase1-exit-${res.code}` };
   return { code: EXIT.OK, event: 'done', reason: null };
 }
@@ -386,7 +391,7 @@ async function stopIdleBrowser(ctx) {
 // Outcomes the territory did not cause (session, screening, a signal, a foreign lock, the machine): its claim goes back at
 // once and the failure is not counted against it. Every other failure keeps the claim stamped, so the gate skips the file
 // for 10 minutes and the next territory runs (the legacy stale-spawn rotation) while the watchdog counts the failure.
-const FAULTLESS_REASONS = new Set(['phase1-exit-3', 'phase1-exit-7', 'spawn-error', 'browser-lock-error', 'resolve-error', 'mark-spawned-error', 'screening-unavailable']);
+const FAULTLESS_REASONS = new Set(['phase1-exit-3', 'phase1-exit-7', 'spawn-error', 'browser-lock-error', 'resolve-error', 'mark-spawned-error', 'screening-unavailable', 'phase2-held']);
 function faultless(code, reason) {
   if (code === EXIT.SESSION_STALE) return true;
   const r = String(reason || '');

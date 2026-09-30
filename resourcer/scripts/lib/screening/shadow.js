@@ -15,6 +15,8 @@ const time = require('../time');
 
 const NAME_RE = /^screening-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const DAY = 86400000;
+// The run id of the install canaries (docs/UPDATE-B.md 7.1, docs/UPDATE-C.md): invented cards, never part of any number the owner reads.
+const INSTALL_CANARY_RUN_ID = 'install-canary';
 
 function fileFor(dir, date) {
   return path.join(dir, `screening-${time.londonParts(date || new Date()).ymd}.jsonl`);
@@ -84,6 +86,7 @@ function maybePrune(opts) {
 }
 
 // Read rows for the report. Bad lines are skipped. since/until are Date or null.
+/** @param {{dir?:string, since?:Date, until?:Date, includeCanary?:boolean}} [opts] rows of run id install-canary are skipped unless includeCanary */
 function readRows(opts) {
   const o = opts || {};
   const dir = o.dir || paths.SHADOW;
@@ -100,6 +103,7 @@ function readRows(opts) {
       let r = null;
       try { r = JSON.parse(line); } catch (e) { continue; }
       if (!r || typeof r !== 'object') continue;
+      if (typeof r.runId === 'string' && r.runId.startsWith(INSTALL_CANARY_RUN_ID) && !o.includeCanary) continue; // rows written by an install canary (install-canary, install-canary-zdr; an instance at Update B has three or four)
       const t = Date.parse(r.ts);
       if (Number.isFinite(t) && (t < since || t > until)) continue;
       rows.push(r);
@@ -108,4 +112,4 @@ function readRows(opts) {
   return rows;
 }
 
-module.exports = { ShadowLog, pruneShadow, maybePrune, readRows, fileFor, NAME_RE };
+module.exports = { ShadowLog, pruneShadow, maybePrune, readRows, fileFor, NAME_RE, INSTALL_CANARY_RUN_ID };

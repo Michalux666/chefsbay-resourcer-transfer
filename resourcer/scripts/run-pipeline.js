@@ -9,8 +9,10 @@
 // auth failure needs time): the Reed step is skipped WITHOUT recording an auth failure, so the pending search keeps its Reed retries.
 //
 // Usage: node scripts/run-pipeline.js --status-file <path-to-phase1-status.json>
-// Exit codes: 0 done (also PIPELINE_SKIPPED for a parallel run, and when Phase 2 itself failed: legacy), 1 no/unreadable status file or fatal.
-// Stdout: PIPELINE_COMPLETE / SOURCES: / QUEUE_FILE: / RESULTS_FILE: / CREDITS: / VERDICT: (child output is echoed to stderr).
+// Exit codes: 0 done (also PIPELINE_SKIPPED for a parallel run, and when Phase 2 itself failed: legacy), 1 no/unreadable status file or fatal,
+// 14 Phase 2 was HELD (CV screening could not run, nothing was lost, the queue is retried once the screening halt clears): there is no results
+// file for this run, the optimiser is not run and the caller records the run as held, not as done.
+// Stdout: PIPELINE_COMPLETE / SOURCES: / QUEUE_FILE: / RESULTS_FILE: / CREDITS: / VERDICT: (child output is echoed to stderr); PIPELINE_HELD instead of PIPELINE_COMPLETE when held.
 
 const fs = require('fs');
 const path = require('path');
@@ -20,6 +22,7 @@ const env = require('./lib/env');
 const fsx = require('./lib/fsx');
 const { AUTH_MARKER, sourcesGate, syncGateStatus, authHold } = require('./reed-api-client');
 const launcher = require('./ensure-chrome-cdp');
+const { PHASE2_HELD, PHASE2_HELD_EXIT } = require('./lib/phase2-exit');
 
 const RUNS_DIR = paths.RUNS;
 const DOWNLOADS = paths.DOWNLOADS;
@@ -172,9 +175,12 @@ async function runPhase2(queueFile, extraEnv) {
   }
   log(`=== Phase 2: ${queueFile} ===`);
   const { code } = await spawnCapture(paths.NODE, [path.join(SCRIPTS, 'process-approved-queue.js'), queueFile], 'phase2', extraEnv);
-  const resultsFile = findPhase2Results();
-  log(`Phase 2 exit: ${code}, results: ${resultsFile || 'none'}`);
-  return { code, resultsFile };
+  // A held Phase 2 (exit 2) wrote no results: the newest results file on disk belongs to an OLDER run and must not be taken for this one
+  // (it would print the wrong RESULTS_FILE and feed the optimiser a duplicate entry).
+  const held = code === PHASE2_HELD;
+  const resultsFile = held ? null : findPhase2Results();
+  log(`Phase 2 exit: ${code}${held ? ' (HELD: CV screening could not run, nothing was lost)' : ''}, results: ${resultsFile || 'none'}`);
+  return { code, resultsFile, held };
 }
 
 // PRIMARY: match by timestamp in the filename (phase1-<ts>.json -> approved-queue-<ts>.json); the mtime fallback only applies
@@ -319,6 +325,7 @@ async function main(argv) {
 
     let finalQueueFile = queueFile;
     let resultsFile = null;
+    let held = false;
 
     if (needsReed) {
       let childEnv = {};
@@ -391,20 +398,21 @@ async function main(argv) {
       // Phase 2 ALWAYS runs once on the final queue, even with 0 candidates (territory map update, pending-search cleanup).
       const phase2Result = await runPhase2(finalQueueFile, childEnv);
       resultsFile = phase2Result.resultsFile;
+      held = !!phase2Result.held;
 
-      // Mark phase2Status done so a second invocation is a no-op.
+      // Mark phase2Status done so a second invocation is a no-op; a held Phase 2 is not done: its queue is retried by the recovery.
       const fresh = readJson(statusFile);
-      if (fresh) {
+      if (fresh && !held) {
         fresh.phase2Status = 'done';
         fresh.updatedAt = new Date().toISOString();
         try { fsx.writeJsonAtomic(statusFile, fresh); } catch { /* best effort */ }
       }
-    } else if (phase2AlreadyDone) {
-      log('Single-source run - Phase 2 already completed inline');
-      resultsFile = findPhase2Results();
-    } else {
-      log('WARNING: No clear phase2 signal - assuming Phase 2 ran inline');
-      resultsFile = findPhase2Results();
+    } else if (phase2AlreadyDone || !needsReed) {
+      // A Phase 2 that ran inline and was HELD (process-approved-queue.js left phase2Hold in the status file and did not complete it)
+      // has no results of its own: the newest results file on disk is an older run's.
+      held = !!(status.phase2Hold && status.status !== 'complete' && !status.phase2Complete);
+      log(held ? 'Single-source run - Phase 2 was held (CV screening could not run); no results for this run' : (phase2AlreadyDone ? 'Single-source run - Phase 2 already completed inline' : 'WARNING: No clear phase2 signal - assuming Phase 2 ran inline'));
+      resultsFile = held ? null : findPhase2Results();
     }
 
     await stopBrowser();
@@ -415,7 +423,7 @@ async function main(argv) {
     log('Pipeline orchestration complete');
     log('========================================');
 
-    out('PIPELINE_COMPLETE');
+    out(held ? 'PIPELINE_HELD' : 'PIPELINE_COMPLETE');
     out(`SOURCES: ${status.sources || 'caterer'}`);
     out(`QUEUE_FILE: ${finalQueueFile || ''}`);
     out(`RESULTS_FILE: ${resultsFile || ''}`);
@@ -428,7 +436,7 @@ async function main(argv) {
         out(`  ${r.metric}: ${r.current} vs baseline ${r.baseline} (${r.change})`);
       });
     }
-    return 0;
+    return held ? PHASE2_HELD_EXIT : 0;
   } finally {
     cleanupSync();
   }

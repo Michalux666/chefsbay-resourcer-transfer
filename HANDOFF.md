@@ -13,7 +13,7 @@ The CV-sourcing pipeline (Caterer.com and Reed.co.uk, AI screening, unlock and d
 | The operator | `hermes/AGENTS.md`, `hermes/SOUL.md`, `hermes/skills/resourcer-ops/` | The standing instructions of the Hermes agent that installs and watches it. It operates; it never edits code |
 | The dashboard tab | `plugin/resourcer/` | Live progress, targets, halt banner, search request form, inside the Hermes dashboard |
 | Tools | `tools/` | Data bundle (make, restore, verify), code manifest, environment probes (`preflight.sh`), search request, screening report, legacy archive |
-| Tests | `tests/` | About 2,500 offline tests and 14 end-to-end scenarios; all pass (`README.md` has the commands) |
+| Tests | `tests/` | About 2,500 offline tests and 15 end-to-end scenarios; all pass (`README.md` has the commands) |
 
 ## 2. How far it is proven
 
@@ -36,6 +36,8 @@ While the install runs (`docs/INSTALL.md` section 0.4 lists them as H1 to H11; C
 Before the laptop is wiped or leaves you (`docs/CUTOVER.md` step 9, `docs/TEARDOWN.md`, `docs/SECURITY.md` section 10): revoke the GitHub token that sat in the old repository's address, rotate the Reed password and the Zoho refresh token, purge the old transcripts and notes that contain credentials, and only then delete the old system. Do not wipe before the gate in CUTOVER 11.1 is true; the laptop is your rollback path (`docs/ROLLBACK.md`).
 
 Already installed from Update A (commit `d60d917`, Jev-only screening)? Push this release, give the operator its manifest digest and follow `docs/UPDATE-B.md`: forced-choice screening criteria and the CV stage (shadow by default), with no setting to change.
+
+Already installed from Update B (commit `a7fc7be`)? Push this release, give the operator its manifest digest and follow `docs/UPDATE-C.md`: the technical blockers of `CV_SCREEN=on` removed (a halt raised by the CV stage clears only when the CV route answers, no unlock while it is up, a CV criteria file that fails closed, shadow bounded in time), an install self-test for the CV readers, and small fixes, with no setting to change and `CV_SCREEN` still `shadow`.
 
 Already installed from the first release (the one whose screening engine was `jev_shadow`)? Do not run the install again: push this release, give the operator its manifest digest and follow `docs/UPDATE-JEV-ONLY.md` (the operator does the steps; the only thing that can need you is allowing `typesafe-ai/jev` in the Vercel team if its deep check says "restricted access").
 
@@ -62,4 +64,4 @@ If time is short, the honest minimum is in the table in CUTOVER section 1: fence
 
 ## 6. Reading order
 
-`README.md` (map of the repository), `docs/CUTOVER.md` (you, today), `OPERATOR-PROMPT.md` (what you paste), `docs/INSTALL.md` (what the operator does), `docs/ACCEPTANCE.md` (go-live checks), `docs/OPERATIONS.md` (day to day), `docs/KNOWN-LIMITS.md`, `docs/ROLLBACK.md`, `docs/TEARDOWN.md`, `docs/SECURITY.md`, `docs/ENV.md`, `docs/SCREENING.md`, `docs/SCREENING-CRITERIA.md`, `docs/CV-SCREENING.md`, `docs/UPDATE-JEV-ONLY.md` and `docs/UPDATE-B.md` (updating an instance that is already installed), `docs/DECISIONS.md`, `docs/LEGACY-MAP.md`, `docs/DESIGN.md`.
+`README.md` (map of the repository), `docs/CUTOVER.md` (you, today), `OPERATOR-PROMPT.md` (what you paste), `docs/INSTALL.md` (what the operator does), `docs/ACCEPTANCE.md` (go-live checks), `docs/OPERATIONS.md` (day to day), `docs/KNOWN-LIMITS.md`, `docs/ROLLBACK.md`, `docs/TEARDOWN.md`, `docs/SECURITY.md`, `docs/ENV.md`, `docs/SCREENING.md`, `docs/SCREENING-CRITERIA.md`, `docs/CV-SCREENING.md`, `docs/UPDATE-JEV-ONLY.md`, `docs/UPDATE-B.md` and `docs/UPDATE-C.md` (updating an instance that is already installed), `docs/DECISIONS.md`, `docs/LEGACY-MAP.md`, `docs/DESIGN.md`.

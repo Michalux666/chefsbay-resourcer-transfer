@@ -4,14 +4,18 @@
 // at most cvScreenConcurrency at a time, so a hostile file can only ever hurt its own process).
 //   CV_SCREEN=off     nothing runs: a strict no-op
 //   CV_SCREEN=shadow  (the default) every CV is screened and logged, nothing is ever blocked and an outage is only a warning; after
-//                     phase2.shadowStopAfterFailures CVs in a row that could not be screened the rest of the queue is skipped
-//                     with one warning alert, so a hung gateway cannot slow Phase 2 down
+//                     phase2.shadowStopAfterFailures CVs in a row that could not be screened, or once the screening of the queue has run
+//                     phase2.shadowMaxSeconds (a gateway that answers, but slowly), the rest of the queue is skipped with one warning
+//                     alert, so a hung or slow gateway cannot slow Phase 2 down
 //   CV_SCREEN=on      pass, unreadable and the very rare fallback-lane CV (decision review, settled by config fallback.policy,
 //                     approve by default) go on to Zoho as before; reject = not pushed, the CV and the candidate JSON are
 //                     deleted (retention rule), a candidate_rejections row for this job title carries the reason 'cv:<codes>'
 // An outage (exit 3 of the reviewer) in mode on stops the queue WITHOUT losing anything: nothing is pushed or rejected any
 // further, every CV and queue entry stays for the retry, the screening halt is raised and a critical alert goes out. It is
-// never turned into an approval.
+// never turned into an approval. The halt this raises is cleared by supervision only when the CV route itself answers (the deep
+// check of lib/screening-health.js asks a CV canary while the mode is on), and while it is up no Phase 1 unlock starts (unlockBlocked()).
+// A broken or missing criteria file (config/cv-screening.json) is the same kind of fault: fail closed, never a decision (mode on holds,
+// shadow stops the stage with one warning alert).
 
 const fs = require('fs');
 const path = require('path');
@@ -66,6 +70,12 @@ function readProfile(jsonPath) {
 
 const reasonText = codes => `cv:${codes.join(',')}`.replace(/[^\x20-\x7e]/g, '?').slice(0, 200);
 
+/** The first reason code that is not the 'forced' marker ('' when there is none); at most 60 characters. */
+function primaryReasonCode(codes) {
+  const first = (Array.isArray(codes) ? codes : []).find(c => typeof c === 'string' && c && c !== 'forced');
+  return String(first || '').slice(0, 60);
+}
+
 function idColumn(cand) { return cand.source === 'reed' ? 'reed_id' : 'caterer_id'; }
 
 function tableInfo(db) {
@@ -100,7 +110,8 @@ function recordRejection(deps, cand, jobTitle, codes) {
       .run(Number(cand.id), String(jobTitle), new Date().toISOString().slice(0, 10), reasonText(codes));
     const cols = tableInfo(db);
     if (cols && cols.has('reason_code')) {
-      try { db.prepare(`UPDATE candidate_rejections SET reason_code = ? WHERE ${col} = ? AND job_title = ? AND reason_code IS NULL`).run(String(codes[0] || '').slice(0, 60), Number(cand.id), String(jobTitle)); } catch (e) { /* optional column */ }
+      // 'forced' is a marker that opens the code list of a decision taken in doubt, not a reason: the column holds the first real one
+      try { db.prepare(`UPDATE candidate_rejections SET reason_code = ? WHERE ${col} = ? AND job_title = ? AND reason_code IS NULL`).run(primaryReasonCode(codes), Number(cand.id), String(jobTitle)); } catch (e) { /* optional column */ }
     }
     return { ok: true, existed: false };
   } catch (e) {
@@ -166,21 +177,26 @@ function validResult(r) {
 // the step
 // ---------------------------------------------------------------------------------------------
 
+/** The counters of one queue (all zero); what the results file carries as cvScreen. */
+function newStats(mode) {
+  return {
+    mode, considered: 0, screened: 0, pass: 0, reject: 0, review: 0, unreadable: 0, rejected: 0,
+    jev: 0, facts: 0, fallback: 0, forced: 0, forcedRejected: 0, policyApprove: 0, policyReject: 0,
+    cached: 0, noCv: 0, errors: 0, unscreened: 0, jevCalls: 0, rejectRate: 0, jevShare: null, fallbackShare: null, unavailable: false,
+    shadowStopped: false, shadowStoppedBy: null, configInvalid: false,
+  };
+}
+
 /**
  * Screens the candidates of one queue.
  * @param {{deps:object, cfg:object, mode:'shadow'|'on', candidates:object[], skip:(cand:object)=>boolean, findCv:(cand:object)=>string|null,
  *          jsonPathOf:(cand:object)=>string|null, jobTitle:string, runId:string, applyReject:(cand:object, cvPath:string, codes:string[])=>{recorded:boolean},
  *          concurrency:number, timeoutMs:number, log:(line:string)=>void}} o
- * @returns {Promise<{outcomes:Map<string,object>, stats:object, unavailable:null|{detail:string}, shadowStopped:null|{failures:number, detail:string}}>}
+ * @returns {Promise<{outcomes:Map<string,object>, stats:object, unavailable:null|{detail:string}, shadowStopped:null|{kind:'failures'|'time', failures:number, detail:string}}>}
  */
 async function screenCandidates(o) {
   const outcomes = new Map();
-  const stats = {
-    mode: o.mode, considered: 0, screened: 0, pass: 0, reject: 0, review: 0, unreadable: 0, rejected: 0,
-    jev: 0, facts: 0, fallback: 0, forced: 0, forcedRejected: 0, policyApprove: 0, policyReject: 0,
-    cached: 0, noCv: 0, errors: 0, unscreened: 0, jevCalls: 0, rejectRate: 0, jevShare: null, fallbackShare: null, unavailable: false,
-    shadowStopped: false,
-  };
+  const stats = newStats(o.mode);
   const todo = o.candidates.filter(c => !o.skip(c));
   let unavailable = null;
 
@@ -193,59 +209,71 @@ async function screenCandidates(o) {
   const noteFailure = detail => {
     if (!stopAfter || stopped) return;
     failures++;
-    if (failures >= stopAfter) { stopped = { failures, detail: String(detail || 'unavailable').slice(0, 120) }; abort.abort(); }
+    if (failures >= stopAfter) { stopped = { kind: 'failures', failures, detail: String(detail || 'unavailable').slice(0, 120) }; abort.abort(); }
   };
+  // ... and not against a gateway that answers, but slowly: after shadowMaxSeconds the rest is skipped whatever the answers were.
+  // The limit only ever applies to shadow (mode on must screen every CV before it is pushed, and holds on an outage instead).
+  const maxSec = o.mode === 'shadow' && o.cfg.phase2 ? Number(o.cfg.phase2.shadowMaxSeconds) : 0;
+  const limitTimer = maxSec > 0 ? setTimeout(() => {
+    if (stopped) return;
+    stopped = { kind: 'time', failures: 0, seconds: maxSec, detail: `the screening of this queue ran longer than ${maxSec} seconds` };
+    abort.abort();
+  }, maxSec * 1000) : null;
   const skipStopped = (key) => { stats.unscreened++; outcomes.set(key, { action: 'push', screened: false, why: 'shadow-stopped' }); };
 
-  await mapPool(todo.length, o.concurrency, async i => {
-    const cand = todo[i];
-    const key = String(cand.id);
-    const cvPath = o.findCv(cand);
-    if (!cvPath) { stats.noCv++; outcomes.set(key, { action: 'push', screened: false, why: 'no-cv' }); return; }
-    stats.considered++;
-    if (stopped) { skipStopped(key); return; }
-    const known = knownFor(cand, readProfile(o.jsonPathOf(cand)));
-    let r;
-    try {
-      r = await o.deps.cvScreen({ cand, cvPath, jobTitle: o.jobTitle, known, runId: o.runId, timeoutMs: o.timeoutMs, mode: o.mode, signal: abort.signal });
-    } catch (e) {
-      r = { code: null, result: null, detail: String((e && e.message) || e).slice(0, 120) };
-    }
+  try {
+    await mapPool(todo.length, o.concurrency, async i => {
+      const cand = todo[i];
+      const key = String(cand.id);
+      const cvPath = o.findCv(cand);
+      if (!cvPath) { stats.noCv++; outcomes.set(key, { action: 'push', screened: false, why: 'no-cv' }); return; }
+      stats.considered++;
+      if (stopped) { skipStopped(key); return; }
+      const known = knownFor(cand, readProfile(o.jsonPathOf(cand)));
+      let r;
+      try {
+        r = await o.deps.cvScreen({ cand, cvPath, jobTitle: o.jobTitle, known, runId: o.runId, timeoutMs: o.timeoutMs, mode: o.mode, signal: abort.signal });
+      } catch (e) {
+        r = { code: null, result: null, detail: String((e && e.message) || e).slice(0, 120) };
+      }
 
-    if (r.aborted || (stopped && !r.result)) { skipStopped(key); return; }
-    if (r.code === 3) {
-      if (o.mode === 'on') { unavailable = unavailable || { detail: r.detail, reasonKey: r.reasonKey || null }; stats.unscreened++; outcomes.set(key, { action: 'held', screened: false, why: 'unavailable' }); return; }
-      stats.unscreened++;
-      outcomes.set(key, { action: 'push', screened: false, why: 'unavailable-shadow' });
-      noteFailure(r.detail);
-      return;
-    }
-    let res = r.code === 0 && validResult(r.result) ? r.result : null;
-    if (!res) {
-      noteFailure(r.detail);
-      // the reviewer itself failed (not Jev): the CV passes through like an unreadable one (never a reject), and it is counted
-      stats.errors++;
-      const s = gate.resolve('unreadable', ['unreadable_review_error'], o.cfg);
-      res = { decision: 'unreadable', final: s.final, lane: s.lane, forced: false, reasonCodes: ['unreadable_review_error'], finalReasonCodes: s.finalReasonCodes, policy: s.policy, jevCalls: 0, cached: false };
-    }
-    if (Number(res.jevCalls) > 0) failures = 0;
-    stats.screened++;
-    stats[res.decision]++;
-    if (res.lane === 'jev' || res.lane === 'facts' || res.lane === 'fallback') stats[res.lane]++;
-    if (res.final === 'reject') stats.rejected++;
-    if (res.forced) { stats.forced++; if (res.final === 'reject') stats.forcedRejected++; }
-    if (res.policy) { if (res.final === 'reject') stats.policyReject++; else stats.policyApprove++; }
-    if (res.cached) stats.cached++;
-    stats.jevCalls += Number(res.jevCalls) || 0;
+      if (r.aborted || (stopped && !r.result)) { skipStopped(key); return; }
+      if (r.code === 3) {
+        if (o.mode === 'on') { unavailable = unavailable || { detail: r.detail, reasonKey: r.reasonKey || null }; stats.unscreened++; outcomes.set(key, { action: 'held', screened: false, why: 'unavailable' }); return; }
+        stats.unscreened++;
+        outcomes.set(key, { action: 'push', screened: false, why: 'unavailable-shadow' });
+        noteFailure(r.detail);
+        return;
+      }
+      let res = r.code === 0 && validResult(r.result) ? r.result : null;
+      if (!res) {
+        noteFailure(r.detail);
+        // the reviewer itself failed (not Jev): the CV passes through like an unreadable one (never a reject), and it is counted
+        stats.errors++;
+        const s = gate.resolve('unreadable', ['unreadable_review_error'], o.cfg);
+        res = { decision: 'unreadable', final: s.final, lane: s.lane, forced: false, reasonCodes: ['unreadable_review_error'], finalReasonCodes: s.finalReasonCodes, policy: s.policy, jevCalls: 0, cached: false };
+      }
+      if (Number(res.jevCalls) > 0) failures = 0;
+      stats.screened++;
+      stats[res.decision]++;
+      if (res.lane === 'jev' || res.lane === 'facts' || res.lane === 'fallback') stats[res.lane]++;
+      if (res.final === 'reject') stats.rejected++;
+      if (res.forced) { stats.forced++; if (res.final === 'reject') stats.forcedRejected++; }
+      if (res.policy) { if (res.final === 'reject') stats.policyReject++; else stats.policyApprove++; }
+      if (res.cached) stats.cached++;
+      stats.jevCalls += Number(res.jevCalls) || 0;
 
-    const base = { screened: true, decision: res.decision, final: res.final, lane: res.lane, forced: !!res.forced, reasonCodes: res.finalReasonCodes };
-    if (o.mode === 'on' && res.final === 'reject') {
-      const applied = o.applyReject(cand, cvPath, res.finalReasonCodes);
-      outcomes.set(key, { ...base, action: 'reject', recorded: applied.recorded });
-    } else {
-      outcomes.set(key, { ...base, action: 'push' });
-    }
-  }, () => !!unavailable || !!stopped);
+      const base = { screened: true, decision: res.decision, final: res.final, lane: res.lane, forced: !!res.forced, reasonCodes: res.finalReasonCodes };
+      if (o.mode === 'on' && res.final === 'reject') {
+        const applied = o.applyReject(cand, cvPath, res.finalReasonCodes);
+        outcomes.set(key, { ...base, action: 'reject', recorded: applied.recorded });
+      } else {
+        outcomes.set(key, { ...base, action: 'push' });
+      }
+    }, () => !!unavailable || !!stopped);
+  } finally {
+    if (limitTimer) clearTimeout(limitTimer);
+  }
 
   // candidates that were not reached stay untouched: held after an outage in mode on, simply not screened after a shadow stop
   for (const cand of todo) {
@@ -261,6 +289,7 @@ async function screenCandidates(o) {
   stats.fallbackShare = modelled ? Math.round(stats.fallback / modelled * 1000) / 1000 : null;
   stats.unavailable = !!unavailable;
   stats.shadowStopped = !!stopped;
+  stats.shadowStoppedBy = stopped ? stopped.kind : null;
   return { outcomes, stats, unavailable, shadowStopped: stopped };
 }
 
@@ -273,12 +302,25 @@ function alertsFor(stats, cfg, jobTitle, location) {
   const out = [];
   const where = `${jobTitle} in ${location}`;
   const shadow = stats.mode === 'shadow';
+  if (stats.configInvalid) {
+    // nothing was screened: the criteria file is not usable (fail closed), and in shadow that never blocks anything
+    out.push({
+      severity: 'warn',
+      key: 'cv-config-invalid',
+      text: `CV screening (shadow) did not run for ${where}: ${cfg.fault ? cfg.fault.detail : 'its criteria file is not usable'}, so ${stats.unscreened} CV(s) of this queue were not screened. Nothing was blocked and nothing was lost. Fix config/cv-screening.json (or the file CV_SCREEN_CONFIG_FILE names) or restore it from git; with CV_SCREEN on the same fault holds the pipeline.`,
+      meta: { skipped: stats.unscreened },
+    });
+    return out;
+  }
   if (stats.shadowStopped) {
+    const byTime = stats.shadowStoppedBy === 'time';
     out.push({
       severity: 'warn',
       key: 'cv-shadow-stopped',
-      text: `CV screening (shadow) stopped early for ${where}: ${cfg.phase2.shadowStopAfterFailures} CVs in a row could not be screened, so ${stats.unscreened} CV(s) of this queue were not screened. Nothing was blocked and nothing was lost. Check AI_GATEWAY_API_KEY, the credits and the gateway; screening resumes with the next queue.`,
-      meta: { screened: stats.screened, skipped: stats.unscreened },
+      text: byTime
+        ? `CV screening (shadow) stopped early for ${where}: it had run for ${cfg.phase2.shadowMaxSeconds} seconds (phase2.shadowMaxSeconds) without finishing the queue, so ${stats.unscreened} CV(s) of this queue were not screened. Nothing was blocked and nothing was lost. The gateway is answering slowly: check the gateway status; screening resumes with the next queue.`
+        : `CV screening (shadow) stopped early for ${where}: ${cfg.phase2.shadowStopAfterFailures} CVs in a row could not be screened, so ${stats.unscreened} CV(s) of this queue were not screened. Nothing was blocked and nothing was lost. Check AI_GATEWAY_API_KEY, the credits and the gateway; screening resumes with the next queue.`,
+      meta: { screened: stats.screened, skipped: stats.unscreened, ...(byTime ? { reason: 'time' } : {}) },
     });
   }
   if (stats.screened < Math.min(A.rejectRateMinCandidates, A.fallbackMinCandidates)) return out;
@@ -322,7 +364,8 @@ function raiseOutage(o) {
     const cur = halt.getHalt();
     if (!(cur && cur.halted)) {
       const hf = haltFor(o.reasonKey);
-      halt.setHalt(hf.reason, `CV screening could not reach Jev during ${o.jobTitle}/${o.location}: ${o.detail || 'unavailable'}. The queue is held with every CV kept.`, { remedy: hf.remedy, blockedRun: true });
+      const cause = o.reasonKey === 'cvconfig' || o.reasonKey === 'config' ? 'could not run' : 'could not reach Jev';
+      halt.setHalt(hf.reason, `CV screening ${cause} during ${o.jobTitle}/${o.location}: ${o.detail || 'unavailable'}. The queue is held with every CV kept.`, { remedy: hf.remedy, blockedRun: true });
       raised = true;
     }
     halted = true;
@@ -346,7 +389,19 @@ function screeningHalted(halt) {
   }
 }
 
+/**
+ * True when the CV stage is on and the screening halt is up: no new Phase 1 unlock may start (every candidate unlocked now would be
+ * held at Phase 2 and never pushed, which is how credits were spent for nothing). Never throws; false in shadow and off.
+ */
+function unlockBlocked(halt) {
+  try {
+    return config.screenMode(env.get('CV_SCREEN')).mode === 'on' && screeningHalted(halt);
+  } catch (e) {
+    return false;
+  }
+}
+
 module.exports = {
-  mode, loadConfig, knownFor, findEarlierRejection, recordRejection, runCli, screenCandidates, alertsFor, raiseOutage, screeningHalted,
-  reasonText, validResult, HALT_REASON,
+  mode, loadConfig, newStats, knownFor, findEarlierRejection, recordRejection, runCli, screenCandidates, alertsFor, raiseOutage, screeningHalted,
+  reasonText, validResult, unlockBlocked, primaryReasonCode, HALT_REASON,
 };

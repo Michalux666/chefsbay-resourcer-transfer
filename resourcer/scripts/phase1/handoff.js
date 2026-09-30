@@ -5,6 +5,7 @@ const { scriptPath } = require('./config');
 const { writeStatus } = require('./queue');
 const { saveCatererSession } = require('./session');
 const { reasonOf } = require('./incomplete');
+const { PHASE2_HELD, PHASE2_HELD_EXIT } = require('../lib/phase2-exit');
 
 // Child output goes straight to our stdout/stderr (the run log), unbuffered.
 function runInherit(ctx, name, args) {
@@ -17,11 +18,15 @@ function describe(r) {
   return r.code === null ? 'none' : String(r.code);
 }
 
-// Phase 2 for a caterer-only run: process-approved-queue.js. Its own exit code never failed the run (legacy);
-// only a hang, which the legacy script could not detect, does.
+// Phase 2 for a caterer-only run: process-approved-queue.js. Its own exit code never failed the run (legacy); only a hang, which the legacy
+// script could not detect, does. The one exit that is not "done" is 2, HELD: CV screening (CV_SCREEN=on) could not reach Jev, everything is kept
+// and the queue is retried once the halt clears. The run then ends with PHASE2_HELD_EXIT so the supervisor records it as held, not as a success.
 async function runPhase2Inline(ctx) {
   const r = await runInherit(ctx, 'process-approved-queue', [ctx.st.queueFile]);
-  if (r.timedOut || r.error || (r.code !== 0 && r.code !== null)) {
+  if (r.code === PHASE2_HELD) {
+    ctx.out('PHASE2_HELD: CV screening could not run, so nothing was pushed; every CV and the queue are kept and the queue is retried once the screening halt clears');
+    r.held = true;
+  } else if (r.timedOut || r.error || (r.code !== 0 && r.code !== null)) {
     ctx.out(`WARN process-approved-queue.js did not finish cleanly (${describe(r)})`);
   }
   return r;
@@ -55,6 +60,7 @@ async function handoff(ctx, fin) {
       out('No candidates to process - calling Phase 2 inline to guarantee cleanup.');
       const r = await runPhase2Inline(ctx);
       st.phase2Status = 'done';
+      if (r.held) { out(`CREDITS: ${credits}`); return PHASE2_HELD_EXIT; }
       out('PHASE2_DONE: true');
       out(`CREDITS: ${credits}`);
       return r.timedOut ? 1 : 0;
@@ -86,6 +92,7 @@ async function handoff(ctx, fin) {
 
   st.phase2Status = 'done';
   const r = await runPhase2Inline(ctx);
+  if (r.held) { st.phase2Status = 'pending'; return PHASE2_HELD_EXIT; }
   out('PHASE2_DONE: true');
   return r.timedOut ? 1 : 0;
 }

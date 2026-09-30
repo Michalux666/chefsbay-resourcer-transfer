@@ -243,7 +243,7 @@ Remember the key for later pulls:
 git -C /opt/data/profiles/resourcer/workspace config core.sshCommand 'ssh -i /opt/data/profiles/resourcer/deploy/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/data/profiles/resourcer/deploy/known_hosts -o StrictHostKeyChecking=yes'
 ```
 
-Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) and then `docs/UPDATE-B.md` (screening criteria and the CV stage) instead):
+Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) then `docs/UPDATE-B.md` (screening criteria and the CV stage) and then `docs/UPDATE-C.md` (CV_SCREEN=on made safe, an install self-test) instead):
 
 ```
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
@@ -770,6 +770,14 @@ This is a HUMAN decision (H9a). Do not set `SCREEN_ZDR` or `SCREEN_JEV_ZDR` your
 
 ### 7.6 CV screening canary (OPERATOR)
 
+First prove that the PDF and Word readers load on this instance (no network, no key, nothing is written; `docs/UPDATE-C.md` step 7.1):
+
+```
+cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/cv-review.js --self-test
+```
+
+Expect: exit 0 and exactly one line, `CV_SELF_TEST_OK pdf docx`. A line that starts `CV_SELF_TEST_FAILED` names the file type and a fixed reason code (`pdf:error_parse_failed`: `pdf-parse` cannot load, so every PDF would pass as unreadable): STOP and report the line.
+
 The CV stage reads a downloaded CV between the download and the Zoho push (`docs/CV-SCREENING.md`). It needs no setting: `CV_SCREEN` defaults to `shadow`, which records what it would have done and blocks nothing. Prove it with two invented CVs, a chef and a retail assistant, both for a Chef de Partie search (the command decides and prints; it never blocks anything). Use your file-write tool (not a shell redirect) to create `/opt/data/profiles/resourcer/install-work/canary-cv.txt` with exactly this content (the scratch folder of 0.7 must exist):
 
 ```
@@ -839,7 +847,7 @@ If it fails:
 | exit 1 with `FATAL` | usage or input problem (for example a file was not created) | report the text |
 ### 7.7 Clean up
 
-The canary rows in `shadow/` carry the run ids `install-canary` and `install-canary-zdr`; they contain only invented text and stay until the normal 180-day expiry (the calibration report can exclude them by run id); the CV canaries of 7.6 write no row (`--no-shadow`). Remove the scratch folder contents: `rm` on any file you created in `/opt/data/profiles/resourcer/install-work/` (none should remain).
+The canary rows in `shadow/` carry the run ids `install-canary` and `install-canary-zdr`; they contain only invented text and stay until the normal 180-day expiry (the readers of the shadow log, and so the screening report, skip every run id that starts with `install-canary`); the CV canaries of 7.6 write no row (`--no-shadow`). Remove the scratch folder contents: `rm` on any file you created in `/opt/data/profiles/resourcer/install-work/` (none should remain).
 
 Idempotent: yes (each call costs a fraction of a cent).
 
