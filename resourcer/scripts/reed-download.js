@@ -252,9 +252,9 @@ async function downloadCandidate({ candidateId, queryId = null, keywords = '', o
       log('Forcing token refresh before retry...');
       await refreshToken();
       try {
-        const { cdpEvaluate } = require('./reed-browser-fetch');
-        if (cdpEvaluate) await cdpEvaluate('window.__capturedReedToken = null');
-      } catch { /* non-fatal: ensureBrowserSession re-seeds anyway */ }
+        const { invalidateToken } = require('./reed-browser-fetch');
+        if (invalidateToken) invalidateToken();
+      } catch { /* non-fatal: the next request re-reads the session file anyway */ }
       log('Token refreshed');
     } catch (e) {
       log(`Token refresh failed (non-fatal): ${e.message}`);

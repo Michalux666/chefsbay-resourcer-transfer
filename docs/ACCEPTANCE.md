@@ -208,6 +208,7 @@ The CV log holds numbers, reason codes and the platform candidate id only; the t
 | [ ] | RE05 | GATE (Reed) | `cd W && NODE_PATH=R/node_modules REED_REAL_CHROMIUM=/usr/bin/chromium node --test "tests/reed/real-chromium.test.js"` | 0 failures (real Chromium 153 under the virtual display with the shipped flags) |
 | [ ] | RE06 | WATCH (Reed) | memory samples | see IN01 and SU10 |
 | [ ] | RE07 | WATCH (Reed) | after a Reed run | SU12 |
+| [ ] | RE08 | WATCH (Reed) | day 1, 3, 7 after Update D (first-page failure, `docs/parity/reed-first-page.md`): attempts `grep -c '=== Reed Phase 1 ===' R/logs/phase1-console-*.log`, failures `grep -c '^\[reed\] REED_FIRST_PAGE_FAILED' R/logs/phase1-console-*.log` (each command prints one count per log file: add them up), then `node W/tools/reed-catchup.js` | failures are under 2 percent of attempts over the day (under 1 in 50; 2 percent is a design default chosen for this update, not an owner decision; the incident of 2026-09-30 was 12 in 33), and every failure is visible: the dashboard shows "Reed failed" on that run, one `reed-first-page-failed` alert was raised for the episode, and the catch-up dry run lists the territory (`failed`). Above 2 percent, or five failures in a row (the alert turns critical): report the `REED_REQUEST_FORENSIC` lines of the newest log with failures (attempt, status, code, token, sinceNavMs, navDuringRequest); change nothing. The wait times are settings (`docs/ENV.md`), the owner decides any change |
 
 ## 9. Day-by-day review of the first week (WATCH schedule)
 

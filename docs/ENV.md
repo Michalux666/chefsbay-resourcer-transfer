@@ -166,6 +166,10 @@ Reed uses one long-lived headed Chromium under `xvfb-run`, driven over the DevTo
 | `REED_CDP_COMMAND_TIMEOUT_MS` | `30000` | reed-refresh-token.js | no | no | Timeout of one DevTools command. |
 | `REED_CV_DELAY_MS` | `200` | reed-phase1.js | no | no | Pause between Reed CV fetches. |
 | `REED_SCREEN_TIMEOUT_MS` | `900000` | reed-phase1.js | no | no | Kill timeout of the screening child in `reed-phase1.js` (a timeout counts as "unavailable"; tests lower it). |
+| `REED_TAB_READY_WAIT_MS` | `10000` | reed-browser-fetch.js | no | no | Before a Reed API request the tab must be loaded, idle and unchanged between two polls; this is the longest wait for that (0 switches the wait off). After it the request is sent anyway and the retries take over. Design default, not an owner decision. |
+| `REED_TAB_SETTLE_MS` | `1500` | reed-browser-fetch.js | no | no | Quiet time after the tab's last navigation before the first Reed API request of a process (so the Reed page can finish what it does after loading). Adds at most this to a run. Design default. |
+| `REED_RETRY_BACKOFF_MS` | `1500` | reed-browser-fetch.js | no | no | Base pause between the attempts of a Reed API request that answered HTTP 400 `RequiredHeaderMissingException` (code 50010): 1.5 s, then 3 s. Design default. |
+| `REED_RETRY_CAP_MS` | `45000` | reed-browser-fetch.js | no | no | Total time cap of those retries (three attempts at most). It is checked before each pause and bounds the re-capture, not an attempt already running: a failing answer comes back at once (about 8 to 9 s for a whole failed page in the fakes), a hanging page is bounded by the 30 s answer timeout and the tab wait instead. Design default. |
 
 ## Backups and alerts
 

@@ -354,11 +354,13 @@ function buildDigest(ctx) {
       lines.push(`CVs pulled today: ${nf(today.n)} of ${DAILY_TARGET} target (${Math.round((today.n / DAILY_TARGET) * 100)}%); last 7 days ${nf(week.n)} of ${nf(WEEKLY_TARGET)}.`);
       lines.push(`Runs today ${nf(today.runs)}: unlocked ${nf(today.d)}, duplicates ${nf(today.dup)}, skipped ${nf(today.sk)}, errors ${nf(today.err)}.`);
       const src = { caterer: 0, reed: 0, unsplit: 0 };
+      let reedFailed = 0;
       for (const r of db.prepare('SELECT sources, new_to_zoho, caterer_json, reed_json FROM run_results WHERE date = ?').all(utcDay)) {
         let c = null;
         let d = null;
         try { c = r.caterer_json ? JSON.parse(r.caterer_json) : null; } catch { c = null; }
         try { d = r.reed_json ? JSON.parse(r.reed_json) : null; } catch { d = null; }
+        if (d && (d.status === 'failed' || d.failed === true)) reedFailed += 1;
         const cn = pickNum(c, ['newToZoho', 'new_to_zoho', 'new', 'pushed']);
         const dn = pickNum(d, ['newToZoho', 'new_to_zoho', 'new', 'pushed']);
         if (cn !== null || dn !== null) { src.caterer += cn || 0; src.reed += dn || 0; }
@@ -367,6 +369,7 @@ function buildDigest(ctx) {
         else src.unsplit += r.new_to_zoho || 0;
       }
       lines.push(`New in Zoho by source: Caterer ${nf(src.caterer)}, Reed ${nf(src.reed)}${src.unsplit ? `, not split ${nf(src.unsplit)}` : ''}.`);
+      if (reedFailed) lines.push(`Reed attempts that failed today: ${reedFailed} (their Reed half is not done; docs/OPERATIONS.md 8.1, tools/reed-catchup.js).`);
       const roles = db.prepare('SELECT job_title AS t, SUM(approved_p1) AS a, SUM(skipped_review) AS r FROM run_results WHERE date = ? GROUP BY job_title HAVING (COALESCE(SUM(approved_p1),0) + COALESCE(SUM(skipped_review),0)) > 0 ORDER BY (COALESCE(SUM(approved_p1),0) + COALESCE(SUM(skipped_review),0)) DESC LIMIT 6').all(utcDay);
       if (roles.length) {
         lines.push(`Approval rate by role (pre-unlock): ${roles.map((x) => `${x.t} ${Math.round((x.a / (x.a + x.r)) * 100)}% (n=${x.a + x.r})`).join(', ')}.`);

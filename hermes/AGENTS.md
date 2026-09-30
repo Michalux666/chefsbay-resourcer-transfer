@@ -115,6 +115,7 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | reed-credentials | Reed credential file missing or invalid | HUMAN creates `secrets/reed-credentials.json` |
 | reed-451 | Reed refuses foreign network | HUMAN; needs a UK exit or `--clean` login |
 | reed-auth-failed, reed-auth-giveup | Reed login failed for a territory (retry x3, then dropped) | report; giveup = HUMAN re-login |
+| reed-first-page-failed | Reed could not fetch its first search page (WARN once per episode, CRITICAL after 5 attempts in a row); that run's Reed half is recorded as failed, Caterer is unaffected | report the `REED_REQUEST_FORENSIC` lines of the newest `logs/phase1-console-*.log`; the OWNER decides the catch-up (`node ../tools/reed-catchup.js` is a dry run you may run; `--queue N` only with the owner's number) |
 | tick-silent | the supervisor heartbeat is over 10 minutes old inside 06:00-22:00: nothing is being started | `hermes -p resourcer cron list` and `--status`; the cron job may be paused or the profile parked: HUMAN checks the portal |
 | territory-quarantined:<file> | a queued search failed 3 runs in a row or was malformed and was moved to `pending-searches/.quarantine/` | report the file and the reason; put it back with `node scripts/pipeline-watchdog.js --release-quarantine <file>` only after the owner agrees the cause is fixed |
 | pending-sources-mismatch-giveup | a queued search asked for Reed while Reed is off; dropped | none unless the owner wants Reed |

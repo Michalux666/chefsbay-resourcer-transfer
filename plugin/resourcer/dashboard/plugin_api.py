@@ -1068,6 +1068,7 @@ def _safe_json_dict(text: Any) -> Optional[Dict[str, Any]]:
 
 _COUNT_KEYS = ("pool", "newToZoho", "downloaded", "duplicates", "skipped", "errors")
 _P1_KEYS = ("pagesScraped", "approved", "skippedDb", "skippedReview")
+_SOURCE_STATUSES = ("ok", "empty", "failed", "auth_failed", "halted", "limit", "not_run")
 
 
 def source_breakdown(text: Any) -> Optional[Dict[str, Any]]:
@@ -1080,6 +1081,14 @@ def source_breakdown(text: Any) -> Optional[Dict[str, Any]]:
     out["authFailed"] = bool(obj.get("authFailed"))
     if obj.get("authFailureReason"):
         out["authFailureReason"] = scrub(obj.get("authFailureReason"), 120)
+    # A source that could not be searched is FAILED, never "pool 0, OK" (docs/parity/reed-first-page.md). Keys exist only when recorded.
+    status = obj.get("status")
+    if isinstance(status, str) and status in _SOURCE_STATUSES:
+        out["status"] = status
+    if status == "failed" or obj.get("failed") is True:
+        out["failed"] = True
+        if obj.get("failureReason"):
+            out["failureReason"] = scrub(obj.get("failureReason"), 120)
     return out
 
 

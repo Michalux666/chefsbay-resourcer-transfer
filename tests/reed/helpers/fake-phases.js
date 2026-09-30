@@ -12,6 +12,7 @@ const argv = process.argv.slice(2);
 const get = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : ''; };
 if (mode === 'auth-marker') { fs.mkdirSync(path.join(home, 'runtime'), { recursive: true }); fs.writeFileSync(path.join(home, 'runtime', 'reed-auth-failed.marker'), JSON.stringify({ reason: 'turnstile_blocked', failedAt: new Date().toISOString() })); console.log('REED_AUTH_FAILED'); process.exit(1); }
 if (mode === 'auth-output') { console.error('REED_RELOGIN_NEEDED: HTTP 401'); process.exit(1); }
+if (mode === 'first-page-failed') { console.error('[reed-phase1] FATAL: Could not fetch first page: Reed API POST HTTP 400: {"errorCode":50010}'); console.log('REED_FIRST_PAGE_FAILED: HTTP 400 code 50010 attempts=3 streak=1'); process.exit(1); }
 if (mode === 'boom') { console.error('something unrelated exploded'); process.exit(1); }
 if (mode === 'quiet') { console.log('[Reed Phase 1] No candidates found - exiting'); process.exit(0); }
 fs.mkdirSync(path.join(home, 'downloads'), { recursive: true });

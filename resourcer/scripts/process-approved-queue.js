@@ -56,6 +56,7 @@ function realDeps() {
     baseCaterer: () => require('./caterer-session-utils').BASE_CATERER,
     downloadCvViaScript: downloadCvViaScriptReal,
     upsertTerritory: (db, params) => require('./territory-utils').upsertTerritory(db, params),
+    markReedHalf: (db, params) => require('./territory-utils').markReedHalf(db, params),
     openDb: () => {
       const Database = require('better-sqlite3');
       const db = new Database(paths.DB, { fileMustExist: true, timeout: 15000 });
@@ -138,6 +139,19 @@ function findPhase1StatusFile(queuePath, matchStatuses, meta) {
   } catch { /* RUNS_DIR read failed */ }
 
   return null;
+}
+
+// What happened to the Reed half of a run (docs/parity/reed-first-page.md): failed (the search could not be made), auth_failed, halted (screening
+// down), limit (daily profile views used up), ok (searched, candidates seen or approved), empty (searched, a genuine pool of 0), not_run (the run asks
+// for Reed but no Reed step left any record: held or skipped). null = the run has no Reed half at all.
+function reedStatusOf(reedP1, reedCandCount, resolvedSources) {
+  const hasStats = !!reedP1 && Object.keys(reedP1).length > 0;
+  if (!hasStats && !reedCandCount) return (resolvedSources === 'reed' || resolvedSources === 'both') ? 'not_run' : null;
+  if (reedP1.failed === true) return 'failed';
+  if (reedP1.authFailed) return 'auth_failed';
+  if (reedP1.screeningHalted === true) return 'halted';
+  if (reedP1.dailyLimitReached === true) return 'limit';
+  return (Number(reedP1.pool ?? reedP1.totalCandidatesSeen ?? 0) > 0 || reedCandCount > 0) ? 'ok' : 'empty';
 }
 
 // Merged queues nest phase1Stats by source; single-source queues are flat.
@@ -1218,6 +1232,7 @@ async function run(queuePathArg, injected) {
       return 'caterer';
     })();
 
+    const reedStatusNow = reedStatusOf(reedP1, phaseResults.filter(r => r.source === 'reed').length, resolvedSources);
     const resultsObj = {
       date: today,
       requestedAt,
@@ -1237,6 +1252,7 @@ async function run(queuePathArg, injected) {
       screeningModel,
       sources: resolvedSources,
       ...(incompleteRun ? { incomplete: incompleteRun } : {}),
+      ...(reedStatusNow ? { reedStatus: reedStatusNow } : {}),
       phase1: {
         candidateCount: catererP1.totalCandidatesSeen ?? candidateCount ?? null,
         pagesScraped: catererP1.pagesScraped ?? null,
@@ -1283,7 +1299,10 @@ async function run(queuePathArg, injected) {
           newToZoho: reedCands.filter(r => r.status === 'new').length,
           downloaded: reedCands.filter(r => !r.downloadError).length,
           duplicates: reedCands.filter(r => r.status === 'duplicate').length,
-          errors: reedCands.filter(r => r.status === 'error' || r.downloadError).length,
+          // A failed Reed attempt counts one error: it never reads as a clean empty search (pool 0, errors 0).
+          errors: Math.max(reedCands.filter(r => r.status === 'error' || r.downloadError).length, reedStatusNow === 'failed' ? 1 : 0),
+          status: reedStatusNow,
+          ...(reedStatusNow === 'failed' ? { failed: true, failureReason: reedP1.failureReason || null } : {}),
           authFailed: reedP1.authFailed || false,
           authFailureReason: reedP1.authFailureReason || null,
           phase1: { pagesScraped: reedP1.pagesScraped ?? 0, approved: reedP1.approved ?? 0,
@@ -1370,6 +1389,7 @@ async function run(queuePathArg, injected) {
     } else {
       const tdb = deps.openDb();
       let result;
+      let reedMark = null;
       try {
         result = deps.upsertTerritory(tdb, {
           jobTitle,
@@ -1385,9 +1405,20 @@ async function run(queuePathArg, injected) {
           creditsRemaining,
           lastSearched: today,
         });
+        // The Caterer half is real and marks the territory searched; the Reed half is bookkept on its own (rule R4, territory-utils.markReedHalf).
+        if (reedStatusNow) {
+          try {
+            reedMark = deps.markReedHalf(tdb, { jobTitle: result.jobTitle, location: result.location, keywords: result.keywords ?? (keywords || ''), distance: result.distance, status: reedStatusNow, today });
+          } catch (e) {
+            reedMark = { error: String((e && e.message) || e).slice(0, 120) }; // bookkeeping only: never fails the run
+          }
+        }
       } finally {
         try { tdb.close(); } catch { /* ignore */ }
       }
+      if (reedMark && reedMark.error) console.log(`[Territory] WARN: Reed half mark failed: ${reedMark.error}`);
+      else if (reedMark && reedMark.pending) console.log(`[Territory] Reed half NOT done for ${result.jobTitle} / ${result.location} (reed status ${reedStatusNow}): marked reed-pending since ${today}${reedMark.retryDate ? `, one automatic retry on ${reedMark.retryDate}` : ''}`);
+      else if (reedMark && reedMark.cleared) console.log(`[Territory] Reed half done for ${result.jobTitle} / ${result.location}: reed-pending mark cleared`);
       if (result.autoDowngraded) {
         console.log(`[Territory] AUTO-DOWNGRADE: ${result.jobTitle} / ${result.location} - ${result.previousPriority} -> ${result.effectivePriority} (fewer than 5 new CVs this run)`);
         runState.update({ autoDowngraded: true, previousPriority: result.previousPriority });

@@ -142,6 +142,56 @@ test('a Reed run that prints no queue (pool 0) is merged as an empty placeholder
   } finally { m.cleanup(); }
 });
 
+test('a Reed first-page failure is merged as a FAILED attempt (failed, errors 1, reason), never described as a recorded both-source attempt; the Caterer queue is untouched', async () => {
+  const { m, calls, run } = setup();
+  try {
+    const r = await run({ RESOURCER_SOURCES: 'both', FAKE_REED_MODE: 'first-page-failed' });
+    assert.strictEqual(r.code, 0, r.stderr);
+    assert.deepStrictEqual(calls().map((x) => x.who), ['reed', 'phase2', 'optimiser'], 'Phase 2 still runs once (the Caterer half completes)');
+    const merged = m.readJson(`downloads/${calls()[1].queue}`);
+    assert.strictEqual(merged.sources, 'both');
+    assert.strictEqual(merged.candidates.length, 1, 'the Caterer candidate is still in the queue');
+    const reed = merged.phase1Stats.reed;
+    assert.strictEqual(reed.failed, true);
+    assert.strictEqual(reed.failureKind, 'first_page');
+    assert.strictEqual(reed.failureReason, 'HTTP 400 code 50010');
+    assert.strictEqual(reed.errors, 1);
+    assert.strictEqual(reed.authFailed, false, 'not an auth failure: the pending search is not kept for Reed auth retries');
+    assert.match(r.stderr, /REED_FIRST_PAGE_FAILED \(HTTP 400 code 50010\) - recorded as a FAILED Reed attempt/);
+    assert.ok(!/record both-source attempt/.test(r.stderr), 'never described as a recorded both-source attempt');
+    assert.ok(!/AUTH FAILED/.test(r.stderr));
+  } finally { m.cleanup(); }
+});
+
+test('a Reed run that exits non-zero without a queue and without an auth signature is a FAILED attempt too (generic case), the quiet pool-0 run is not', async () => {
+  let { m, calls, run } = setup();
+  try {
+    const r = await run({ RESOURCER_SOURCES: 'both', FAKE_REED_MODE: 'boom' });
+    const merged = m.readJson(`downloads/${calls()[1].queue}`);
+    assert.strictEqual(merged.phase1Stats.reed.failed, true);
+    assert.strictEqual(merged.phase1Stats.reed.failureKind, 'phase1_exit');
+    assert.strictEqual(merged.phase1Stats.reed.errors, 1);
+    assert.match(r.stderr, /WARNING: Reed produced no queue \(exit 1\) - recorded as a FAILED Reed attempt \(reed_status failed, errors 1\), not as an empty search/);
+  } finally { m.cleanup(); }
+  ({ m, calls, run } = setup());
+  try {
+    const r = await run({ RESOURCER_SOURCES: 'both', FAKE_REED_MODE: 'quiet' });
+    const merged = m.readJson(`downloads/${calls()[1].queue}`);
+    assert.strictEqual(merged.phase1Stats.reed.failed, undefined, 'a clean exit 0 with no queue is the empty-search placeholder');
+    assert.match(r.stderr, /record both-source attempt/);
+  } finally { m.cleanup(); }
+});
+
+test('an auth failure wins over the failure flag: authFailed is kept and no failed flag is added', async () => {
+  const { m, calls, run } = setup();
+  try {
+    await run({ RESOURCER_SOURCES: 'both', FAKE_REED_MODE: 'auth-marker' });
+    const merged = m.readJson(`downloads/${calls()[1].queue}`);
+    assert.strictEqual(merged.phase1Stats.reed.authFailed, true);
+    assert.strictEqual(merged.phase1Stats.reed.failed, undefined);
+  } finally { m.cleanup(); }
+});
+
 test('the Reed queue path comes from the summary line, with the legacy file-name regex as fallback', async () => {
   for (const mode of ['ok', 'regex-path']) {
     const { m, calls, run } = setup();

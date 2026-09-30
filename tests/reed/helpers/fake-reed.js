@@ -14,6 +14,8 @@ const { WebSocketServer } = dep('ws');
 const API_PREFIX = '/api-bff-recruiter-candidates';
 const SEARCH_URL = 'https://www.reed.co.uk/recruiter/v2/candidates/search/results';
 const HOME_URL = 'https://www.reed.co.uk/recruiter/v2/home';
+// What the live API answered on 2026-09-30 when the request carried no usable bearer (code 50010).
+const HEADER_MISSING_BODY = { errorCode: 50010, exception: 'RequiredHeaderMissingException', message: 'Required header is missing or unavailable' };
 
 const b64u = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
 function makeJwt(expSecs, extra) {
@@ -99,6 +101,15 @@ async function startFakeReed(opts = {}) {
     tokenTtlSecs: 1800,
     captureMode: 'requestWillBeSent', // requestWillBeSent | extraInfo | responseReceived | none
     navError: null,
+    // Fault knobs for the first-page failure (docs/parity/reed-first-page.md). All default to off.
+    wipeTokenAfterSeed: 0, // N: after the next N evaluations that assign window.__capturedReedToken, the document is replaced (token variable gone)
+    reloadAfterEvals: [], // evaluation counts (per tab, 1-based) after which the document is replaced once
+    spaReloadMs: 0, // a tab that lands on the search page replaces its document once more this many ms later (an SPA redirect)
+    loadMs: 0, // document.readyState stays 'loading' this long after every navigation
+    initMs: 0, // in-page requests sent within this many ms of the last navigation are answered 400 50010 (page not initialised)
+    initRejects: 0,
+    destroyNextEvals: 0, // N: the next N in-page requests (evaluations that call fetch) fail the way a replaced document does: "Execution context was destroyed"
+    reloads: 0,
     tokens: new Set(),
     tokenClaims: {},
     cookiesDeleted: 0,
@@ -120,6 +131,9 @@ async function startFakeReed(opts = {}) {
     cvKind: 'txt', // txt | html | tiny
     blockDirect: false, // requests from Node (direct fetch carries an Origin header) get Cloudflare's 403, like production
     profileNoContact: 0, // first N profile requests come back without contact details
+    alwaysHeaderMissing: false, // every search request is answered 400 50010, whatever it carries
+    headerMissingAnswers: 0,
+    noLocations: false, // the location lookup finds nothing (an unsearchable place)
   };
 
   // -------------------------------------------------------------- fake Reed API
@@ -154,7 +168,12 @@ async function startFakeReed(opts = {}) {
       }
     }
     if (api.fixedStatus) return send(api.fixedStatus, { message: `fixed ${api.fixedStatus}` });
-    const tok = rec.auth.replace(/^Bearer /i, '');
+    // An absent or empty bearer is what the live API called a missing header (400, code 50010), not an invalid token (401).
+    if (!/^Bearer\s+\S+/i.test(rec.auth) || (api.alwaysHeaderMissing && req.method === 'POST' && rec.path.startsWith('/candidate/search/'))) {
+      api.headerMissingAnswers++;
+      return send(400, HEADER_MISSING_BODY);
+    }
+    const tok = rec.auth.replace(/^Bearer\s+/i, '');
     let valid = site.tokens.has(tok);
     if (valid) {
       try {
@@ -166,6 +185,7 @@ async function startFakeReed(opts = {}) {
     const p = rec.path;
     if (req.method === 'GET' && p.startsWith('/location/suggest-locations/')) {
       const term = url.searchParams.get('searchTerm') || '';
+      if (api.noLocations) return send(200, { result: { suggestedLocations: [] } });
       return send(200, { result: { suggestedLocations: [{ locationId: 4242, searchName: term.toUpperCase(), postcode: term }] } });
     }
     if (req.method === 'POST' && p.startsWith('/candidate/search/boolean/')) {
@@ -259,7 +279,7 @@ async function startFakeReed(opts = {}) {
 
   function newTab(url) {
     const id = `T${++tabSeq}`;
-    const t = { id, type: 'page', url: url || 'about:blank', title: '', sockets: new Set(), page: { kind: 'blank' }, ctx: null, win: {} };
+    const t = { id, type: 'page', url: url || 'about:blank', title: '', sockets: new Set(), page: { kind: 'blank' }, ctx: null, win: {}, navAt: Date.now(), evals: 0 };
     tabs.set(id, t);
     return t;
   }
@@ -286,6 +306,7 @@ async function startFakeReed(opts = {}) {
     t.url = url;
     t.win = {};
     t.ctx = null;
+    t.navAt = Date.now();
     t.page = kind === 'login' ? loginPage() : { kind };
     t.title = t.page.interstitial ? 'Just a moment...' : (kind === 'login' ? 'Sign in' : kind);
   }
@@ -317,6 +338,10 @@ async function startFakeReed(opts = {}) {
       } else if (/candidates\/search/.test(url)) {
         setUrl(t, url, 'search');
         emitBearer(t);
+        if (site.spaReloadMs) {
+          const navAt = t.navAt;
+          setTimeout(() => { if (t.navAt === navAt && tabs.has(t.id) && t.page.kind === 'search') reloadTab(t); }, site.spaReloadMs).unref();
+        }
       } else {
         setUrl(t, url, 'home');
       }
@@ -326,9 +351,17 @@ async function startFakeReed(opts = {}) {
     return fromCdp;
   }
 
+  // The document is replaced (a reload or an SPA redirect): page variables are gone, a new bearer is emitted on a search page.
+  function reloadTab(t) {
+    site.reloads++;
+    setUrl(t, t.url, t.page.kind);
+    if (t.page.kind === 'search') emitBearer(t);
+  }
+
   function buildContext(t) {
     const doc = {
       get title() { return t.title; },
+      get readyState() { return site.loadMs && Date.now() - t.navAt < site.loadMs ? 'loading' : 'complete'; },
       querySelector(sel) {
         const p = t.page;
         if (p.kind !== 'login') return null;
@@ -344,6 +377,10 @@ async function startFakeReed(opts = {}) {
     const realFetch = fetch;
     const wrappedFetch = async (u, o) => {
       const s = String(u);
+      if (site.initMs && Date.now() - t.navAt < site.initMs && (s.startsWith('https://api.reed.co.uk') || s.startsWith(`http://127.0.0.1:${apiPort}`))) {
+        site.initRejects++;
+        return new Response(JSON.stringify(HEADER_MISSING_BODY), { status: 400 });
+      }
       if (s.startsWith('https://api.reed.co.uk')) {
         if (t.page.kind !== 'search') return new Response('{"message":"tab not on search page"}', { status: 401 });
         return realFetch(`http://127.0.0.1:${apiPort}${s.slice('https://api.reed.co.uk'.length)}`, o);
@@ -360,7 +397,14 @@ async function startFakeReed(opts = {}) {
       localStorage: { clear() { t.storageCleared = true; } },
       sessionStorage: { clear() {} },
     };
-    Object.defineProperty(sandbox, 'location', { get: () => ({ href: t.url }) });
+    Object.defineProperty(sandbox, 'location', {
+      get: () => {
+        let pathname = '';
+        try { pathname = new URL(t.url).pathname; } catch { pathname = ''; }
+        return { href: t.url, pathname };
+      },
+    });
+    Object.defineProperty(sandbox, 'performance', { get: () => ({ timeOrigin: t.navAt, now: () => Date.now() - t.navAt }) });
     sandbox.window = sandbox;
     sandbox.HTMLInputElement = FakeInput;
     Object.defineProperty(sandbox, '__capturedReedToken', { get: () => t.win.token, set: (v) => { t.win.token = v; }, configurable: true, enumerable: true });
@@ -385,13 +429,22 @@ async function startFakeReed(opts = {}) {
 
   async function evaluate(t, params) {
     if (!t.ctx) t.ctx = buildContext(t);
+    t.evals = (t.evals || 0) + 1;
+    const evalNo = t.evals;
+    const seeds = /__capturedReedToken\s*=[^=]/.test(params.expression);
+    const after = () => {
+      if (seeds && site.wipeTokenAfterSeed > 0) { site.wipeTokenAfterSeed--; reloadTab(t); }
+      if (site.reloadAfterEvals.includes(evalNo)) reloadTab(t);
+    };
     let r;
     try {
       r = vm.runInContext(params.expression, t.ctx, { timeout: 5000 });
       if (r && typeof r.then === 'function') r = await r;
     } catch (e) {
+      after();
       return { exceptionDetails: { text: 'Uncaught', exception: { description: `${e && e.name}: ${e && e.message}` } } };
     }
+    after();
     if (r === undefined) return { result: { type: 'undefined' } };
     return { result: { type: typeof r, value: typeof r === 'object' && r !== null ? JSON.parse(JSON.stringify(r)) : r } };
   }
@@ -415,6 +468,11 @@ async function startFakeReed(opts = {}) {
         return undefined;
       }
       case 'Runtime.evaluate': {
+        if (site.destroyNextEvals > 0 && params.expression.includes('fetch(')) {
+          site.destroyNextEvals--;
+          reloadTab(t);
+          return fail(-32000, 'Execution context was destroyed.');
+        }
         const r = await evaluate(t, params);
         return reply(r);
       }
@@ -451,4 +509,4 @@ async function startFakeReed(opts = {}) {
   return fake;
 }
 
-module.exports = { startFakeReed, makeJwt, makeCard, makeMinimalPdf, makeMinimalDocx, SEARCH_URL, HOME_URL, API_PREFIX };
+module.exports = { startFakeReed, makeJwt, makeCard, makeMinimalPdf, makeMinimalDocx, SEARCH_URL, HOME_URL, API_PREFIX, HEADER_MISSING_BODY };

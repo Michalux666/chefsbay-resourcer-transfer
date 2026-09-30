@@ -137,6 +137,8 @@ function baseEnv(home, extra) {
     SCREEN_PAGE_RETRY_PAUSE_SEC: '0.05',
     REED_CV_DELAY_MS: '0',
     REED_CAPTURE_TIMEOUT_MS: '3000',
+    REED_TAB_SETTLE_MS: '50',
+    REED_RETRY_BACKOFF_MS: '50',
     REED_CDP_COMMAND_TIMEOUT_MS: '5000',
     REED_LAUNCH_TIMEOUT_MS: '20000',
     FAKE_AI_STATE: path.join(home, 'ai-state.json'),

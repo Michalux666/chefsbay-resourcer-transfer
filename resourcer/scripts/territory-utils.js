@@ -405,7 +405,11 @@ function upsertTerritory(db, params) {
   // future date. Falls back to rolling-from-today on a first-ever run (no prior slot).
   // Capacity-aware (2026-08-06): fixed cadence gives the target date, then we slide
   // forward to the first day under the daily cap so no day can be overloaded.
-  const nextRunDate = computeNextRunDateCapped(
+  // A run ahead of its slot (a one-off or catch-up search on a territory that is not due yet, for example tools/reed-catchup.js) leaves the slot
+  // where it is: rolling it on by a whole interval would push the next regular sweep a full interval past its due date and open a gap in the
+  // 30-day window. A priority downgrade is the exception: it re-bases the cadence as before.
+  const notYetDue = !!existing?.next_run_date && existing.next_run_date > today && !autoDowngraded;
+  const nextRunDate = notYetDue ? existing.next_run_date : computeNextRunDateCapped(
     db,
     existing?.next_run_date || null,
     today,
@@ -446,6 +450,64 @@ function upsertTerritory(db, params) {
 }
 
 /**
+ * Reed half bookkeeping (docs/parity/reed-first-page.md, rule R4).
+ *
+ * territory_searches is marked "searched" after every run because the Caterer half happened and spent its credits. That says nothing about
+ * the Reed half, so a run whose Reed half did not happen must not make the territory look fully done. The rule, in one place:
+ *
+ *   reed_pending_since (nullable TEXT date, added here when missing) is set to today when a run records reed status 'failed' (the first search
+ *   page could not be fetched) or 'auth_failed', keeping the OLDEST date of an open episode; it is cleared by a run that records 'ok' or 'empty'
+ *   (Reed was searched; a genuine empty pool counts). Any other status (Reed off, held, daily limit, screening halt) leaves it as it was.
+ *   The FIRST failure of an episode (mark was empty) and only status 'failed' also pulls next_run_date forward to the first day from tomorrow
+ *   (UTC) with free daily capacity, when it is later than that: one automatic retry through the normal queue-due path. A second failure keeps
+ *   the normal cadence and the mark stays; tools/reed-catchup.js lists every marked territory and every run without a good Reed half.
+ *
+ * Never throws into the caller's run: a missing table or a locked database returns {error}.
+ */
+function ensureReedPendingColumn(db) {
+  const cols = db.prepare('PRAGMA table_info(territory_searches)').all().map((c) => c.name);
+  if (!cols.includes('reed_pending_since')) db.exec('ALTER TABLE territory_searches ADD COLUMN reed_pending_since TEXT');
+}
+
+function markReedHalf(db, { jobTitle, location, keywords, distance, status, today, cap = DAILY_TERRITORY_CAP }) {
+  try {
+    const open = status === 'failed' || status === 'auth_failed';
+    const close = status === 'ok' || status === 'empty';
+    if (!open && !close) return { changed: false };
+    ensureReedPendingColumn(db);
+    const key = [normaliseJobTitle(jobTitle), normaliseLocation(location), distance, normaliseKeywords(keywords || '')];
+    const row = db.prepare('SELECT id, reed_pending_since, next_run_date FROM territory_searches WHERE job_title=? AND location=? AND distance=? AND keywords=?').get(...key);
+    if (!row) return { changed: false, missing: true };
+    const day = today || new Date().toISOString().slice(0, 10);
+    if (close) {
+      if (!row.reed_pending_since) return { changed: false };
+      db.prepare('UPDATE territory_searches SET reed_pending_since = NULL WHERE id = ?').run(row.id);
+      return { changed: true, cleared: true };
+    }
+    const first = !row.reed_pending_since;
+    if (first) db.prepare('UPDATE territory_searches SET reed_pending_since = ? WHERE id = ?').run(day, row.id);
+    let retryDate = null;
+    if (first && status === 'failed') {
+      const t = new Date(`${day}T00:00:00Z`);
+      t.setUTCDate(t.getUTCDate() + 1);
+      let d = t.toISOString().slice(0, 10);
+      const count = db.prepare('SELECT COUNT(*) c FROM territory_searches WHERE enabled=1 AND next_run_date=?');
+      for (let i = 0; i < 365 && count.get(d).c >= cap; i++) {
+        t.setUTCDate(t.getUTCDate() + 1);
+        d = t.toISOString().slice(0, 10);
+      }
+      if (!row.next_run_date || row.next_run_date > d) {
+        db.prepare('UPDATE territory_searches SET next_run_date = ? WHERE id = ?').run(d, row.id);
+        retryDate = d;
+      }
+    }
+    return { changed: true, pending: true, first, retryDate };
+  } catch (e) {
+    return { changed: false, error: String((e && e.message) || e).slice(0, 120) };
+  }
+}
+
+/**
  * Return all due territories (enabled=1, next_run_date <= today, or NULL).
  * Sorted: high priority first, then by next_run_date ascending.
  * Includes sources field (defaults to 'caterer' if NULL).
@@ -475,5 +537,6 @@ module.exports = {
   DAILY_TERRITORY_CAP,
   normaliseInputs,
   upsertTerritory,
+  markReedHalf,
   getDueTerritories,
 };

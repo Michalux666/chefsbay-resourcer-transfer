@@ -256,13 +256,15 @@ function waitForBearer(conn, timeoutMs) {
   return { promise, fail: (e) => finish(e) };
 }
 
-async function captureTokenViaCdp(wsUrl) {
+// opts.timeoutMs (optional) lowers the capture wait below REED_CAPTURE_TIMEOUT_MS so a caller with a time budget stays inside it.
+async function captureTokenViaCdp(wsUrl, opts = {}) {
   const conn = new CdpConn(wsUrl);
   let cap = null;
   try {
     await conn.open();
     log('CDP connected - enabling Network...');
-    cap = waitForBearer(conn, CAPTURE_TIMEOUT_MS());
+    const waitMs = opts.timeoutMs > 0 ? Math.min(CAPTURE_TIMEOUT_MS(), opts.timeoutMs) : CAPTURE_TIMEOUT_MS();
+    cap = waitForBearer(conn, waitMs);
     cap.promise.catch(() => {});
     await conn.send('Network.enable');
     log('Navigating to trigger Auth0 token...');
@@ -280,11 +282,11 @@ async function captureTokenViaCdp(wsUrl) {
 
 // ---------------------------------------------------------------- flows
 
-async function refreshToken() {
+async function refreshToken(opts = {}) {
   const tab = await findReedTab();
   if (!tab || !tab.webSocketDebuggerUrl) throw new Error('No Chromium tab found. Run: node scripts/ensure-chrome-cdp.js --ensure-reed-tab');
   log(`Using tab: ${String(tab.url || '').split('?')[0]}`);
-  const token = await captureTokenViaCdp(tab.webSocketDebuggerUrl);
+  const token = await captureTokenViaCdp(tab.webSocketDebuggerUrl, opts);
   const expSecs = decodeJwtExpiry(token) || Math.floor(Date.now() / 1000) + 1800;
   saveSession(token, expSecs);
   return token;

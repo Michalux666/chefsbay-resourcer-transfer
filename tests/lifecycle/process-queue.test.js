@@ -858,7 +858,8 @@ test('credits fallback: no 30 s timeout is left on the caterer-get-credits call'
 // ---------------------------------------------------------------------------------------------
 
 const DASHBOARD_REQUIRED = ['date', 'new_to_zoho', 'downloaded', 'duplicates', 'errors'];
-const DASHBOARD_COUNT_KEYS = ['pool', 'newToZoho', 'downloaded', 'duplicates', 'skipped', 'errors', 'phase1', 'authFailed', 'authFailureReason'];
+// 'status', 'failed' and 'failureReason' (Update D): the Reed half says whether it was searched; none of them carries a name or candidate row.
+const DASHBOARD_COUNT_KEYS = ['pool', 'newToZoho', 'downloaded', 'duplicates', 'skipped', 'errors', 'phase1', 'authFailed', 'authFailureReason', 'status', 'failed', 'failureReason'];
 
 test('run_results: the table is created when absent, with the dashboard columns, and the row carries the required subset', async () => {
   reset(['7101']);
@@ -904,6 +905,7 @@ test('run_results: the per-source JSON holds counts only (no names, no candidate
     for (const k of Object.keys(obj)) assert.ok(DASHBOARD_COUNT_KEYS.includes(k), `${col}.${k}`);
     assert.doesNotMatch(row0[col], /Test Person|example\.invalid|07000/);
   }
+  assert.equal(JSON.parse(row0.reed_json).status, 'ok', 'the Reed half carries its status, never a bare pool and errors');
 });
 
 test('run_results: sources is always caterer, reed or both', async () => {

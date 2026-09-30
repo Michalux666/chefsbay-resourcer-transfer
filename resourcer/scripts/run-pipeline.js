@@ -121,6 +121,14 @@ async function runReedPhase1(opts, extraEnv) {
   }
   if (authFailure) log(`!! Reed AUTH FAILED - reason=${authFailure.reason}. Reed stats will show the failure in the results.`);
 
+  // A Reed attempt that could not search is a FAILURE (reed_status failed, errors 1), never an empty search (docs/parity/reed-first-page.md).
+  // Marker REED_FIRST_PAGE_FAILED (reed-phase1.js) names the first-page case; any other non-zero exit that left no queue and no auth failure is the generic case.
+  let failure = null;
+  if (!authFailure) {
+    const fp = /REED_FIRST_PAGE_FAILED:[ \t]*([^\n]*)/.exec(reedOut);
+    if (fp) failure = { kind: 'first_page', reason: fp[1].replace(/\s+attempts=.*$/, '').trim().slice(0, 80) || 'unknown', failedAt: new Date().toISOString() };
+  }
+
   let reedQueue = null;
   const sm = stdout.match(/REED_PHASE1_SUMMARY:(\{.*\})/);
   if (sm) {
@@ -130,7 +138,8 @@ async function runReedPhase1(opts, extraEnv) {
     const match = stdout.match(/reed-approved-queue-([^.]+)\.json/);
     if (match) reedQueue = path.join(DOWNLOADS, `reed-approved-queue-${match[1]}.json`);
   }
-  return { code, reedQueue, authFailure };
+  if (!failure && !authFailure && code !== 0 && !reedQueue) failure = { kind: 'phase1_exit', reason: `exit ${code}`, failedAt: new Date().toISOString() };
+  return { code, reedQueue, authFailure, failure };
 }
 
 // ---------------------------------------------------------------- queue merge
@@ -331,6 +340,7 @@ async function main(argv) {
       let childEnv = {};
       let reedQueuePath = null;
       let reedAuthFailure = null;
+      let reedFailure = null;
       let reedSkippedByConfig = false;
       let reedHold = null;
 
@@ -358,6 +368,7 @@ async function main(argv) {
             }, childEnv);
             reedQueuePath = reedResult.reedQueue;
             reedAuthFailure = reedResult.authFailure;
+            reedFailure = reedResult.failure;
           } catch (err) {
             log(`ERROR: Reed Phase 1 threw: ${err.message} - treating as auth/runtime failure`);
             reedAuthFailure = { reason: 'spawn_threw', error: (err.message || '').slice(0, 200), failedAt: new Date().toISOString() };
@@ -373,6 +384,10 @@ async function main(argv) {
       } else {
         if (reedAuthFailure) {
           log(`!! Reed SKIPPED due to auth failure (${reedAuthFailure.reason}) - merged queue will carry authFailed flag`);
+        } else if (reedFailure && reedFailure.kind === 'first_page') {
+          log(`!! REED_FIRST_PAGE_FAILED (${reedFailure.reason}) - recorded as a FAILED Reed attempt (reed_status failed, errors 1), not as an empty search; the Caterer half is unaffected and the territory keeps a Reed-pending mark`);
+        } else if (reedFailure) {
+          log(`WARNING: Reed produced no queue (${reedFailure.reason}) - recorded as a FAILED Reed attempt (reed_status failed, errors 1), not as an empty search`);
         } else {
           log('WARNING: Reed produced no queue - merging with empty Reed to record both-source attempt');
         }
@@ -390,6 +405,9 @@ async function main(argv) {
             authFailed: !!reedAuthFailure,
             authFailureReason: (reedAuthFailure && reedAuthFailure.reason) || null,
             authFailedAt: (reedAuthFailure && reedAuthFailure.failedAt) || null,
+            ...(reedFailure && !reedAuthFailure ? {
+              failed: true, failureKind: reedFailure.kind, failureReason: reedFailure.reason, failedAt: reedFailure.failedAt, errors: 1,
+            } : {}),
           },
         }, 0o600);
         finalQueueFile = await mergeQueues(queueFile, placeholderReed);
