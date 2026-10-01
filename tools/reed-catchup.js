@@ -28,8 +28,10 @@
  * dashboard search, so a catch-up only uses idle capacity). Sources both (there is no Reed-only run upstream: the Caterer half re-runs and
  * is mostly skipped as already known), priority low. Never a territory that is already queued, quarantined, running or that ran today (London day, as run_results records it); never
  * more than --per-day per UTC day (ledger runtime/reed-catchup.json); idempotent. Reed's daily profile-view budget (reed_daily_usage) is
- * respected the way the scheduler respects it: nothing is queued once today's views reach the limit, and every catch-up file reserves
- * CV_RESERVE views of the remaining budget for the day it is queued.
+ * respected the way the scheduler respects it: nothing is queued once today's views reach the limit, and every catch-up search that is still PENDING (its
+ * file zz-reed-catchup-* is still in pending-searches/: queued, or running and not yet finished, Phase 2 deletes it when the run completes) reserves CV_RESERVE
+ * views of the remaining budget. A catch-up search that has FINISHED reserves nothing: the views it really used are already in reed_daily_usage, so reserving
+ * them again would count them twice (observed live: 39 of 600 views used, 28 catch-ups finished, a request for 30 queued 8).
  *
  * --queue refuses (exit 3, nothing written) while Reed is switched off (RESOURCER_SOURCES) or held after an auth failure: the run would redo
  * the Caterer half, which can spend unlock credits, and still not do Reed. The analysis, the plan and the ledger are read under the
@@ -46,6 +48,7 @@ const rs = require('./request-search');
 const DEFAULT_SINCE = '2026-09-30';
 const DEFAULT_PER_DAY = 10; // a design default; the owner decides how many a day
 const CV_RESERVE = 20; // profile views one catch-up run may use (the default CV limit per run)
+const CATCHUP_PREFIX = 'zz-reed-catchup-'; // the names this tool gives its pending searches (newName)
 const DEFAULT_REED_LIMIT = 300; // the same fallback the scheduler uses when reed_daily_usage has no limit
 const LEDGER_KEEP_DAYS = 14;
 const LOG_CAP_BYTES = 40 * 1024 * 1024;
@@ -226,7 +229,11 @@ function analyse(home, o, now, logs) {
   }
 
   logs = logs || firstPageFailuresInLogs(home, o.since);
-  const pending = rs.scanPending(home, now).items;
+  const scanned = rs.scanPending(home, now);
+  const pending = scanned.items;
+  // the catch-up searches that have not finished: their file is still there (a file that cannot be read still counts: it is a search that was queued)
+  const pendingCatchup = new Set(scanned.names.filter((n) => n.startsWith(CATCHUP_PREFIX)));
+  for (const p of pending) if (p.source === 'reed-catchup') pendingCatchup.add(p.file);
   const queuedKeys = new Set(pending.map((p) => keyOf(p.jobTitle, p.location, p.keywords)));
   const queuedLoose = new Set(pending.map((p) => `${norm(p.jobTitle)}|${String(p.location).toUpperCase()}`));
   const quarantined = new Set();
@@ -270,7 +277,7 @@ function analyse(home, o, now, logs) {
   const order = ['failed', 'skipped', 'reed_off', 'empty_with_log_failure'];
   const list = order.flatMap((c) => cats[c]).sort((a, b) => (order.indexOf(a.category) - order.indexOf(b.category)) || String(a.since).localeCompare(String(b.since)));
   const byDay = [...reedByDay.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([date, v]) => ({ date, attempts: v.attempts, failed: v.failed, failedPercent: Math.round(v.failed / v.attempts * 1000) / 10 }));
-  return { today, cats, list, excluded, usage, latestRuns: latest.size, reedByDay: byDay };
+  return { today, cats, list, excluded, usage, latestRuns: latest.size, reedByDay: byDay, pendingCatchups: pendingCatchup.size };
 }
 
 // ---------------------------------------------------------------- the ledger (per UTC day, for --per-day and idempotency)
@@ -299,7 +306,9 @@ function planQueue(a, o, ledger) {
   const limit = a.usage ? (Number(a.usage.daily_limit) || DEFAULT_REED_LIMIT) : DEFAULT_REED_LIMIT;
   const used = a.usage ? Number(a.usage.profile_views) || 0 : 0;
   const remaining = Math.max(0, limit - used);
-  const byBudget = Math.max(0, Math.floor(remaining / CV_RESERVE) - doneToday);
+  // reserve CV_RESERVE views for each catch-up search still PENDING only; the finished ones are already inside `used`
+  const pendingCatchups = Number.isInteger(a.pendingCatchups) ? a.pendingCatchups : 0;
+  const byBudget = Math.max(0, Math.floor(remaining / CV_RESERVE) - pendingCatchups);
   const byDay = Math.max(0, o.perDay - doneToday);
   const already = new Set(ledger.days[a.today] || []);
   const fresh = a.list.filter((x) => !already.has(x.key));
@@ -310,7 +319,7 @@ function planQueue(a, o, ledger) {
     else if (take === byDay && byDay < fresh.length) reason = 'per-day limit reached';
     else reason = 'fewer catch-up territories than asked';
   }
-  return { take, chosen: fresh.slice(0, take), doneToday, byDay, byBudget, remaining, limit, used, reason };
+  return { take, chosen: fresh.slice(0, take), doneToday, pendingCatchups, byDay, byBudget, remaining, limit, used, reason };
 }
 
 function payloadFor(item, now) {
@@ -383,7 +392,7 @@ function summary(a, o, plan, written) {
     reedByDay: a.reedByDay,
     reedBudget: a.usage ? { used: Number(a.usage.profile_views) || 0, limit: Number(a.usage.daily_limit) || DEFAULT_REED_LIMIT } : null,
     queue: plan ? {
-      asked: o.queue, perDay: o.perDay, queuedToday: plan.doneToday, allowedByBudget: plan.byBudget, wouldQueue: plan.take, reason: plan.reason,
+      asked: o.queue, perDay: o.perDay, queuedToday: plan.doneToday, pendingCatchups: plan.pendingCatchups, allowedByBudget: plan.byBudget, wouldQueue: plan.take, reason: plan.reason,
       codes: plan.chosen.map((x) => x.code), written: written ? written.map((w) => ({ file: w.file, code: w.code })) : null,
     } : null,
   };
@@ -401,7 +410,7 @@ function render(s) {
   L.push(s.reedBudget ? `Reed views today: ${s.reedBudget.used} of ${s.reedBudget.limit}` : 'Reed views today: none recorded');
   if (s.queue) {
     const q = s.queue;
-    L.push(`--queue ${q.asked}: per-day limit ${q.perDay} (${q.queuedToday} already today), view budget allows ${q.allowedByBudget} more: ${s.mode === 'queue' ? 'queued' : 'would queue'} ${q.wouldQueue}${q.codes.length ? `   ${q.codes.join(' ')}` : ''}${q.reason ? `   [${q.reason}]` : ''}`);
+    L.push(`--queue ${q.asked}: per-day limit ${q.perDay} (${q.queuedToday} already today), view budget allows ${q.allowedByBudget} more (${q.pendingCatchups} catch-up searches still pending reserve ${CV_RESERVE} views each; finished ones are counted in the views used): ${s.mode === 'queue' ? 'queued' : 'would queue'} ${q.wouldQueue}${q.codes.length ? `   ${q.codes.join(' ')}` : ''}${q.reason ? `   [${q.reason}]` : ''}`);
     if (q.written) for (const w of q.written) L.push(`  + ${w.file} (${w.code})`);
   } else if (s.territories) {
     L.push('nothing was written. To queue some: node tools/reed-catchup.js --queue N (N at most the per-day limit)');

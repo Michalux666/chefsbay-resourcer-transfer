@@ -24,6 +24,7 @@
 # 11 secrets hygiene, 12 missing database guard, 13 the Jev-only default engine, 14 CV screening after the unlock (shadow by default, on, off),
 # 15 CV_SCREEN=on with the CV route refusing while the snippet route is healthy (one hold, the halt stays, no unlock after it, the recovery completes the queue),
 # 16 the Reed first-page failure (HTTP 400, code 50010): failed attempt, recovery, transient faults, an unsearchable place, no search page fetched,
+# 17 the re-screen of the pre-unlock rejections that Update A's review policy made because Jev was uncertain (tools/rescreen-policy-rejects.js): dry run, apply, queue, the next run, undo,
 # 18 the role-scoped second look at people rejected after an unlock (docs/RESURFACE.md): CV_SCREEN=on, a charging fake Caterer, seven searches; the standard world with the feature on and off in shadow and off mode.
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
@@ -43,7 +44,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY="$2"; shift 2 ;;
     --unit) UNIT=1; shift ;;
     --keep) export E2E_KEEP=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done

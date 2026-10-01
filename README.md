@@ -13,14 +13,14 @@ secrets travel only in an encrypted data bundle (`data/resourcer-bundle.enc`, ad
 2. `docs/INSTALL.md` - the install runbook the operator follows (preflight, code, bundle, cron jobs, plugin, first run). Then `docs/ACCEPTANCE.md` (checks that need the real instance) and `docs/CUTOVER.md`.
 3. `OPERATOR-PROMPT.md` - what to tell the operator agent to begin. Its standing instructions are `hermes/AGENTS.md`, `hermes/SOUL.md` and the skill `hermes/skills/resourcer-ops/SKILL.md`.
 4. Day to day: `docs/OPERATIONS.md` (routine, alerts, recovery), `docs/KNOWN-LIMITS.md` (what is unverified or imperfect, with the mitigation), `docs/ROLLBACK.md`, `docs/TEARDOWN.md` (retiring the laptop).
-5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged, Jev alone and the review policy), `docs/SCREENING-CRITERIA.md` (the editable screening criteria and operating point), `docs/CV-SCREENING.md` (the CV stage after the unlock, in shadow by default), `docs/UPDATE-JEV-ONLY.md`, `docs/UPDATE-B.md` and `docs/UPDATE-C.md` (updating an already installed instance), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
+5. Reference: `docs/ENV.md` (every setting), `docs/SCREENING.md` (how candidates are judged, Jev alone and the review policy), `docs/SCREENING-CRITERIA.md` (the editable screening criteria and operating point), `docs/CV-SCREENING.md` (the CV stage after the unlock, in shadow by default), `docs/UPDATE-JEV-ONLY.md`, `docs/UPDATE-B.md`, `docs/UPDATE-C.md` and `docs/UPDATE-RESCREEN.md` (updating an already installed instance), `docs/RESCREEN.md` (re-screening the pre-unlock rejections that Update A's review policy made because Jev was uncertain: what it is, what it costs, the operator runbook), `docs/SECURITY.md` (secrets, personal data, encryption, data protection facts), `docs/DECISIONS.md`
    (owner decisions and every divergence from the old system), `docs/LEGACY-MAP.md` (old file to new file), `docs/DESIGN.md` (the binding contract), `docs/parity/*.md` (per-package detail with legacy line numbers, UNVERIFIED-LIVE lists).
 
 ## Layout
 
 ```
 README.md  HANDOFF.md  OPERATOR-PROMPT.md  MANIFEST.sha256  .gitattributes (LF line endings)  .gitignore
-docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING SCREENING-CRITERIA CV-SCREENING DESIGN UPDATE-JEV-ONLY UPDATE-B UPDATE-C UPDATE-E RESURFACE, parity/<package>.md
+docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING SCREENING-CRITERIA CV-SCREENING DESIGN UPDATE-JEV-ONLY UPDATE-B UPDATE-C UPDATE-RESCREEN UPDATE-E RESCREEN RESURFACE, parity/<package>.md
 resourcer/    the workspace root (RESOURCER_HOME on the instance)
   candidates-db.js  package.json  config/  scripts/  scripts/lib/  scripts/lib/screening/  scripts/lib/cv/  scripts/phase1/
   (created at run time, never committed: runs/ downloads/ logs/ runtime/ pending-searches/ secrets/ outbox/ shadow/ state/ backups/)
