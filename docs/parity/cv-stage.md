@@ -1,6 +1,6 @@
 # Parity: CV stage package (CV screening between the download and Zoho)
 
-Owner: the "CV stage" work package. There is no legacy counterpart to port: the legacy Phase 2 (`workspace-resourcer/scripts/process-approved-queue.js`, 1,422 lines, line numbers below refer to it) pushed every candidate to Zoho as soon as the CV was downloaded and never read the CV. The only screening before the push was the search-card snippet, before and after the unlock (`ai-review.js`, the screening package). This document therefore maps the stage to the legacy step it was inserted into, records how it plugs into Phase 2, lists the owner decisions applied on top of the reviewed patch, and states what stays exactly as it was.
+Owner: the "CV stage" work package. There is no legacy counterpart to port: the legacy Phase 2 (`workspace-resourcer/scripts/process-approved-queue.js`, 1,422 lines, line numbers below refer to it) pushed every candidate to Zoho as soon as the CV was downloaded and never read the CV. The only screening before the push was the search-card snippet, before and after the unlock (`ai-review.js`, the screening package). This document therefore maps the stage to the legacy step it was inserted into, records how it plugs into Phase 2, lists the decisions applied on top of the reviewed patch, and states what stays exactly as it was.
 
 New files: `resourcer/scripts/lib/cv/**` (adapters, gate, questions, config, caches, Jev client, shadow log, Phase 2 step, six vendored corpus modules, three stubs), `resourcer/scripts/cv-review.js`, `resourcer/scripts/cv-report.js`, `resourcer/config/cv-screening.json`, `docs/CV-SCREENING.md` (the owner's guide), `tests/cv/**`. Changed: `resourcer/scripts/process-approved-queue.js` (section 3), `tests/lifecycle/helpers/harness.js` and `tests/lifecycle/real-modules.test.js` (one line each, section 6). No new npm dependency, no schema change, no new cron job, no new dashboard field.
 
@@ -53,7 +53,9 @@ The whole list; keep these exports stable or update the stage. `lib/screening/ht
 
 The patch's `process-approved-queue.diff` applies to the repository file byte for byte (the file was identical to the snapshot the patch was built on: same sha256), so nothing was merged by hand. The changes of section 4 were made on top.
 
-## 4. Owner and reviewer decisions applied on top of the reviewed patch
+## 4. Decisions applied on top of the reviewed patch
+
+The default `shadow` mode (a) follows the owner's instruction that shadow is only the first step of CV screening. The other rows (the alert ceilings, the shadow stop, the cache lifetime) are reviewer or assistant defaults: design defaults, not yet confirmed by the owner (see the CVS rows of `docs/DECISIONS.md`).
 
 | Decision | Where | Tested in |
 |---|---|---|
@@ -116,11 +118,11 @@ What the merge left to the finalizer, now done, and what the full run found.
 | Scenario 3c | A Jev outage with the default CV mode now also stops the CV stage after five CVs: the test expects exactly the WARN alert `cv-shadow-stopped`, no CV row and five records in Zoho. |
 | Live canaries | The four canaries of UPDATE-B were run once through the real gateway (2026-09-30, the lab's live guard: key from its file by path, only POST `/typesafe/v1/systemone` with `typesafe-ai/jev`; 9 requests in all): the batch approved the chef and rejected the cashier (`approve_level_match`, `reject_unrelated_industry`), the single call rejected the cashier, the chef CV was `pass` (pReject 0) and the retail CV `reject` (`no_relevant_experience`, `career_change`, pReject 1), both lane `jev`, `SCREENING_MODEL: typesafe-ai/jev`. Still UNVERIFIED-LIVE: everything on the real Hermes instance. |
 | Report cosmetic | With no rows `cv-report.js` printed `ok (99% or more)` next to a zero share; the SWITCH-ON CHECK block was correct (`[NOT YET]`). Fixed in Update C (section 11): `no data yet`. |
-| Tests | Update B run (superseded by the Update C run in `README.md`; the new Update C tests are listed in `docs/UPDATE-C.md`). Fresh WSL copy, Node 22.22.1: the whole unit suite 2,482 tests, 2,476 pass, 0 fail, 6 skipped (see docs/parity/screening.md 7.5). End to end: all 14 scenarios (`bash tests/e2e-linux.sh`). Scenario 6 (suspend and resume) failed once in a first run made while other processes were loading the same machine ("never two at once", a sampling of process counts) and passed in every later run; nothing in the CV stage starts a `phase1.js` process. |
+| Tests | Update B run (superseded by the run in `README.md`; the Update C tests are in `tests/cv/` and `tests/release/`). Fresh WSL copy, Node 22.22.1: the whole unit suite 2,482 tests, 2,476 pass, 0 fail, 6 skipped (see docs/parity/screening.md 7.5). End to end: all 14 scenarios (`bash tests/e2e-linux.sh`). Scenario 6 (suspend and resume) failed once in a first run made while other processes were loading the same machine ("never two at once", a sampling of process counts) and passed in every later run; nothing in the CV stage starts a `phase1.js` process. |
 
 ## 11. Update C (2026-09-30): what changed in the CV stage and the supervision around it
 
-For an instance at commit a7fc7be: `docs/UPDATE-C.md`. The numbers of the operating point and the criteria are untouched; `CV_SCREEN` still defaults to `shadow`.
+An instance at commit a7fc7be is not covered by the release note: it stops and asks the owner (`docs/UPDATE-C.md` step 2). The numbers of the operating point and the criteria are untouched; `CV_SCREEN` still defaults to `shadow`.
 
 | Area | Change |
 |---|---|
@@ -132,3 +134,7 @@ For an instance at commit a7fc7be: `docs/UPDATE-C.md`. The numbers of the operat
 | Cache (F11) | `SearchLevels.put`: lock file, read again, merge, atomic write (`tests/cv/cache-concurrency.test.js`: eight processes, three rounds). |
 | Install checks (F8) | `lib/cv/selftest.js` and `cv-review.js --self-test`; `ai-review.js --no-shadow`; `readRows` skips run ids that start with `install-canary`. |
 | Redaction (F10) | `lib/screening/redact.js`: honorific, particle, initial, combining-mark, typographic-apostrophe and caseless-script leading names; labelled and long numbers. The counts-only scans (redacted backtest sample and CV corpus) are summarised in docs/KNOWN-LIMITS.md K-CV14. |
+
+## 12. Release (Updates C and D installed together)
+
+One addition to the CV stage: a shadow queue that was cut short leaves a `kind: queue-stop` line in the daily CV shadow file (`lib/cv/shadow.js` `buildQueueStopRow`, written by `lib/cv/phase2.js` `logShadowStop`, read by `readQueueStops`; `readRows` never returns it) and `scripts/cv-report.js` prints the block `UNSCREENED BY THE SHADOW STOP` (DECISIONS CVS-19). Tests: `tests/cv/report-cap.test.js`, `tests/cv/phase2-updatec.test.js` (F7), `tests/cv/phase2-modes.test.js`. The broken-file warnings of `lib/cv/config.js` now say the built-in numbers are for display only and nothing is decided on them. The interplay with the Reed fix is in `docs/parity/reed.md` R34 and `tests/release/`.

@@ -56,7 +56,7 @@ function choiceOf(options, main, top) {
 
 function confirmedOk(title, candKind) {
   const k = kindOf(title);
-  return k === candKind || (RUNG[k] && RUNG[candKind]) || /(team member|staff)/i.test(title || '');
+  return k === candKind || (RUNG[k] && RUNG[candKind]) || /\b(team member|staff)\b/i.test(title || '');
 }
 
 function relative(candKind, roleKind) {

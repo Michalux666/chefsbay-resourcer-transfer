@@ -134,6 +134,7 @@ test('outage in the middle of a queue: nothing is pushed, nothing is lost, the h
   assert.equal(s.status, 'phase2_starting');
   assert.equal(s.phase2Recovery.attempts, 0);
   assert.equal(s.phase2Hold.reason, 'cv-screening-unavailable');
+  assert.equal(s.phase2Hold.queue, QUEUE, 'the hold pins its own queue, so a later run of the territory cannot take its place in the recovery');
   const runState = ws.readJson(path.join(ws.runs, `run-${RUN_KEY}.json`));
   assert.equal(runState.status, 'error');
   assert.equal(runState.error, 'cv-screening-unavailable');

@@ -223,3 +223,12 @@ test('sha256sum -c agrees with the manifest on a POSIX tree', () => {
   const r = spawnSync('sha256sum', ['-c', 'MANIFEST.sha256', '--quiet'], { cwd: w.repo, encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stdout + r.stderr);
 });
+
+test('the MANIFEST.sha256 committed in the repository is the manifest of this tree (a release whose code changed after the last make-manifest fails here, not on the instance)', (t) => {
+  // Only in a git checkout: a copy that npm install or a test run has added files to (package-lock.json) has no .git and is skipped.
+  if (!fs.existsSync(path.join(SRC, '.git'))) { t.skip('not a git checkout'); return; }
+  const mk = require(path.join(SRC, 'tools', 'make-manifest.js'));
+  const fresh = mk.buildManifest(SRC);
+  const committed = fs.readFileSync(path.join(SRC, 'MANIFEST.sha256'), 'utf8');
+  assert.strictEqual(committed, fresh.text, 'run: node tools/make-manifest.js, commit MANIFEST.sha256, and give the owner the manifest_sha256= value it prints');
+});

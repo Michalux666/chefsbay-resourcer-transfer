@@ -89,7 +89,7 @@ test('R5: the four categories are found from the latest finished run of each ter
   const s = await json([]);
   for (const [cat, codes] of Object.entries(EXPECT_LISTED)) assert.deepEqual(s.categories[cat].codes.slice().sort(), codes.slice().sort(), cat);
   assert.equal(s.territories, 5);
-  assert.deepEqual(s.excluded, { notAskingForReed: 1, disabled: 1, queuedOrRunning: 1, ranToday: 1, noTerritoryRow: 0 });
+  assert.deepEqual(s.excluded, { notAskingForReed: 1, disabled: 1, queuedOrRunning: 1, heldByCvScreening: 0, ranToday: 1, noTerritoryRow: 0 });
   assert.equal(s.mode, 'dry-run');
   assert.equal(s.queue, null);
   assert.deepEqual(pendingFiles(), [], 'a dry run writes nothing');
@@ -311,4 +311,32 @@ test('R5: two catch-up PROCESSES started at the same moment queue each territory
   assert.equal(places.length, new Set(places).size, `no territory twice: ${places.join(',')}`);
   assert.ok(places.length <= 5, 'the per-day limit holds across the two processes');
   assert.ok(places.length >= 1);
+});
+
+// ---------------------------------------------------------------- release additions
+
+test('R5: "ran today" is the LONDON day of run_results (between 00:00 and 01:00 BST it is already tomorrow in UTC)', async () => {
+  // 23:30 UTC on 30 September is 00:30 BST on 1 October: a run recorded with the date 2026-10-01 ran today, one dated 2026-09-30 did not.
+  const world = [
+    ['Alpha Role', 'NG1', 'both', 1, [{ date: '2026-10-01', sources: 'both', reed: FAILED }]],
+    ['Alpha Role', 'LS1', 'both', 1, [{ date: '2026-09-30', sources: 'both', reed: FAILED }]],
+  ];
+  build({ world });
+  const r = await run(['--since', '2026-09-30', '--json'], { now: new Date('2026-09-30T23:30:00Z') });
+  assert.equal(r.code, 0, r.err);
+  const s = JSON.parse(r.out);
+  assert.equal(s.excluded.ranToday, 1);
+  assert.deepEqual(s.categories.failed.codes, ['LS1']);
+});
+
+test('R5: the failure rate of ACCEPTANCE RE08 is printed per run day without reading a log (attempts = runs that asked for Reed and did not stop before it)', async () => {
+  build();
+  const s = await json([]);
+  assert.deepEqual(s.reedByDay, [
+    { date: '2026-09-30', attempts: 4, failed: 4, failedPercent: 100 },
+    { date: '2026-10-01', attempts: 4, failed: 1, failedPercent: 25 },
+    { date: '2026-10-02', attempts: 1, failed: 1, failedPercent: 100 },
+  ]);
+  const r = await run([]);
+  assert.match(r.out, /Reed attempts by run day[^\n]*2026-10-01 4 attempts, 1 failed \(25%\)/);
 });

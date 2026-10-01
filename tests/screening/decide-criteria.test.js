@@ -256,7 +256,7 @@ test('applications older than the activity window are no sign of life, and the s
   assert.equal(run(A({ upd: 2190, apps: 400 }), { criteria: wide }).lane, 'approve', 'activeDays is the window');
   const legacyFile = clone(base);
   delete legacyFile.decision.stale.applicationsAreActivity;
-  assert.equal(run(A({ upd: 2190, apps: 30 }), { criteria: legacyFile }).lane, 'approve', 'a file without the key counts applications (the owner decision)');
+  assert.equal(run(A({ upd: 2190, apps: 30 }), { criteria: legacyFile }).lane, 'approve', 'a file without the key counts applications (the design default described in docs/SCREENING.md, rule 6 of the decision rules)');
 });
 
 test('a card that shows recent applications is still rejected when the content is a clear mismatch, and the flag says why the stale rule stepped aside', () => {

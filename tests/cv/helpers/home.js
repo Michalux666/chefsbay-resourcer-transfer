@@ -59,7 +59,7 @@ function makeHome(prefix) {
       try {
         for (const n of fs.readdirSync(path.join(home, 'shadow'))) {
           if (!/^cv-.*\.jsonl$/.test(n)) continue;
-          for (const l of fs.readFileSync(path.join(home, 'shadow', n), 'utf8').split('\n').filter(Boolean)) rows.push(JSON.parse(l));
+          for (const l of fs.readFileSync(path.join(home, 'shadow', n), 'utf8').split('\n').filter(Boolean)) { const r = JSON.parse(l); if (!r.kind) rows.push(r); } // decision rows only (a queue-stop row has a kind)
         }
       } catch (e) { /* none */ }
       return rows;

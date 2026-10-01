@@ -345,13 +345,13 @@ function load(opts) {
   let fileProblem = null;
   try {
     fromFile = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\ufeff/, ''));
-    if (!isPlain(fromFile)) { warnings.push(`config file ${name} does not hold an object; using the built-in defaults`); fromFile = null; fileProblem = 'it does not hold a JSON object'; }
+    if (!isPlain(fromFile)) { warnings.push(`config file ${name} does not hold an object; the built-in numbers are shown for display only, nothing is decided on them (fail closed)`); fromFile = null; fileProblem = 'it does not hold a JSON object'; }
   } catch (e) {
     if (e && e.code !== 'ENOENT') {
-      warnings.push(`config file ${name} is unreadable (${String(e.message).slice(0, 80)}); using the built-in defaults`);
+      warnings.push(`config file ${name} is unreadable (${String(e.message).slice(0, 80)}); the built-in numbers are shown for display only, nothing is decided on them (fail closed)`);
       fileProblem = 'it cannot be read as JSON';
     } else {
-      if (explicit) warnings.push(`config file ${name} was named explicitly but does not exist; using the built-in defaults`);
+      if (explicit) warnings.push(`config file ${name} was named explicitly but does not exist; the built-in numbers are shown for display only, nothing is decided on them (fail closed)`);
       if (mustExist) fileProblem = 'the file does not exist';
     }
   }

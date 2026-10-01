@@ -244,6 +244,13 @@ test('F7: shadow stops the screening of a slow queue after shadowMaxSeconds: the
   assert.ok(r.out.some(l => /stopped after 1 seconds \(phase2\.shadowMaxSeconds\)/.test(l)));
   assert.equal(halt.getHalt(), null);
   assert.equal(r.results.cvRejected, 0);
+  // the cap leaves one queue-stop line in the CV shadow log (numbers only), which cv-report.js turns into the unscreened share; it is not a decision row
+  const shadowLog = require('../../resourcer/scripts/lib/cv/shadow');
+  const stops = shadowLog.readQueueStops();
+  assert.equal(stops.length, 1);
+  assert.deepEqual([stops[0].kind, stops[0].stoppedBy, stops[0].mode, stops[0].screened, stops[0].skipped], ['queue-stop', 'time', 'shadow', s.screened, s.unscreened]);
+  assert.deepEqual(Object.keys(stops[0]).sort(), ['kind', 'mode', 'runId', 'screened', 'skipped', 'stoppedBy', 'ts', 'v']);
+  assert.equal(shadowLog.readRows().length, 0, 'a queue-stop row is never a decision row');
 });
 
 test('F7: a fast queue is not cut, the limit is configuration with a default of 120 seconds and is validated like the other keys, and it never applies in mode on', async () => {

@@ -936,6 +936,10 @@ function hasHeldQueue(ctx) {
     try {
       const raw = fs.readFileSync(path.join(ctx.dirs.runs, f), 'utf8');
       const d = JSON.parse(raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw);
+      // the same cut-offs as the recovery: a run older than 7 days, or one the recovery gave up on, is not waiting for anything
+      const started = Date.parse(d && (d.startedAt || d.updatedAt));
+      if (Number.isFinite(started) && Date.now() - started > 7 * 24 * 60 * 60 * 1000) continue;
+      if (d && d.phase2Recovery && d.phase2Recovery.gaveUp) continue;
       if (d && d.phase2Hold && d.status !== 'complete' && !d.phase2Complete) return true;
     } catch { /* unreadable: skip */ }
   }

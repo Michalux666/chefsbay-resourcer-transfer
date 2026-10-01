@@ -42,12 +42,12 @@ cd resourcer && npm install                                 # better-sqlite3, ma
 cd ..
 node --test "tests/core/*.test.js"                          # one package: core, lifecycle, phase1, screening, supervision, reed, browser, bundle, dashboard, docs
 NODE_PATH=$PWD/resourcer/node_modules RESOURCER_PYTHON=/path/to/venv/bin/python node --test "tests/**/*.test.js"    # everything
-bash tests/e2e-linux.sh                                     # the 15 end-to-end scenarios on Linux (about 20 minutes)
+bash tests/e2e-linux.sh                                     # the 16 end-to-end scenarios on Linux (about 20 minutes)
 ```
 
 Without `NODE_PATH` and a Python that has `fastapi`, `httpx` and `pytest`, about 36 tests skip themselves (backup, the real Phase 2, the dashboard plugin suites) because `better-sqlite3` sits in `resourcer/node_modules`; do
 not trust a green run that skipped them. Four real-browser Reed tests skip unless `REED_REAL_CHROMIUM=<chromium binary>` is set. `bash tests/browser/smoke-linux.sh` and `sh tools/preflight.sh` are read-only checks
-meant to be run on the instance itself. Last full run (2026-09-30, Update C, Linux, Node 22, a fresh copy with `npm install`): 2,558 tests, 2,551 pass, 0 fail, 7 skipped (the 4 real-browser tests and the 3 tests that need the git history, which pass on the laptop); all 15 end-to-end scenarios pass. What the tests cannot prove
+meant to be run on the instance itself. Last full run (2026-10-01, the release of Updates C and D, Linux, Node 22, a fresh copy with `npm install`): 2,633 tests, 2,626 pass, 0 fail, 7 skipped (the 4 real-browser tests and the 3 tests that need the git history, which pass on the laptop: the docs tests, 46 of 46, on Windows Node 25); all 16 end-to-end scenarios pass. What the tests cannot prove
 (live sites, the real Hermes host, Chromium 153, real Zoho) is listed as UNVERIFIED-LIVE in `docs/KNOWN-LIMITS.md` and turned into checks in `docs/ACCEPTANCE.md`.
 
 ## Rules for changing anything

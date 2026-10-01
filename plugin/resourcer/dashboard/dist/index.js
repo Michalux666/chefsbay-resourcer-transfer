@@ -545,7 +545,7 @@
             h("span", { className: "rsr-muted" }, r.sources || ""),
             h("span", { className: "rsr-muted" }, when(r.completedAt || r.startedAt)),
             h("span", { className: "rsr-muted" }, dur(r.runSecs)),
-            h("span", { className: "rsr-badge " + (bad || reedFailed ? "rsr-badge-warn" : "rsr-badge-ok") }, bad ? num(r.errors) + " errors" : reedFailed ? "Caterer OK" : "OK"),
+            h("span", { className: "rsr-badge " + (bad || reedFailed ? "rsr-badge-warn" : "rsr-badge-ok") }, bad ? num(r.errors) + " errors" : reedFailed ? (r.sources === "reed" ? "Finished" : "Caterer OK") : "OK"),
             r.reedAuthFailed ? h("span", { className: "rsr-badge rsr-badge-warn" }, "Reed auth failed") : null,
             reedFailed ? h("span", { className: "rsr-badge rsr-badge-warn" }, "Reed failed") : null),
           h("div", { className: "rsr-hist-stats" },

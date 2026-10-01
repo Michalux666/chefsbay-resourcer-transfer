@@ -22,8 +22,10 @@ const HEADER_MISSING = { errorCode: 50010, exception: 'RequiredHeaderMissingExce
 const done = (w) => async () => !w.pendingFiles().length && !w.exists('runtime/run.json') && w.pipelineProcs().length === 0;
 const reedBrowserProcs = (w) => U.procs(/remote-debugging-port=/).filter((p) => p.cmd.includes(w.home));
 const firstPageAlerts = (w) => w.alerts().filter((a) => a.key === 'reed-first-page-failed');
-const today = () => new Date().toISOString().slice(0, 10);
-const tomorrow = () => { const d = new Date(); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
+// Phase 2 stamps the LONDON day of the queue (searchDate) on the territory and the run: the expectations use the same day (between 00:00 and 01:00 BST it differs from the UTC date).
+const london = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+const today = () => london(new Date());
+const tomorrow = () => { const d = new Date(`${today()}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
 
 function setFault(w, fault) {
   const f = path.join(w.privateDir, 'reed-fault.json');
@@ -46,8 +48,8 @@ const territory = (w) => w.dbAll('select * from territory_searches')[0];
 const runRows = (w) => w.dbAll('select sources, new_to_zoho, errors, caterer_json, reed_json from run_results order by completed_at');
 const logText = (w) => w.list('logs', /^phase1-console-.*\.log$/).map((f) => w.text(`logs/${f}`)).join('\n');
 
-test('15a the first page never works: a FAILED Reed attempt, Caterer done as before, territory Reed-pending, dashboard and alert say so, catch-up lists it', async (t) => {
-  const w = await scene('s15a-first-page-fails');
+test('16a the first page never works: a FAILED Reed attempt, Caterer done as before, territory Reed-pending, dashboard and alert say so, catch-up lists it', async (t) => {
+  const w = await scene('s16a-first-page-fails');
   t.after(() => w.close());
   setFault(w, { api: { alwaysHeaderMissing: true } });
   w.dropPending({ sources: 'both' });
@@ -115,8 +117,8 @@ test('15a the first page never works: a FAILED Reed attempt, Caterer done as bef
   assert.deepEqual(w.netBlocked(), []);
 });
 
-test('15b the fault is gone: the next run for the territory does the Reed half (20 in Zoho), the mark is cleared and the alert episode is closed', async (t) => {
-  const w = await scene('s15b-recovery');
+test('16b the fault is gone: the next run for the territory does the Reed half (20 in Zoho), the mark is cleared and the alert episode is closed', async (t) => {
+  const w = await scene('s16b-recovery');
   t.after(() => w.close());
   setFault(w, { api: { alwaysHeaderMissing: true } });
   w.dropPending({ sources: 'both' });
@@ -141,8 +143,8 @@ test('15b the fault is gone: the next run for the territory does the Reed half (
   assert.deepEqual(reedBrowserProcs(w), []);
 });
 
-test('15c transient 400s and page reloads between the steps are absorbed: a normal success with Reed candidates, no alert, no marker', async (t) => {
-  const w = await scene('s15c-transient');
+test('16c transient 400s and page reloads between the steps are absorbed: a normal success with Reed candidates, no alert, no marker', async (t) => {
+  const w = await scene('s16c-transient');
   t.after(() => w.close());
   setFault(w, {
     api: { failNext: [{ status: 400, body: HEADER_MISSING, path: '/candidate/search/' }, { status: 400, body: HEADER_MISSING, path: '/candidate/search/' }] },
@@ -161,8 +163,8 @@ test('15c transient 400s and page reloads between the steps are absorbed: a norm
   assert.deepEqual(reedBrowserProcs(w), []);
 });
 
-test('15d a place Reed cannot look up is an EMPTY Reed search (no failure, no alert, no Reed-pending mark, not listed by the catch-up); a search whose pages can not be fetched after a good first page is a FAILURE', async (t) => {
-  const w = await scene('s15d-classes');
+test('16d a place Reed cannot look up is an EMPTY Reed search (no failure, no alert, no Reed-pending mark, not listed by the catch-up); a search whose pages can not be fetched after a good first page is a FAILURE', async (t) => {
+  const w = await scene('s16d-classes');
   t.after(() => w.close());
   fs.rmSync(path.join(w.home, 'reed-location-cache.json'), { force: true }); // the world ships a warm location cache: without this the place is never looked up
   setFault(w, { api: { noLocations: true } });

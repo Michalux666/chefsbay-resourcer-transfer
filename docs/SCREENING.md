@@ -213,7 +213,7 @@ Principles, in the criteria and in code, not just in wording (the details and th
    recruiter a minute). The real job title decides the level; a title that contradicts the card switches the card readings off, and
    the out-of-date rule is not applied.
 9. **The language-model engines keep the old wording.** Their rubric rejects for "no visible background" as before. If you want thin
-   cards from a hospitality headline to be approved there instead (owner decision D6, "recall-tilted"), set
+   cards from a hospitality headline to be approved there instead (the recall-tilted variant, design default D6: not yet confirmed by the owner), set
    `rubric.insufficientEvidence` to `lenient`; the opt-in `rubric.staleProfileClause` (default off) adds "profile clearly out of date"
    as a reject reason for them. Neither setting affects `jev_only`, whose out-of-date rule is in the criteria file.
 

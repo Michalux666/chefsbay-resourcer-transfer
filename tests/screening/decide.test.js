@@ -141,7 +141,7 @@ test('a 70/30 split is not a reject and not a fallback: it is decided, and marke
   assert.ok(d.flags.includes('forced'), JSON.stringify(d));
 });
 
-test('a commis search is an entry-level search (owner decision): a sous or head chef is over-qualified, a cook and a commis are fine', () => {
+test('a commis search is an entry-level search (design default, SCR-31): a sous or head chef is over-qualified, a cook and a commis are fine', () => {
   const role = { role: 'junior_cook' };
   assert.equal(run(A({ ...role, kind: 'head_chef', sen: 'two_or_more_steps_senior', over: 0.95, fit: 0.1 })).reasonCode, 'reject_overqualified_entry');
   assert.equal(run(A({ ...role, kind: 'senior_chef', sen: 'two_or_more_steps_senior', over: 0.95, fit: 0.1 })).reasonCode, 'reject_overqualified_entry');

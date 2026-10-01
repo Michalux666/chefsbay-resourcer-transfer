@@ -78,6 +78,25 @@ function summarize(rows, o) {
 }
 
 /**
+ * The unscreened share the shadow stop leaves behind: CVs of queues whose screening was cut short (phase2.shadowMaxSeconds, or CVs in a row that
+ * could not be screened). They have no row, so they are missing from every rate above; their share of everything queued shows how much the sample
+ * favours small, fast queues. Queued = the screened rows plus the skipped CVs of the stopped queues.
+ * @param {object[]} rows decision rows  @param {object[]} stops queue-stop rows (lib/cv/shadow.js buildQueueStopRow)
+ */
+function capShare(rows, stops) {
+  let time = 0;
+  let failures = 0;
+  let queuesByTime = 0;
+  let queuesByFailures = 0;
+  for (const r of stops) {
+    const k = Math.max(0, Number(r.skipped) || 0);
+    if (r.stoppedBy === 'time') { time += k; queuesByTime++; } else { failures += k; queuesByFailures++; }
+  }
+  const queued = rows.length + time + failures;
+  return { queued, skippedByTime: time, queuesStoppedByTime: queuesByTime, skippedByFailures: failures, queuesStoppedByFailures: queuesByFailures, shareByTime: pct(time, queued), shareByFailures: pct(failures, queued) };
+}
+
+/**
  * The computed part of the switch-on acceptance (Jev-decided share of the CVs Jev received, fallback share, unreadable share, reject
  * rate, enough CVs). Nothing passes on an empty report.
  * @returns {{checks:{name:string, ok:boolean, value:string, want:string}[], numbersOk:boolean}}
@@ -99,6 +118,7 @@ const line = r => `  ${String(r.ts).slice(0, 10)} id ${String(r.candidateId)} ${
 
 function render(s, lists) {
   const L = lists || {};
+  const cap = s.shadowCap;
   const out = [];
   out.push(`CV screening report: ${s.rows} screened CVs, operating point tau ${s.tau}`);
   out.push('');
@@ -113,6 +133,13 @@ function render(s, lists) {
   out.push(`  rejected        ${s.rejected}   ${s.rejectRate}%   (in shadow mode: WOULD be rejected)`);
   out.push(`  forced          ${s.forced}   ${s.forcedShare}%   (decided in real doubt by the operating point; ${s.forcedRejected} of them rejected): audit these`);
   out.push('');
+  if (cap) {
+    out.push('UNSCREENED BY THE SHADOW STOP');
+    out.push(cap.queuesStoppedByTime || cap.queuesStoppedByFailures
+      ? `  ${cap.skippedByTime} of ${cap.queued} queued CVs (${cap.shareByTime}%) were skipped because the screening of their queue passed phase2.shadowMaxSeconds (${cap.queuesStoppedByTime} queue(s)); ${cap.skippedByFailures} more (${cap.shareByFailures}%) after CVs in a row could not be screened (${cap.queuesStoppedByFailures} queue(s)). They are not in the numbers above: a large share means the sample favours small, fast queues, so read every rate with that in mind.`
+      : `  none: no queue was cut short by the time cap or by failures (0 of ${cap.queued} queued CVs). Counted from the release that added the cap.`);
+    out.push('');
+  }
   const acc = acceptance(s);
   out.push('SWITCH-ON CHECK (shadow to on: the numbers are advisory, the two [people] lines are done by a recruiter panel)');
   for (const c of acc.checks) out.push(`  ${c.ok ? '[ok]      ' : '[NOT YET] '} ${c.name.padEnd(15)} ${c.value}   (want ${c.want})`);
@@ -153,9 +180,12 @@ function main(argv, io) {
   const since = a.from !== undefined ? Date.parse(`${a.from}T00:00:00Z`) : Date.now() - days * 86400000;
   let rows = shadow.readRows().filter(r => Date.parse(r.ts) >= since);
   if (a.mode !== undefined) rows = rows.filter(r => r.mode === a.mode);
+  let stops = shadow.readQueueStops().filter(r => Date.parse(r.ts) >= since);
+  if (a.mode !== undefined) stops = stops.filter(r => r.mode === a.mode);
   const cfg = config.load();
   const tau = rows.length && typeof rows[rows.length - 1].tau === 'number' ? rows[rows.length - 1].tau : cfg.tau;
   const s = summarize(rows, { tau, forced: cfg.forced });
+  s.shadowCap = capShare(rows, stops);
   const forcedRows = rows.filter(r => r.forced).sort((x, y) => (x.confidence === null ? 1 : x.confidence) - (y.confidence === null ? 1 : y.confidence));
   const rejectRows = rows.filter(r => r.final === 'reject').sort((x, y) => String(x.ts).localeCompare(String(y.ts)));
   if (a.json) {
@@ -169,4 +199,4 @@ function main(argv, io) {
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { main, summarize, render, parseArgs, acceptance, ACCEPT };
+module.exports = { main, summarize, render, parseArgs, acceptance, capShare, ACCEPT };

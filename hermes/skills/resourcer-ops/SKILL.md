@@ -128,6 +128,14 @@ failure marker, login block, hold). The `reed-human-login` alert needs `--human`
 the OWNER, from their own computer, forwards the browser port (`ssh -N -L 9222:127.0.0.1:9222 USER@INSTANCE_HOST`) and completes the login in
 `chrome://inspect`. Run it as a background terminal task; it prints `REED_LOGIN_OK` when done. Add `--clean` first only if the alert says HTTP 451.
 
+A Reed attempt that could not fetch its first search page is a FAILED Reed half, not an empty search: the Reed child prints
+`REED_FIRST_PAGE_FAILED: <reason> attempts=<n> streak=<k>` and exits 1, the run still completes for Caterer, the dashboard shows "Reed failed" and the
+alert `reed-first-page-failed` is raised (WARN, CRITICAL after 5 in a row). Report the `REED_REQUEST_FORENSIC` lines of the newest
+`logs/phase1-console-*.log` and change no setting. The OWNER decides the catch-up: `node /opt/data/profiles/resourcer/workspace/tools/reed-catchup.js` is a
+dry run you may run any time (counts and territory codes only; it leaves out a territory whose run CV screening merely held); `--queue N` only with the
+owner's number. A both-source queue that CV screening held before its Reed step ran is completed later on the Caterer queue alone and then counts as
+a Reed half owed (marked Reed-pending, one automatic retry, listed by the tool).
+
 ## 8. Queue, territories, database
 
 ```

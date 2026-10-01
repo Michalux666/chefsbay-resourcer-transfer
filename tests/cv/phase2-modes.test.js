@@ -17,7 +17,7 @@ test.after(P.stop);
 const NO_FILL = { fillMandatory: () => ({ patched: false, recovered: [], stillMissing: [] }) };
 const idsFrom = (base, n) => Array.from({ length: n }, (_, i) => String(base + i));
 const shadowDir = () => path.join(ws.home, 'shadow');
-const shadowRows = () => (fs.existsSync(shadowDir()) ? fs.readdirSync(shadowDir()).filter(n => /^cv-.*[.]jsonl$/.test(n)).flatMap(n => fs.readFileSync(path.join(shadowDir(), n), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))) : []);
+const shadowRows = () => (fs.existsSync(shadowDir()) ? fs.readdirSync(shadowDir()).filter(n => /^cv-.*[.]jsonl$/.test(n)).flatMap(n => fs.readFileSync(path.join(shadowDir(), n), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))).filter(r => !r.kind) : []); // decision rows; a queue-stop row (kind) is counted by its own test
 const savedEnv = {};
 function envSet(map) { for (const [k, v] of Object.entries(map)) { if (!(k in savedEnv)) savedEnv[k] = process.env[k]; if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
 test.afterEach(() => { for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; delete savedEnv[k]; } });
@@ -242,6 +242,7 @@ test('shadow: refused requests never block, the outage that follows the streak i
     assert.equal(halt.getHalt(), null);
     assert.equal(ws.alerts().filter(a => a.severity === 'critical').length, 0);
     assert.equal(shadowRows().length, 2);
+    assert.equal(require('../../resourcer/scripts/lib/cv/shadow').readQueueStops().filter(r => r.stoppedBy === 'failures').length, 1, 'the stopped queue left one queue-stop line');
     assert.equal(rowOf(results, 7950).status, 'new');
   } finally { await g.close(); }
 });

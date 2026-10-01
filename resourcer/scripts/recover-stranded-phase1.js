@@ -228,7 +228,16 @@ function recoverInterrupted(opts) {
     if (ageMinutes(data.updatedAt || data.startedAt) < (o.minAgeMin === undefined ? INTERRUPTED_MIN_AGE_MIN : o.minAgeMin)) continue;
 
     // A both-source Phase 2 that was HELD is released to phase1_abandoned by the supervisor's orphan sweep, so its merged queue is looked for then too.
-    const merged = (data.status === 'phase2_starting' || (data.status === 'phase1_abandoned' && data.phase2Hold)) ? findMergedQueueFor(data) : null;
+    // A held run pinned its own merged queue (phase2Hold.queue): a LATER run of the same territory (the extra run after the halt cleared) may have written a
+    // newer, empty merged queue, which the newest-by-time search below would pick instead and so strand the held candidates.
+    let merged = null;
+    const heldName = data.phase2Hold && typeof data.phase2Hold.queue === 'string' ? path.basename(data.phase2Hold.queue) : null;
+    if (heldName && /^merged-queue-.*\.json$/.test(heldName)) {
+      const hf = path.join(DOWNLOADS, heldName);
+      const hq = safeReadJson(hf);
+      if (hq && Array.isArray(hq.candidates)) merged = { file: hf, queue: hq };
+    }
+    if (!merged && (data.status === 'phase2_starting' || (data.status === 'phase1_abandoned' && data.phase2Hold))) merged = findMergedQueueFor(data);
     const queueFile = merged ? merged.file : findApprovedQueueFor(fp);
     if (!queueFile) continue;
     const queue = merged ? merged.queue : safeReadJson(queueFile);

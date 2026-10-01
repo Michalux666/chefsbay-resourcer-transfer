@@ -1,6 +1,7 @@
 'use strict';
-// config/cv-screening.json: the shipped file equals the built-in defaults, unknown keys are ignored, wrong values fall back
-// to defaults with a warning, a broken file means defaults, environment settings win, and Jev is the only model.
+// config/cv-screening.json: the shipped file equals the built-in defaults, unknown keys are ignored, wrong values are corrected to the
+// defaults with a warning, a broken file is a fault (the defaults are shown for display only, nothing decides on them: fail closed, update C),
+// environment settings win, and Jev is the only model.
 const { makeHome } = require('./helpers/home');
 const home = makeHome('cv-config');
 const test = require('node:test');
@@ -104,13 +105,14 @@ test('injection patterns: compiled once, a pattern that is not valid or matches 
   assert.equal(load({ injection: { probability: 0.9 } }).injection.probability, 0.9);
 });
 
-test('a broken or unreadable file means the defaults and a warning, never an exception', () => {
+test('a broken or unreadable file: the defaults for display only, a warning that says nothing is decided on them, a fault, never an exception', () => {
   for (const [name, text] of [['bad.json', '{ not json'], ['array.json', '[1,2]'], ['empty.json', '']]) {
     const file = path.join(home.root, name);
     fs.writeFileSync(file, text);
     const cfg = config.load({ file, getEnv: () => undefined });
     assert.deepEqual(config.stripUnderscore(cfg.levels), config.DEFAULTS.levels, name);
-    assert.ok(cfg.warnings.some(w => /using the built-in defaults/.test(w)), name);
+    assert.ok(cfg.warnings.some(w => /for display only, nothing is decided on them \(fail closed\)/.test(w)), name);
+    assert.ok(cfg.fault && cfg.fault.key === 'cvconfig', `${name}: a fault, so nothing decides on the defaults`);
     assert.equal(cfg.configLoaded, false);
   }
   const missing = config.load({ file: path.join(home.root, 'absent.json'), getEnv: () => undefined });

@@ -243,7 +243,7 @@ Remember the key for later pulls:
 git -C /opt/data/profiles/resourcer/workspace config core.sshCommand 'ssh -i /opt/data/profiles/resourcer/deploy/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/data/profiles/resourcer/deploy/known_hosts -o StrictHostKeyChecking=yes'
 ```
 
-Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) then `docs/UPDATE-B.md` (screening criteria and the CV stage) and then `docs/UPDATE-C.md` (CV_SCREEN=on made safe, an install self-test) instead):
+Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) then `docs/UPDATE-C.md` (one cycle from Update A to the current release: screening criteria, the CV stage, CV_SCREEN=on made safe, an install self-test, the Reed first-page fix; `docs/UPDATE-B.md` is superseded for an instance at `d60d917`) instead):
 
 ```
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
@@ -1151,7 +1151,7 @@ Do not go on until the owner confirms receipt.
 ### 9.8 Decisions before the first run (HUMAN)
 
 - H10: the first live run spends Caterer credits and creates real records in Zoho Recruit.
-- H9b, Reed timing. Territories that are processed while Reed is off do not get their Reed half later (no catch-up exists; about a third of the Zoho-linked candidates historically came from Reed). Choose: (A) start Caterer-only now and add Reed at step 12 (default), or (B) do step 12 first (Reed needs the owner for about 30 minutes and may be blocked by a bot check), then come back to 9.9.
+- H9b, Reed timing. Territories that are processed while Reed is off do not get their Reed half later by themselves (nothing re-runs them automatically; since the release the owner can have them found and re-queued a few a day with `tools/reed-catchup.js`, `docs/OPERATIONS.md` 8.1, at the cost of re-running the whole territory; about a third of the Zoho-linked candidates historically came from Reed). Choose: (A) start Caterer-only now and add Reed at step 12 (default), or (B) do step 12 first (Reed needs the owner for about 30 minutes and may be blocked by a bot check), then come back to 9.9.
 - Only if step 8 was GO: resume the sourcing jobs. Otherwise resume only alerts, backup, maintenance and retention.
 
 Optional but recommended (OPERATOR): queue one small first search so the first run is short and identifiable. Use the postcode from the owner (H11); `<OUTWARD>` is an outward code such as `M1`:

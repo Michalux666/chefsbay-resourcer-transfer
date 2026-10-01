@@ -65,7 +65,7 @@ Never restart or stop the Hermes gateway or dashboard: that is a human action in
 
 1. Integrity: `node /opt/data/profiles/resourcer/workspace/tools/check-manifest.js` -> `MANIFEST_OK`.
 2. State: `node scripts/pipeline-watchdog.js --status` -> JSON. Good: `lastTickAt` under 2 minutes old between 05:00 and 23:59 (`tick` is normally `null`: it is non-null only
-   while a run is being supervised, so a null `tick` is not a fault), `halt` null, `cooldownUntil` null or past, `quarantined` empty, `consecutiveFailures` 0, recent runs with exit 0 (10 means nothing to do).
+   while a run is being supervised, so a null `tick` is not a fault), `halt` null, `cooldownUntil` null or past, `quarantined` empty, `consecutiveFailures` 0, recent runs with exit 0 (10 means nothing to do; 14 is a Phase 2 held by CV screening, expected only when the owner has set `CV_SCREEN` to `on` while the screening halt is up: neither a success nor a failure, report it and never clear the halt yourself).
 3. Numbers and open alerts: `node scripts/alerts-deliver.js --dry-run --digest` -> pulled today against 181 a day and 1,269 a
    week, runs, errors, halts, credits, backup age, and any alert not yet delivered. It changes nothing.
 4. Database: `node scripts/preflight-db.js --quiet` -> no output means fit. Backup: `node scripts/backup-db.js --check-age` -> exit 0.

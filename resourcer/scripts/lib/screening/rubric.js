@@ -33,7 +33,7 @@ We are searching for an ENTRY-LEVEL role (Kitchen Assistant / Kitchen Porter / C
 
 const STALE_BULLET = '\n- The profile is clearly out of date (not updated for several years) with no recent experience visible';
 
-// Opt-in (owner decision D6, recall-tilted policy): a thin card is not enough to reject.
+// Opt-in (recall-tilted policy, design default D6: not yet confirmed by the owner): a thin card is not enough to reject.
 const NO_HISTORY_LEGACY = '- No meaningful professional background or relevant history is visible';
 const NO_HISTORY_LENIENT = '- The visible background shows nothing relevant to the role (a card with very little detail is NOT enough to reject: when the headline or any listed role is in hospitality or catering, approve)';
 

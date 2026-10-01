@@ -127,3 +127,11 @@ test('class 1: a leading honorific, particle or initial marks the start of a nam
   const none = headOf(`9. Gourmet Specialities Kitchen Lead | Hull ${BODY}`);
   assert.ok(none.notes.name, 'the existing first-name heuristic still applies to a plain capitalised start');
 });
+
+test('KNOWN-LIMITS K-CV14 (pinned, so the row cannot drift): a plain name removes its first TWO capitalised tokens only; every token after the second stays', () => {
+  const at = (name) => headOf(`7. ${name} Sous Chef | Leeds ${BODY}`).text.slice(0, name.length);
+  assert.ok(at('Tarquin Fenwick').startsWith('Sous Chef'), 'two tokens: removed whole');
+  assert.ok(at('Tarquin Fenwick Ashworth').startsWith('Ashworth Sous'), 'three tokens: the third stays');
+  assert.ok(at('Tarquin Fenwick Ashworth Pemberton').startsWith('Ashworth Pemberton Sous'), 'four tokens: the third and fourth stay');
+  assert.ok(at('Tarquin Fenwick Ashworth Pemberton Lowell').startsWith('Ashworth Pemberton Lowell Sous'), 'five tokens: the third to fifth stay');
+});

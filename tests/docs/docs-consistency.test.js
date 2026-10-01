@@ -469,14 +469,14 @@ test('UPDATE-B.md copies exactly the installed files that changed since Update A
   assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
 });
 
-// ---- Update C (CV_SCREEN=on made safe, fail-closed CV criteria, bounded shadow, the install self-test) -------------------------------
+// ---- Update C, the release (Updates B, C and D installed together from d60d917) -------------------------------------------------------------
 
 test('UPDATE-C.md: only commands this operator may run, code before checks before resume, no setting is changed, and a rollback that needs none', () => {
   const t = read('docs/UPDATE-C.md');
   const blocks = fences(t);
-  assert.ok(blocks.length >= 30, `only ${blocks.length} command blocks`);
+  assert.ok(blocks.length >= 40, `only ${blocks.length} command blocks`);
   for (const b of blocks) {
-    if (/^(Sam Sampleperson|Robin Roleplay)\n/.test(b)) continue;
+    if (/^(Sam Sampleperson|Robin Roleplay)\n/.test(b) || b.startsWith("'use strict'")) continue;
     const bare = noQuotes(b);
     assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
     assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
@@ -485,28 +485,51 @@ test('UPDATE-C.md: only commands this operator may run, code before checks befor
   }
   const prose = t.split('/opt/hermes/bin/hermes -p resourcer').join('').split('hermes -p resourcer config set CV_SCREEN on').join('');
   assert.ok(!/(^|[^/])hermes -p resourcer/.test(prose), 'a bare hermes command');
-  const at = (needle) => { const i = t.indexOf(needle); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const steps = t.indexOf('## 1. Before you start'); // the order is that of the steps, not of the summary above them
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
   const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
   const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
   const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
   const copy = at('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md');
+  const plugin = at('cp /opt/data/profiles/resourcer/workspace/plugin/resourcer/dashboard/plugin_api.py /opt/data/plugins/resourcer/dashboard/plugin_api.py');
   const full = at('check-manifest.js --expect <NEW_DIGEST>');
   const selfTest = at('scripts/cv-review.js --self-test');
   const batch = at('scripts/ai-review.js --mode batch');
   const cvCanary = at('scripts/cv-review.js --job "Chef de Partie" --cv-file /opt/data/profiles/resourcer/install-work/canary-cv.txt --no-shadow');
   const cvCanaryNo = at('canary-cv-no.txt --no-shadow');
+  const deep = at('RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node /opt/data/profiles/resourcer/install-work/deep-check.js');
   const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
-  assert.ok(pause < pull && pull < verify && verify < copy && copy < full && full < selfTest && selfTest < batch && batch < cvCanary && cvCanary < cvCanaryNo && cvCanaryNo < resume,
-    'order: pause, pull, verify, copy, full check, self-test, canaries, resume');
+  const report = at('scripts/cv-report.js --days 1 --mode shadow', resume);
+  const catchup = at('tools/reed-catchup.js --queue <N> --per-day 10 --dry-run', resume);
+  assert.ok(list < pause && pause < pull && pull < verify && verify < copy && copy < plugin && plugin < full && full < selfTest && selfTest < batch && batch < cvCanary && cvCanary < cvCanaryNo && cvCanaryNo < deep && deep < resume && resume < report && report < catchup,
+    'order: list, pause, pull, verify, copy, plugin, full check, self-test, canaries, deep check, resume, watch');
+  // the stale scratch files are removed, and the only place CV_SCREEN appears on a command line is the one-off live canary (nothing is written)
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/canary-cv\.txt/);
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/canary-cv-no\.txt/);
+  assert.match(t, /rm \/opt\/data\/profiles\/resourcer\/install-work\/deep-check\.js/);
+  const cvOnLines = blocks.flatMap((b) => b.split('\n')).filter((l) => /CV_SCREEN=/.test(l));
+  assert.equal(cvOnLines.length, 1, 'CV_SCREEN appears in exactly one command: the optional one-off live canary');
+  assert.match(cvOnLines[0], /^CV_SCREEN=on RESOURCER_ENV_FILE=\S+ node \S+deep-check\.js$/);
   assert.match(t, /never set `CV_SCREEN`/);
-  assert.match(t, /start with `a7fc7be`/);
+  assert.match(t, /`RESOURCER_SOURCES` stays as the owner set it, `both`/);
+  assert.match(t, /start with `d60d917`/);
+  assert.match(t, /fe1ca88206ff5e24325b5bd4378ce7a8d3e8d81329dec27a2823d689662ec4a0/);
+  assert.match(t, /<NEW_DIGEST>/);
+  assert.match(t, /prints on the owner's machine/);
+  // no restart by the operator; the owner restarts the dashboard, and the order lets the tick resume first
+  assert.match(t, /plugin_api\.py` \(the Python backend of the plugin\) is imported ONCE when the dashboard process starts/);
+  assert.match(t, /HUMAN action in the Hermes Portal/);
+  assert.match(t, /Both orders are safe/);
+  assert.match(t, /env -u SCREEN_ENGINE/);
   const rollback = t.slice(at('## Rolling back'));
   assert.match(rollback, /reset --hard <OLD_COMMIT>/);
   assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
   assert.match(rollback, /nothing to set back/);
+  assert.ok(rollback.includes('plugin_api.py /opt/data/plugins/resourcer/dashboard/plugin_api.py'), 'the rollback restores the plugin');
 });
 
-test('UPDATE-C.md: the snippet canaries are those of INSTALL 7.3 with --no-shadow, the CV canaries and invented CVs are those of INSTALL 7.6, the self-test is in both', () => {
+test('UPDATE-C.md: the snippet canaries are those of INSTALL 7.3 with --no-shadow, the CV canaries and invented CVs are those of INSTALL 7.6, the self-test is in both, the deep check is that of UPDATE-JEV-ONLY', () => {
   const note = fences(read('docs/UPDATE-C.md'));
   const install = fences(read('docs/INSTALL.md'));
   const snippet = note.filter((b) => /scripts\/ai-review\.js/.test(b));
@@ -517,23 +540,50 @@ test('UPDATE-C.md: the snippet canaries are those of INSTALL 7.3 with --no-shado
   for (const b of cv) assert.ok(install.includes(b), `not in INSTALL: ${b.slice(0, 100)}`);
   const self = 'cd /opt/data/profiles/resourcer/workspace/resourcer && node scripts/cv-review.js --self-test';
   assert.ok(note.includes(self) && install.includes(self), 'the self-test command is the same in the note and in INSTALL 7.6');
+  const jev = fences(read('docs/UPDATE-JEV-ONLY.md'));
+  const scratch = note.find((b) => b.startsWith("'use strict'"));
+  assert.ok(scratch && jev.includes(scratch), 'the deep-check file is character for character the one of UPDATE-JEV-ONLY');
+  assert.ok(jev.includes('RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node /opt/data/profiles/resourcer/install-work/deep-check.js') && note.includes('RESOURCER_ENV_FILE=/opt/data/profiles/resourcer/.env node /opt/data/profiles/resourcer/install-work/deep-check.js'));
 });
 
-test('UPDATE-C.md copies exactly the installed files that changed since Update B, and says nothing else changed', (t) => {
-  const changed = gitLines(['diff', '--name-only', 'a7fc7be']);
+test('UPDATE-C.md copies exactly the installed files that changed since Update A, maps each the way check-manifest --installed does, and says nothing else changed', (t) => {
+  // The release note: its range runs from Update A (d60d917) to the release. UPDATE-B.md describes d60d917..a7fc7be (tested above) and is superseded.
+  const changed = gitLines(['diff', '--name-only', 'd60d917']);
   const added = gitLines(['ls-files', '--others', '--exclude-standard']);
-  if (!changed || !added) { t.skip('no git history with Update B here'); return; }
+  if (!changed || !added) { t.skip('no git history with Update A here'); return; }
   const files = changed.concat(added);
   const note = read('docs/UPDATE-C.md');
   const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');
   assert.deepEqual(wrappers, [], 'a cron wrapper, the job list or SOUL.md changed: the note says they did not');
-  assert.deepEqual(files.filter((f) => f.startsWith('plugin/')), [], 'the dashboard plugin changed: the note says it did not');
   assert.ok(!files.includes('resourcer/package.json'), 'package.json changed: the note says no npm install');
-  const installed = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example');
-  assert.deepEqual(installed.sort(), ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md']);
+  assert.ok(!files.includes('resourcer/scripts/migrate-schema.js'), 'the schema script changed: the note says no migration');
+  const profile = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example');
+  assert.deepEqual(profile.sort(), ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md']);
   assert.ok(note.includes('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md'));
   assert.ok(note.includes('hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/'));
   assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
+  // the plugin: every changed file is copied to /opt/data/plugins/resourcer/<path below plugin/resourcer/> (the mapping of tools/check-manifest.js), compared, and put back on rollback
+  const plugin = files.filter((f) => f.startsWith('plugin/'));
+  assert.deepEqual(plugin.slice().sort(), ['plugin/resourcer/dashboard/dist/index.js', 'plugin/resourcer/dashboard/plugin_api.py']);
+  // the number of installed files the note names is the number that changed (two profile files and the plugin files), spelled out
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+  assert.ok(note.includes(`changes exactly ${words[profile.length + plugin.length]}: `), 'the note says how many installed files change, and the number is right');
+  for (const f of plugin) {
+    const rel = f.slice('plugin/resourcer/'.length);
+    const cp = `cp /opt/data/profiles/resourcer/workspace/${f} /opt/data/plugins/resourcer/${rel}`;
+    assert.ok(note.split(cp).length >= 3, `the note must copy ${f} on update and again on rollback`);
+    assert.ok(note.includes(`cmp /opt/data/profiles/resourcer/workspace/${f} /opt/data/plugins/resourcer/${rel}`), `the note must compare ${f}`);
+  }
+  assert.ok(!/dashboard plugin (is|are) unchanged/.test(note), 'the plugin changed: the note may not say it did not');
+});
+
+test('UPDATE-B.md says it is superseded by UPDATE-C.md for an instance still at d60d917, and UPDATE-C.md says the same the other way round', () => {
+  const b = read('docs/UPDATE-B.md');
+  assert.match(b, /\*\*SUPERSEDED by `docs\/UPDATE-C\.md` for any instance that is still at `d60d917`\.\*\*/);
+  assert.match(b, /Do not use this note for it/);
+  const c = read('docs/UPDATE-C.md');
+  assert.match(c, /so an instance still at `d60d917` does this note and NOT `docs\/UPDATE-B\.md`/);
+  for (const f of ['docs/INSTALL.md', 'HANDOFF.md']) assert.ok(read(f).includes('docs/UPDATE-C.md'), `${f} points at the release note`);
 });
 
 test('Update C documents: a design default is never labelled an owner decision (it says "design default, not yet confirmed by the owner")', () => {
@@ -542,6 +592,36 @@ test('Update C documents: a design default is never labelled an owner decision (
     for (const m of t.matchAll(/(owner decision|owner decided|decided by the owner)[^\n]{0,80}(K-CV1[3-9]|shadowMaxSeconds|cv-config-invalid|CV canary|phase2-held)/gi)) assert.fail(`${f} labels a design default an owner decision: ${m[0]}`);
   }
   assert.match(read('docs/DECISIONS.md'), /CVS-11[^\n]*design default, not yet confirmed by the owner/i);
+});
+
+test('release documents: "owner decision" is used only to say a choice is NOT one (an assistant-chosen rule or number is a "design default, not yet confirmed by the owner")', () => {
+  const rows = (f, prefix) => read(f).split('\n').filter((l) => l.startsWith(prefix));
+  const sources = [
+    ['docs/UPDATE-C.md', read('docs/UPDATE-C.md').split('\n')],
+    ['docs/OPERATIONS.md', read('docs/OPERATIONS.md').split('\n')],
+    ['docs/parity/reed-first-page.md', read('docs/parity/reed-first-page.md').split('\n')],
+    ['docs/parity/reed.md', read('docs/parity/reed.md').split('\n')],
+    ['docs/CV-SCREENING.md', read('docs/CV-SCREENING.md').split('\n')],
+    ['docs/parity/screening.md', read('docs/parity/screening.md').split('\n'), true],
+    ['docs/SCREENING.md', read('docs/SCREENING.md').split('\n'), true],
+    ['docs/ACCEPTANCE.md', rows('docs/ACCEPTANCE.md', '| [ ] | RE').concat(rows('docs/ACCEPTANCE.md', '| [ ] | SR1'))],
+    ['docs/KNOWN-LIMITS.md', rows('docs/KNOWN-LIMITS.md', '| K-CV').concat(rows('docs/KNOWN-LIMITS.md', '| K-REED1'))],
+  ];
+  const bad = [];
+  for (const [f, lines, decidedOk] of sources) { // decidedOk: older documents that also report real instructions of the owner ("the owner decided that ...")
+    for (const line of lines) {
+      for (const m of line.matchAll(/owner decision/gi)) {
+        const before = line.slice(Math.max(0, m.index - 16), m.index).toLowerCase();
+        if (!/\bnot (an )?$/.test(before)) bad.push(`${f}: ${line.slice(Math.max(0, m.index - 60), m.index + 40)}`);
+      }
+      if (!decidedOk) for (const m of line.matchAll(/decided by the owner|owner decided/gi)) bad.push(`${f}: ${line.slice(Math.max(0, m.index - 60), m.index + 40)}`);
+    }
+  }
+  assert.deepEqual(bad, []);
+  // and the new defaults say what they are
+  assert.match(read('docs/KNOWN-LIMITS.md'), /K-REED14[^\n]*design defaults that are not owner decisions/);
+  assert.match(read('docs/KNOWN-LIMITS.md'), /K-REED17 \| OPEN \(release, design default, not yet confirmed by the owner\)/);
+  assert.match(read('docs/OPERATIONS.md'), /What the tick allows a run to add \(design defaults, not yet confirmed by the owner;/);
 });
 
 test('CV_SCREEN defaults to shadow in the code and in every document that gives its default', () => {

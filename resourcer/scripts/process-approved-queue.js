@@ -683,12 +683,23 @@ async function run(queuePathArg, injected) {
           const existing = JSON.parse(fs.readFileSync(p1, 'utf8'));
           const rec = existing.phase2Recovery;
           if (rec && rec.attempts > 0) rec.attempts -= 1; // an outage must not use up the recovery attempts of the run
-          Object.assign(existing, { updatedAt: new Date().toISOString(), phase2Hold: { reason: 'cv-screening-unavailable', at: new Date().toISOString() } });
+          Object.assign(existing, { updatedAt: new Date().toISOString(), phase2Hold: { reason: 'cv-screening-unavailable', at: new Date().toISOString(), queue: path.basename(absQueuePath) } });
           safeAtomicWrite(p1, existing);
         } catch { /* the status file is a hint only */ }
       }
       return { code: 2, reason: 'cv-screening-unavailable', held, runId };
     };
+    // Was this queue HELD by CV screening before (phase2Hold in its status file, left by holdRun above)? A both-source queue whose Reed step never ran
+    // is then completed on the Caterer queue alone by the recovery, and that completion consumes the pending search: its Reed half is owed (see below).
+    const heldBefore = (() => {
+      try {
+        const f = findPhase1StatusFile(absQueuePath, ['phase2_starting', 'phase1_complete', 'phase1_running', 'phase1_initializing', 'phase1_abandoned'], { jobTitle, location });
+        if (!f) return false;
+        const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+        // the lookup can fall back to ANY fresh status file: only the one of this territory counts
+        return !!d.phase2Hold && (!d.jobTitle || (d.jobTitle === jobTitle && d.location === location));
+      } catch { return false; }
+    })();
     // A criteria file that is broken or missing never decides anything (fail closed, like the snippet criteria): mode on holds the queue, shadow
     // skips the stage with one warning alert below; neither ever rejects a candidate on the strength of a broken file.
     const cvFault = cvCfg && cvCfg.fault ? cvCfg.fault : null;
@@ -914,6 +925,7 @@ async function run(queuePathArg, injected) {
         ? `[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.seconds} seconds (phase2.shadowMaxSeconds): ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`
         : `[Phase 2] WARN CV screening (shadow) stopped after ${cvRun.shadowStopped.failures} CVs in a row could not be screened (${cvRun.shadowStopped.detail}); ${cvSummary.unscreened} candidate(s) were not screened; nothing was blocked`);
       else if (cvMode === 'shadow' && cvSummary.unscreened) console.log(`[Phase 2] WARN CV screening (shadow) could not reach Jev for ${cvSummary.unscreened} candidate(s); nothing was blocked`);
+      if (cvRun.shadowStopped && cvMode === 'shadow') cvStage.logShadowStop({ enabled: cvCfg.shadow.enabled, runId, stoppedBy: cvRun.shadowStopped.kind, screened: cvSummary.screened, skipped: [...cvRun.outcomes.values()].filter(o => o.why === 'shadow-stopped').length });
       for (const cand of candidates) {
         const o = cvRun.outcomes.get(String(cand.id));
         if (o && o.action === 'reject') {
@@ -1408,7 +1420,7 @@ async function run(queuePathArg, injected) {
         // The Caterer half is real and marks the territory searched; the Reed half is bookkept on its own (rule R4, territory-utils.markReedHalf).
         if (reedStatusNow) {
           try {
-            reedMark = deps.markReedHalf(tdb, { jobTitle: result.jobTitle, location: result.location, keywords: result.keywords ?? (keywords || ''), distance: result.distance, status: reedStatusNow, today });
+            reedMark = deps.markReedHalf(tdb, { jobTitle: result.jobTitle, location: result.location, keywords: result.keywords ?? (keywords || ''), distance: result.distance, status: reedStatusNow, owed: heldBefore, today });
           } catch (e) {
             reedMark = { error: String((e && e.message) || e).slice(0, 120) }; // bookkeeping only: never fails the run
           }

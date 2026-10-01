@@ -900,7 +900,7 @@ test('the criteria file is the one editable source: a change of a rule cell chan
   assertJevOnlyTraffic('criteria file');
 });
 
-// the card the engine reads: an old profile with no sign of life, and the same profile that shows an application (owner decision, 2026-09-30)
+// the card the engine reads: an old profile with no sign of life, and the same profile that shows an application (design default, 2026-09-30, not yet confirmed by the owner)
 const OLD_COOK = applications => `1. Zed Smith Cook | Leeds, LS1 4AB Unlock candidate ${applications} Updated 6 years ago Never unlocked Recent experience Other CV snippets Cook Jan 2012 - Dec 2014 Test Kitchen [[APPROVE]]`;
 
 test('end to end: a profile updated 6 years ago is rejected as out of date unless the card shows recent activity, and an application in the last 30 days counts', async () => {

@@ -647,3 +647,14 @@ test('every class the stylesheet is built around exists in the bundle and vice v
   const missing = [...used].filter((c) => !c.endsWith('-') && !defined.has(c) && !/^rsr-(title|loc|kw|source|priority|distance|active|cv|search)$/.test(c));
   assert.deepEqual(missing, []);
 });
+
+test('a Reed-only run whose Reed attempt failed is not labelled "Caterer OK" (no Caterer half exists)', async () => {
+  const runs = runsOk();
+  runs.runs = [{ ...runs.runs[0], errors: 0, sources: 'reed', reedAuthFailed: false,
+    reed: { pool: 0, newToZoho: 0, downloaded: 0, duplicates: 0, errors: 1, phase1: {}, authFailed: false, status: 'failed', failed: true, failureReason: 'HTTP 400 code 50010' } }];
+  await withPage(standardRoutes({ '/runs?limit=10&offset=0': () => runs }), {}, async (h) => {
+    const t = h.text();
+    assert.ok(t.includes('Reed failed'));
+    assert.ok(!t.includes('Caterer OK'), 'no Caterer half to be OK');
+  });
+});

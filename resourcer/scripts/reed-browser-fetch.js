@@ -23,6 +23,7 @@ const env = require('./lib/env');
 const fsx = require('./lib/fsx');
 
 const SEND_TIMEOUT_MS = 60000;
+const ANSWER_MS = 30000; // one request, answer body included, is cut off IN THE PAGE after this long (docs/OPERATIONS.md section 2); the CDP timeout below is the same value
 const REQUEST_ATTEMPTS = 3;
 const READY_POLL_MS = 150;
 const OLD_PAGE_MS = 30000; // a page older than this needs no stability check
@@ -122,7 +123,7 @@ async function connectCdp(wsUrl) {
 async function cdpEvaluate(expression) {
   if (!conn || !conn.ws || conn.ws.readyState !== 1) throw new Error('CDP not connected');
   const result = await conn.send('Runtime.evaluate', {
-    expression, returnByValue: true, awaitPromise: true, timeout: 30000,
+    expression, returnByValue: true, awaitPromise: true, timeout: ANSWER_MS,
   }, SEND_TIMEOUT_MS);
   if (result && result.exceptionDetails) {
     const exc = result.exceptionDetails;
@@ -273,22 +274,26 @@ async function waitTabReady() {
 
 // The expression is built from JSON.stringify'd values only: URL, header map (token included) and body cannot break out of it.
 // The page reports where it was, how long since its last navigation and whether the document changed during the request.
-function buildExpression({ url, method, headers, bodyStr, binary }) {
-  const opts = `{ method: ${JSON.stringify(method)}, headers: ${JSON.stringify(headers)}${bodyStr ? `, body: ${JSON.stringify(bodyStr)}` : ''} }`;
+// The CDP evaluation timeout does not reliably cover a fetch that is still awaited, so the page cuts the request (and the reading of its answer) off itself.
+function buildExpression({ url, method, headers, bodyStr, binary, answerMs = ANSWER_MS }) {
+  const opts = `{ method: ${JSON.stringify(method)}, headers: ${JSON.stringify(headers)}${bodyStr ? `, body: ${JSON.stringify(bodyStr)}` : ''}, signal: ac ? ac.signal : undefined }`;
   const tail = binary
     ? `return r.arrayBuffer().then(function (buf) {
           var bytes = new Uint8Array(buf);
           var binStr = '';
           var chunkSize = 8192;
           for (var i = 0; i < bytes.length; i += chunkSize) { binStr += String.fromCharCode.apply(null, bytes.slice(i, i + chunkSize)); }
-          return JSON.stringify({ status: r.status, contentType: r.headers.get('content-type') || '', contentDisposition: r.headers.get('content-disposition') || '', base64: btoa(binStr), size: bytes.length, meta: meta() });
+          return done(JSON.stringify({ status: r.status, contentType: r.headers.get('content-type') || '', contentDisposition: r.headers.get('content-disposition') || '', base64: btoa(binStr), size: bytes.length, meta: meta() }));
         });`
-    : `return r.text().then(function (t) { return JSON.stringify({ status: r.status, body: t, meta: meta() }); });`;
+    : `return r.text().then(function (t) { return done(JSON.stringify({ status: r.status, body: t, meta: meta() })); });`;
   return `(function () {
     var p = typeof performance !== 'undefined';
     var t0 = p ? performance.timeOrigin : 0;
+    var ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = ac ? setTimeout(function () { ac.abort(); }, ${Number(answerMs)}) : null;
+    function done(v) { if (timer) clearTimeout(timer); return v; }
     function meta() { return { path: location.pathname, since: p ? Math.round(performance.now()) : -1, nav: p ? performance.timeOrigin !== t0 : false, rs: document.readyState }; }
-    return fetch(${JSON.stringify(url)}, ${opts}).then(function (r) { ${tail} }).catch(function (e) { return JSON.stringify({ error: e.message, meta: meta() }); });
+    return fetch(${JSON.stringify(url)}, ${opts}).then(function (r) { ${tail} }).catch(function (e) { return done(JSON.stringify({ error: e.message, meta: meta() })); });
   })()`;
 }
 
@@ -443,6 +448,7 @@ module.exports = {
   ensureBrowserSession,
   findReedTab,
   cdpEvaluate,
+  buildExpression,
   closeCdp,
   invalidateToken,
   looksLikeJwt,

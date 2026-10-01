@@ -457,9 +457,12 @@ function upsertTerritory(db, params) {
  *
  *   reed_pending_since (nullable TEXT date, added here when missing) is set to today when a run records reed status 'failed' (the first search
  *   page could not be fetched) or 'auth_failed', keeping the OLDEST date of an open episode; it is cleared by a run that records 'ok' or 'empty'
- *   (Reed was searched; a genuine empty pool counts). Any other status (Reed off, held, daily limit, screening halt) leaves it as it was.
- *   The FIRST failure of an episode (mark was empty) and only status 'failed' also pulls next_run_date forward to the first day from tomorrow
- *   (UTC) with free daily capacity, when it is later than that: one automatic retry through the normal queue-due path. A second failure keeps
+ *   (Reed was searched; a genuine empty pool counts). Any other status (Reed off, held, daily limit, screening halt) leaves it as it was,
+ *   with ONE exception: status 'not_run' together with owed=true (the caller passes it when this Phase 2 finished a queue that CV screening had
+ *   HELD and the recovery completed on the Caterer queue alone, so the Reed half of a both-source run was never done and its pending search is
+ *   now consumed): it opens the mark and pulls the one automatic retry like 'failed' does, so the lost Reed half is not forgotten.
+ *   The FIRST failure of an episode (mark was empty) and only status 'failed' (or the owed 'not_run') also pulls next_run_date forward to the first day after the run day
+ *   (the day Phase 2 passes in: the queue's London date; plain date arithmetic) with free daily capacity, when it is later than that: one automatic retry through the normal queue-due path. A second failure keeps
  *   the normal cadence and the mark stays; tools/reed-catchup.js lists every marked territory and every run without a good Reed half.
  *
  * Never throws into the caller's run: a missing table or a locked database returns {error}.
@@ -469,9 +472,10 @@ function ensureReedPendingColumn(db) {
   if (!cols.includes('reed_pending_since')) db.exec('ALTER TABLE territory_searches ADD COLUMN reed_pending_since TEXT');
 }
 
-function markReedHalf(db, { jobTitle, location, keywords, distance, status, today, cap = DAILY_TERRITORY_CAP }) {
+function markReedHalf(db, { jobTitle, location, keywords, distance, status, today, owed = false, cap = DAILY_TERRITORY_CAP }) {
   try {
-    const open = status === 'failed' || status === 'auth_failed';
+    const lost = status === 'not_run' && owed === true;
+    const open = status === 'failed' || status === 'auth_failed' || lost;
     const close = status === 'ok' || status === 'empty';
     if (!open && !close) return { changed: false };
     ensureReedPendingColumn(db);
@@ -487,7 +491,7 @@ function markReedHalf(db, { jobTitle, location, keywords, distance, status, toda
     const first = !row.reed_pending_since;
     if (first) db.prepare('UPDATE territory_searches SET reed_pending_since = ? WHERE id = ?').run(day, row.id);
     let retryDate = null;
-    if (first && status === 'failed') {
+    if (first && (status === 'failed' || lost)) {
       const t = new Date(`${day}T00:00:00Z`);
       t.setUTCDate(t.getUTCDate() + 1);
       let d = t.toISOString().slice(0, 10);

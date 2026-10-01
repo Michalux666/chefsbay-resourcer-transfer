@@ -294,6 +294,21 @@ async function screenCandidates(o) {
 }
 
 /**
+ * Leaves one line in the CV shadow log for a queue whose shadow screening was cut short, so cv-report.js can show how much of what was queued the
+ * cap left unscreened. Best effort: logging never affects a run.
+ * @param {{enabled?:boolean, runId?:string, stoppedBy:'time'|'failures', screened:number, skipped:number}} o
+ */
+function logShadowStop(o) {
+  try {
+    const shadow = require('./shadow');
+    if (o.enabled === false) return false; // the shadow log is switched off (config shadow.enabled): this row is not written either
+    return new shadow.CvShadowLog().append(shadow.buildQueueStopRow({ ...o, mode: 'shadow' }));
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
  * Warnings when one share of a run is above its ceiling (config alerts.*): a mis-tuned gate or a broken reader is noticed within a run.
  * In shadow mode the rates are what the stage WOULD have done, and the texts say so. One more warning when a shadow queue was cut short.
  */
@@ -403,5 +418,5 @@ function unlockBlocked(halt) {
 
 module.exports = {
   mode, loadConfig, newStats, knownFor, findEarlierRejection, recordRejection, runCli, screenCandidates, alertsFor, raiseOutage, screeningHalted,
-  reasonText, validResult, unlockBlocked, primaryReasonCode, HALT_REASON,
+  reasonText, validResult, unlockBlocked, primaryReasonCode, HALT_REASON, logShadowStop,
 };

@@ -493,7 +493,7 @@
   "role": "Chef de Partie",
   "expect": "reject",
   "ownerDecision": true,
-  "note": "a generic title and nothing else: no meaningful history (owner decision: the lenient variant would approve a hospitality headline only)",
+  "note": "a generic title and nothing else: no meaningful history (design default: the lenient variant would approve a hospitality headline only)",
   "text": "Team Member | Leeds, <PC> Unlock candidate No applications Updated 9 days ago Never unlocked Recent experience Other CV snippets Not available"
  },
  {
@@ -974,7 +974,7 @@
   "role": "Bartender",
   "expect": "reject",
   "ownerDecision": true,
-  "note": "a kitchen career for a bar search: not the same kind of work (owner decision)",
+  "note": "a kitchen career for a bar search: not the same kind of work (design default)",
   "text": "Head Chef | Leeds, <PC> Unlock candidate No applications Active today Updated 12 days ago Never unlocked Recent experience Other CV snippets Head Chef Jan 2019 - Current The Anchor Restaurant Full control of a 60 cover restaurant, menu design, GP targets, HACCP, hiring and managing a team of 8. Sous Chef Jun 2014 - Dec 2018 The Ivy Lodge Hotel"
  },
  {
@@ -1609,7 +1609,7 @@
   "role": "Chef de Partie",
   "expect": "approve",
   "ownerDecision": true,
-  "note": "updated 7 years ago but active last week: not out of date (owner decision)",
+  "note": "updated 7 years ago but active last week: not out of date (design default)",
   "text": "Chef de Partie | Sheffield, <PC> Unlock candidate 1 application in last 30 days Active 6 days ago Updated 7 years ago Never unlocked Recent experience Other CV snippets Chef de Partie Mar 2015 - Current Kingsway Hotel Sauce and larder, banquets and a la carte."
  },
  {

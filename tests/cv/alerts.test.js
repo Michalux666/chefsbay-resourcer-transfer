@@ -14,7 +14,7 @@ const cfg = cv.loadConfig({ file: 'no-such-file.json' });
 const stats = over => ({ mode: 'on', screened: 20, rejected: 0, jev: 20, facts: 0, fallback: 0, forced: 0, unreadable: 0, unscreened: 0, shadowStopped: false, jevShare: 1, ...over });
 const keys = s => cvStage.alertsFor(s, cfg, 'Chef', 'LS1').map(a => a.key);
 
-test('the shipped ceilings are the owner decision', () => {
+test('the shipped ceilings are the design defaults of docs/parity/cv-stage.md (not yet confirmed by the owner)', () => {
   assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.1, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
 });
 

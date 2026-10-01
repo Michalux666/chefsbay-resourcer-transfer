@@ -4,8 +4,8 @@
 // after it, in any case, unless it is a role word), full UK postcodes, e-mail addresses, phone numbers, URLs.
 // Keeps everything the decision needs: titles, employers, dates, duties, city.
 //
-// Known limits (documented in docs/SCREENING.md): a surname that is also a role word ('Alex Cook
-// Sous Chef') stays; a name that appears again in the body is only replaced when it is a first name
+// Known limits (documented in docs/SCREENING.md): a surname that is also a role word (one spelled like an
+// occupation) stays; a name that appears again in the body is only replaced when it is a first name
 // of 4+ letters that is not a month or role word.
 
 const crypto = require('crypto');

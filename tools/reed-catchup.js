@@ -17,12 +17,16 @@
  *                           first-page failure for that title and place. An inference from log text, not a proof; rotated or deleted logs
  *                           cannot be read, so this category can only under-report.
  *
+ * A territory whose run was merely HELD (Update C: CV screening in mode on could not reach Jev, exit 14 phase2-held; its status file in runs/ carries
+ * phase2Hold and is not complete) is left out, like a queued or running one: the held queue is completed by the stranded-run recovery once the screening
+ * halt clears, and a catch-up run queued now would only hold again (or unlock candidates that would be held). Counted as "held by CV screening".
+ *
  * Output: counts and territory codes (outward postcodes) only. Never a name, e-mail, phone number or CV text; job titles are not printed.
  *
  * --queue N writes up to N pending-search files (pending-searches/zz-reed-catchup-<epoch ms>-<8 hex>.json: unique names, NOT the
  * minute-named files of create-pending-search.js, so a loop cannot overwrite them; the "zz" makes them sort after every scheduled or
  * dashboard search, so a catch-up only uses idle capacity). Sources both (there is no Reed-only run upstream: the Caterer half re-runs and
- * is mostly skipped as already known), priority low. Never a territory that is already queued, quarantined, running or that ran today; never
+ * is mostly skipped as already known), priority low. Never a territory that is already queued, quarantined, running or that ran today (London day, as run_results records it); never
  * more than --per-day per UTC day (ledger runtime/reed-catchup.json); idempotent. Reed's daily profile-view budget (reed_daily_usage) is
  * respected the way the scheduler respects it: nothing is queued once today's views reach the limit, and every catch-up file reserves
  * CV_RESERVE views of the remaining budget for the day it is queued.
@@ -95,6 +99,8 @@ function loadSqlite(home) {
 const norm = (s) => String(s || '').trim().toLowerCase();
 const keyOf = (title, location, keywords) => `${norm(title)}|${String(location || '').trim().toUpperCase()}|${norm(keywords)}`;
 const utcDay = (d) => d.toISOString().slice(0, 10);
+// The day of a run (run_results.date, the queue's searchDate) is the LONDON day; the Reed view budget and this tool's ledger are keyed by the UTC day.
+const londonDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
 const addDays = (day, n) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return utcDay(d); };
 
 function parseJson(text) {
@@ -138,6 +144,25 @@ function firstPageFailuresInLogs(home, sinceDay) {
   return out;
 }
 
+// ---------------------------------------------------------------- held queues
+
+const HELD_MAX_AGE_DAYS = 7; // the stranded-run recovery ignores status files older than this (K-CV16)
+
+// Keys (title|PLACE) of the runs whose Phase 2 CV screening HELD and that nobody has completed yet. Reads the status files in runs/ only; nothing is printed from them.
+function heldRuns(home, now) {
+  const held = new Set();
+  let names = [];
+  try { names = fs.readdirSync(path.join(home, 'runs')).filter((n) => /^phase1-.*[.]json$/.test(n)); } catch { return held; }
+  for (const n of names) {
+    const d = parseJson((() => { try { return fs.readFileSync(path.join(home, 'runs', n), 'utf8').replace(String.fromCharCode(0xFEFF), ''); } catch { return ''; } })());
+    if (!d || !d.phase2Hold || d.status === 'complete' || d.phase2Complete) continue;
+    const since = Date.parse(d.startedAt || d.updatedAt || '');
+    if (Number.isFinite(since) && now.getTime() - since > HELD_MAX_AGE_DAYS * 86400000) continue;
+    held.add(`${norm(d.jobTitle)}|${String(d.location || '').toUpperCase()}`);
+  }
+  return held;
+}
+
 // ---------------------------------------------------------------- the analysis
 
 function classify(run, wantsReed, logDays) {
@@ -162,6 +187,7 @@ function analyse(home, o, now, logs) {
   if (!fs.existsSync(dbFile)) throw new Error(`no candidates.db in ${home}`);
   const db = new Database(dbFile, { readonly: true, fileMustExist: true, timeout: 5000 });
   const today = utcDay(now);
+  const todayRun = londonDay(now); // the day column of run_results is the London day
   let runs = [];
   let terrs = [];
   let usage = null;
@@ -176,10 +202,21 @@ function analyse(home, o, now, logs) {
 
   const latest = new Map();
   const ranToday = new Set();
+  const reedByDay = new Map(); // run day -> {attempts, failed}: the failure rate of docs/ACCEPTANCE.md RE08, without reading any log
   for (const r of runs) {
+    if (r.sources === 'both' || r.sources === 'reed') {
+      const rj = parseJson(r.reed_json);
+      const st = rj && typeof rj.status === 'string' ? rj.status : null;
+      if (rj && st !== 'not_run' && st !== 'halted' && st !== 'limit') {
+        const d = reedByDay.get(r.date) || { attempts: 0, failed: 0 };
+        d.attempts++;
+        if (classify(r, true, null) === 'failed') d.failed++;
+        reedByDay.set(r.date, d);
+      }
+    }
     const k = keyOf(r.job_title, r.location, r.keywords);
     latest.set(k, r); // ascending by completion: the last one wins
-    if (r.date === today) ranToday.add(k);
+    if (r.date === todayRun) ranToday.add(k);
   }
   const terrByKey = new Map();
   for (const t of terrs) {
@@ -201,13 +238,15 @@ function analyse(home, o, now, logs) {
     }
   } catch { /* no quarantine folder */ }
   const running = new Set(rs.scanActiveRuns(home, now).map((r) => `${norm(r.jobTitle)}|${String(r.location).toUpperCase()}`));
+  const held = heldRuns(home, now);
 
   const cats = { failed: [], skipped: [], reed_off: [], empty_with_log_failure: [] };
-  const excluded = { notAskingForReed: 0, disabled: 0, queuedOrRunning: 0, ranToday: 0, noTerritoryRow: 0 };
+  const excluded = { notAskingForReed: 0, disabled: 0, queuedOrRunning: 0, heldByCvScreening: 0, ranToday: 0, noTerritoryRow: 0 };
   const consider = (k, t, cat, since) => {
     const loose = `${norm(t.job_title)}|${String(t.location).toUpperCase()}`;
     if (!t.enabled) { excluded.disabled++; return; }
     if (ranToday.has(k)) { excluded.ranToday++; return; }
+    if (held.has(loose)) { excluded.heldByCvScreening++; return; }
     if (queuedKeys.has(k) || queuedLoose.has(loose) || quarantined.has(loose) || running.has(loose)) { excluded.queuedOrRunning++; return; }
     cats[cat].push({ key: k, category: cat, code: String(t.location).toUpperCase(), since, territory: t });
   };
@@ -230,7 +269,8 @@ function analyse(home, o, now, logs) {
   }
   const order = ['failed', 'skipped', 'reed_off', 'empty_with_log_failure'];
   const list = order.flatMap((c) => cats[c]).sort((a, b) => (order.indexOf(a.category) - order.indexOf(b.category)) || String(a.since).localeCompare(String(b.since)));
-  return { today, cats, list, excluded, usage, latestRuns: latest.size };
+  const byDay = [...reedByDay.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([date, v]) => ({ date, attempts: v.attempts, failed: v.failed, failedPercent: Math.round(v.failed / v.attempts * 1000) / 10 }));
+  return { today, cats, list, excluded, usage, latestRuns: latest.size, reedByDay: byDay };
 }
 
 // ---------------------------------------------------------------- the ledger (per UTC day, for --per-day and idempotency)
@@ -340,6 +380,7 @@ function summary(a, o, plan, written) {
     since: o.since, today: a.today, mode: o.queue > 0 && !o.dryRun ? 'queue' : 'dry-run', territories: a.list.length,
     categories: Object.fromEntries(Object.entries(a.cats).map(([k, v]) => [k, { count: v.length, codes: [...new Set(v.map((x) => x.code))] }])),
     excluded: a.excluded,
+    reedByDay: a.reedByDay,
     reedBudget: a.usage ? { used: Number(a.usage.profile_views) || 0, limit: Number(a.usage.daily_limit) || DEFAULT_REED_LIMIT } : null,
     queue: plan ? {
       asked: o.queue, perDay: o.perDay, queuedToday: plan.doneToday, allowedByBudget: plan.byBudget, wouldQueue: plan.take, reason: plan.reason,
@@ -355,7 +396,8 @@ function render(s) {
   const label = { failed: 'failed (Reed failed or auth failed)', skipped: 'skipped (Reed did not run)', reed_off: 'reed_off (recorded while Reed was off)', empty_with_log_failure: 'empty_with_log_failure (pool 0, errors 0, first-page failure in the log)' };
   for (const [k, v] of Object.entries(s.categories)) L.push(`  ${label[k]}: ${v.count}${v.count ? `   ${codesOf(v.codes.map((c) => ({ code: c })))}` : ''}`);
   const e = s.excluded;
-  L.push(`left out: already queued or running ${e.queuedOrRunning}, ran today ${e.ranToday}, disabled ${e.disabled}, territory asks for Caterer only ${e.notAskingForReed}, no territory row ${e.noTerritoryRow}`);
+  L.push(`left out: already queued or running ${e.queuedOrRunning}, held by CV screening ${e.heldByCvScreening}, ran today ${e.ranToday}, disabled ${e.disabled}, territory asks for Caterer only ${e.notAskingForReed}, no territory row ${e.noTerritoryRow}`);
+  if (s.reedByDay && s.reedByDay.length) L.push(`Reed attempts by run day (a run that asked for Reed and did not stop before it): ${s.reedByDay.slice(-7).map((d) => `${d.date} ${d.attempts} attempts, ${d.failed} failed (${d.failedPercent}%)`).join('; ')}`);
   L.push(s.reedBudget ? `Reed views today: ${s.reedBudget.used} of ${s.reedBudget.limit}` : 'Reed views today: none recorded');
   if (s.queue) {
     const q = s.queue;
@@ -419,7 +461,7 @@ async function main(argv, io) {
   }
 }
 
-module.exports = { main, parseArgs, analyse, classify, planQueue, firstPageFailuresInLogs, keyOf, DEFAULT_SINCE, DEFAULT_PER_DAY, CV_RESERVE, USAGE };
+module.exports = { main, parseArgs, analyse, classify, planQueue, heldRuns, firstPageFailuresInLogs, keyOf, DEFAULT_SINCE, DEFAULT_PER_DAY, CV_RESERVE, USAGE };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {

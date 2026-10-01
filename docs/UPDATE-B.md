@@ -1,5 +1,7 @@
 # UPDATE B: forced-choice screening criteria and CV screening (shadow) for an installed instance
 
+**SUPERSEDED by `docs/UPDATE-C.md` for any instance that is still at `d60d917`.** `docs/UPDATE-C.md` takes such an instance to the current release in ONE cycle and contains everything in this note. Do not use this note for it: `git pull --ff-only` brings the whole current release (not only Update B), while the steps below say the dashboard plugin and the profile files of later updates are unchanged, so its checks would stop or mislead. This note stays correct only for an instance that installed Update B on its own at the time, when `a7fc7be` was the newest commit of the code repository (its files describe that range, `d60d917` to `a7fc7be`, and a test keeps them that way); such an instance goes on with `docs/UPDATE-C.md`, whose steps are the same from `a7fc7be`.
+
 Audience: the operator LLM of the `resourcer` profile (terminal tool) and the owner. This note is only for an instance whose code is at commit `d60d917` (Update A: Jev-only screening, the privacy fix, the tick drain, the dashboard labels; `docs/UPDATE-JEV-ONLY.md`). An instance still on the first release (commit `016b444`) does that update first. A fresh install follows `docs/INSTALL.md` and needs none of this.
 
 ## What changes and why

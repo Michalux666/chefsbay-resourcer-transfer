@@ -89,6 +89,23 @@ function buildRow(result, c) {
   return row;
 }
 
+// The row of one QUEUE whose shadow screening was cut short (phase2.shadowMaxSeconds or consecutive failures): how many CVs of it were screened
+// and how many were skipped. Numbers and a fixed word only. It carries kind 'queue-stop', so readRows() (the decisions) never returns it and
+// cv-report.js reads it with readQueueStops() to show the share of CVs the time cap left unscreened (an unscreened share, so the switch-on
+// sample bias is visible).
+function buildQueueStopRow(c) {
+  return {
+    v: 1,
+    kind: 'queue-stop',
+    ts: (c.now || new Date()).toISOString(),
+    mode: c.mode || 'shadow',
+    runId: c.runId || null,
+    stoppedBy: c.stoppedBy === 'time' ? 'time' : 'failures',
+    screened: Math.max(0, Math.round(Number(c.screened) || 0)),
+    skipped: Math.max(0, Math.round(Number(c.skipped) || 0)),
+  };
+}
+
 // Delete daily files older than `days`. Returns the names removed.
 function pruneShadow(opts) {
   const o = opts || {};
@@ -126,8 +143,17 @@ function maybePrune(opts) {
   return res;
 }
 
-// Rows for a report; a bad line is skipped.
+// Rows for a report; a bad line is skipped. Decision rows only: a queue-stop row (kind) is read by readQueueStops().
 function readRows(opts) {
+  return readAll(opts).filter(r => !r.kind);
+}
+
+/** The queue-stop rows (see buildQueueStopRow). */
+function readQueueStops(opts) {
+  return readAll(opts).filter(r => r.kind === 'queue-stop');
+}
+
+function readAll(opts) {
   const o = opts || {};
   const dir = o.dir || paths.SHADOW;
   const rows = [];
@@ -144,4 +170,4 @@ function readRows(opts) {
   return rows;
 }
 
-module.exports = { CvShadowLog, buildRow, pruneShadow, maybePrune, readRows, fileFor, NAME_RE };
+module.exports = { CvShadowLog, buildRow, buildQueueStopRow, pruneShadow, maybePrune, readRows, readQueueStops, fileFor, NAME_RE };

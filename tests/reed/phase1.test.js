@@ -365,7 +365,7 @@ test('D4: a run that starts while the pipeline is halted does no browser work an
   assert.strictEqual(queue(m, 't9').candidates.length, 30);
 }));
 
-// D4 extension (owner decision): ANY screening attempt that is not a successful parse is Unavailable, not a rejection.
+// D4 extension (legacy rule extended by the port; design default, not yet confirmed by the owner, parity/reed.md R10): ANY screening attempt that is not a successful parse is Unavailable, not a rejection.
 const NOT_A_PARSE = [
   ['error', 'exit 1'],
   ['exit2', 'exit 2'],
