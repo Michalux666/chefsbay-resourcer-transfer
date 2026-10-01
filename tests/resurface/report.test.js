@@ -65,3 +65,15 @@ test('C7 with nothing to report the block says so, and an unreadable counter fil
   assert.equal(again.code, 0);
   assert.match(again.out, /none in this period/);
 });
+
+test('C6 a CV_RESURFACE typo is shown by the report as a WARNING (the second look is then off), and so is a number setting that is not a whole number', () => {
+  process.env.CV_RESURFACE = 'nope';
+  process.env.CV_RESURFACE_MAX_PER_DAY = 'forty';
+  const text = run(['--days', '1']).out;
+  assert.match(text, /CV_RESURFACE off, CV_SCREEN shadow/);
+  assert.match(text, /WARNING: CV_RESURFACE='nope' is neither on nor off: treated as off/);
+  assert.match(text, /WARNING: CV_RESURFACE_MAX_PER_DAY='forty' is not a whole number: using 40/);
+  delete process.env.CV_RESURFACE;
+  delete process.env.CV_RESURFACE_MAX_PER_DAY;
+  assert.doesNotMatch(run(['--days', '1']).out, /WARNING/);
+});
