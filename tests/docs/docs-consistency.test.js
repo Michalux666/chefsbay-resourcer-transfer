@@ -887,9 +887,9 @@ test('UPDATE-E.md: only commands this operator may run, code before checks befor
 });
 
 test('UPDATE-E.md copies exactly the installed files that changed since the previous release, and says nothing else changed', (t) => {
-  // the previous release is the branch point from main: after the finalizer merged main in, that is main itself
-  const base = gitLines(['merge-base', 'HEAD', 'main']);
-  if (!base || !base[0]) { t.skip('no git history with main here'); return; }
+  // pinned to the release that is installed on the instance (315e99b): the branch point from main stops working once main is fast-forwarded to this release
+  const base = gitLines(['rev-parse', '--verify', '--quiet', '315e99b^{commit}']);
+  if (!base || !base[0]) { t.skip('no git history with the release commit 315e99b here'); return; }
   const changed = gitLines(['diff', '--name-only', base[0]]);
   const added = gitLines(['ls-files', '--others', '--exclude-standard']);
   if (!changed || !added) { t.skip('no git history here'); return; }
