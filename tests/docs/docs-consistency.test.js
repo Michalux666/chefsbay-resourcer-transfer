@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-RESCREEN.md', 'docs/RESCREEN.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -598,6 +598,8 @@ test('release documents: "owner decision" is used only to say a choice is NOT on
   const rows = (f, prefix) => read(f).split('\n').filter((l) => l.startsWith(prefix));
   const sources = [
     ['docs/UPDATE-C.md', read('docs/UPDATE-C.md').split('\n')],
+    ['docs/UPDATE-RESCREEN.md', read('docs/UPDATE-RESCREEN.md').split('\n')],
+    ['docs/RESCREEN.md', read('docs/RESCREEN.md').split('\n')],
     ['docs/OPERATIONS.md', read('docs/OPERATIONS.md').split('\n')],
     ['docs/parity/reed-first-page.md', read('docs/parity/reed-first-page.md').split('\n')],
     ['docs/parity/reed.md', read('docs/parity/reed.md').split('\n')],
@@ -605,7 +607,7 @@ test('release documents: "owner decision" is used only to say a choice is NOT on
     ['docs/parity/screening.md', read('docs/parity/screening.md').split('\n'), true],
     ['docs/SCREENING.md', read('docs/SCREENING.md').split('\n'), true],
     ['docs/ACCEPTANCE.md', rows('docs/ACCEPTANCE.md', '| [ ] | RE').concat(rows('docs/ACCEPTANCE.md', '| [ ] | SR1'))],
-    ['docs/KNOWN-LIMITS.md', rows('docs/KNOWN-LIMITS.md', '| K-CV').concat(rows('docs/KNOWN-LIMITS.md', '| K-REED1'))],
+    ['docs/KNOWN-LIMITS.md', rows('docs/KNOWN-LIMITS.md', '| K-CV').concat(rows('docs/KNOWN-LIMITS.md', '| K-REED1'), rows('docs/KNOWN-LIMITS.md', '| K-RSC'))],
   ];
   const bad = [];
   for (const [f, lines, decidedOk] of sources) { // decidedOk: older documents that also report real instructions of the owner ("the owner decided that ...")
@@ -636,4 +638,132 @@ test('CV_SCREEN defaults to shadow in the code and in every document that gives 
   for (const f of LIVE_DOCS.concat(['docs/CV-SCREENING.md', 'docs/DECISIONS.md', 'docs/parity/cv-stage.md'])) {
     assert.ok(!/CV_SCREEN[^\n]{0,40}(?:default `?off|\(default\) `?off|defaults to `?off)/i.test(read(f)), `${f} says CV_SCREEN defaults to off`);
   }
+});
+
+// ---- Update D (the re-screen tool, tools only) and docs/RESCREEN.md --------------------------------------------------------------------------
+
+test('UPDATE-RESCREEN.md: only commands this operator may run, pause before pull before verify before the installed-copy check before resume, no setting is changed, nothing is copied, and a rollback that needs none', () => {
+  const t = read('docs/UPDATE-RESCREEN.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 15, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the update changes no setting: ${b.slice(0, 80)}`);
+    assert.ok(!/^cp /.test(b), `the update copies nothing: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(t.split('/opt/hermes/bin/hermes -p resourcer').join('')), 'a bare hermes command');
+  const steps = t.indexOf('## 1. Before you start');
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const status = at('pipeline-watchdog.js --status');
+  const rev = at('git -C /opt/data/profiles/resourcer/workspace rev-parse HEAD');
+  const old = at('check-manifest.js --installed off\n');
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const full = at('check-manifest.js --installed auto --expect <NEW_DIGEST>');
+  const help = at('tools/rescreen-policy-rejects.js --help');
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
+  assert.ok(list < pause && pause < status && status < rev && rev < old && old < pull && pull < verify && verify < full && full < help && help < resume, 'order: list, pause, status, old commit, old digest, pull, verify, installed copies, help, resume');
+  assert.match(t, /start with `315e99b`/);
+  assert.match(t, /4bca8bb203613b5bd8c3e97669af3633efdbf5205cb2e3af246c1692e7797f26/);
+  assert.match(t, /<NEW_DIGEST>/);
+  assert.match(t, /never from `MANIFEST\.sha256` or from the checkout you are verifying/);
+  assert.match(t, /no installed copy changes/i);
+  assert.match(t, /no file under `resourcer\/`/);
+  assert.match(t, /Idempotent: yes/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /HUMAN-APPROVE/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(rollback, /nothing to set back/);
+  assert.match(rollback, /undone FIRST|undone first|do that FIRST/);
+});
+
+test('UPDATE-RESCREEN.md says the commit is tools, tests and documents only: nothing under resourcer/, hermes/ or plugin/ changed in the commit that added it (or, before it is committed, since the release commit 315e99b), so there is nothing to install', (t) => {
+  // pinned to ITS OWN commit once it exists, so a later legitimate commit (a change under resourcer/, another tool) does not fail this test for ever
+  const own = gitLines(['log', '--diff-filter=A', '--format=%H', '--', 'docs/UPDATE-RESCREEN.md']);
+  let files = null;
+  if (own && own.length) files = gitLines(['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', own[own.length - 1]]);
+  else {
+    const changed = gitLines(['diff', '--name-only', '315e99b']);
+    const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+    if (changed && added) files = changed.concat(added);
+  }
+  if (!files || !files.length) { t.skip('no git history with the release commit here'); return; }
+  const stray = files.filter((f) => !/^(tools|docs|tests)\//.test(f) && !['MANIFEST.sha256', 'README.md', 'HANDOFF.md'].includes(f));
+  assert.deepEqual(stray, [], 'a file outside tools/, docs/ and tests/ changed: UPDATE-RESCREEN.md says nothing installed changes');
+  assert.ok(files.includes('tools/rescreen-policy-rejects.js') && files.includes('docs/RESCREEN.md') && files.includes('docs/UPDATE-RESCREEN.md'));
+  for (const f of files.filter((x) => x.startsWith('tools/'))) assert.ok(f === 'tools/rescreen-policy-rejects.js', `${f}: this update adds exactly one tool`);
+});
+
+test('RESCREEN.md: the runbook commands are hygienic and in order (pause, idle, dry run, owner gate, apply, check, resume, queue, undo), the owner numbers are placeholders, and the defaults it names are the ones in the code', () => {
+  const t = read('docs/RESCREEN.md');
+  const tool = require(path.join(REPO, 'tools/rescreen-policy-rejects.js'));
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 15, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the procedure changes no setting: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+    if (/--confirm/.test(b)) assert.match(b, /--confirm <N>$/, `the owner's number is a placeholder: ${b}`);
+    if (/--per-day/.test(b)) assert.match(b, /--per-day <M>( --dry-run)?$/, `the owner's number is a placeholder: ${b}`);
+  }
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(t.split('/opt/hermes/bin/hermes -p resourcer').join('')), 'a bare hermes command');
+  const base = 'node /opt/data/profiles/resourcer/workspace/tools/rescreen-policy-rejects.js';
+  const steps = t.indexOf('## 8. The apply');
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const status = at('pipeline-watchdog.js --status');
+  const dry = at(`${base}\n`);
+  const dryReed = at(`${base} --reed-seen\n`);
+  const gate = at('### 8.3 HUMAN decision gate (OWNER)');
+  const apply = at(`${base} --apply --confirm <N>`);
+  const applyReed = at(`${base} --reed-seen --apply --confirm <N>`);
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
+  const queueDry = at(`${base} --queue --per-day <M> --dry-run`);
+  const queue = at(`${base} --queue --per-day <M>\n`);
+  const undoDry = at(`${base} --undo <LEDGER> --dry-run`);
+  const undo = at(`${base} --undo <LEDGER>\n`);
+  assert.ok(list < pause && pause < status && status < dry && dry < dryReed && dryReed < gate && gate < apply && apply < applyReed && applyReed < resume && resume < queueDry && queueDry < queue && queue < undoDry && undoDry < undo,
+    'order: list, pause, status, dry run, dry run with Reed, owner gate, apply, apply with Reed, resume, queue dry run, queue, undo dry run, undo');
+  assert.match(t, /Nobody but the owner gives these numbers/);
+  assert.match(t, /\*\*The numbers come from the owner\.\*\*/);
+  assert.ok(t.includes(`default ${tool.DEFAULT_SINCE}`), 'the default --since is the code default');
+  assert.ok(t.includes(`If \`<N>\` is above ${tool.DEFAULT_MAX_ROWS}`), 'the --max-rows default is the code default');
+  assert.ok(t.includes(`\`--per-day\` (default ${tool.DEFAULT_PER_DAY})`), 'the --per-day default is the code default');
+  assert.ok(t.includes(`reserves ${tool.CV_RESERVE} views`), 'the Reed view reservation is the one of the code');
+  assert.ok(t.includes(`a design default reserve of ${tool.CREDIT_RESERVE} credits`), 'the Caterer credit reserve is the one of the code');
+  assert.ok(t.includes('(balance - 200) / 20') && tool.CREDIT_RESERVE === 200 && tool.CV_RESERVE === 20, 'the credit formula names the real constants');
+  // the numbers the owner may name have a command the operator is allowed to run: a window and a higher limit, with placeholders only
+  assert.ok(blocks.some((b) => b === `${base} --since <D> --until <D>`), 'a windowed dry run');
+  assert.ok(blocks.some((b) => b === `${base} --since <D> --until <D> --max-rows <K> --apply --confirm <N>`), 'a windowed apply');
+  assert.match(t, /leave both jobs paused\*\*, tell the owner/, 'a STOP leaves the jobs paused');
+  assert.match(t, /Every `--queue` run needs the owner's message of that day/, 'no daily queue loop on its own');
+  assert.match(t, /design default, not yet confirmed by the owner/);
+  for (const f of ['docs/OPERATIONS.md', 'docs/KNOWN-LIMITS.md']) assert.ok(read(f).includes('docs/RESCREEN.md'), `${f} points at RESCREEN.md`);
+  assert.ok(read('docs/KNOWN-LIMITS.md').includes('K-RSC3') && t.includes('K-RSC3'), 'the priority downgrade limit is documented in both');
+  // the exit codes and files the documents name are the ones of the code
+  const ops = read('docs/OPERATIONS.md');
+  assert.match(ops, /\| `rescreen-policy-rejects\.js` \| 0 ok \(dry run, apply, queue, undo\), 1 unexpected, 2 usage, 3 refused with nothing written/);
+  assert.match(tool.USAGE, /Exit codes: 0 ok, 1 unexpected error, 2 usage error, 3 refused \(nothing written\), 4 could not write\./);
+  const src = read('tools/rescreen-policy-rejects.js');
+  for (const name of ['rescreen-ledger-', 'rescreen-queue.json', 'zz-rescreen-']) {
+    assert.ok(src.includes(name) && t.includes(name) && ops.includes(name.replace(/-$/, '')), `${name} is written by the code and named in RESCREEN.md and OPERATIONS.md`);
+  }
+});
+
+test('the usage text of the re-screen tool lists exactly the options its parser accepts', () => {
+  const tool = require(path.join(REPO, 'tools/rescreen-policy-rejects.js'));
+  const src = read('tools/rescreen-policy-rejects.js');
+  const parsed = new Set([...src.matchAll(/a === '(--[a-z-]+)'/g)].map((m) => m[1]));
+  const usage = new Set([...tool.USAGE.matchAll(/(--[a-z-]+)/g)].map((m) => m[1]));
+  parsed.delete('--help');
+  assert.deepEqual([...usage].filter((f) => f !== '--help').sort(), [...parsed].sort());
 });

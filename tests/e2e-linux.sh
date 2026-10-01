@@ -23,7 +23,8 @@
 # 05 kill -9 recovery, 06 suspend/resume, 07 Reed off/on, 08 dashboard, 09 backup, 10 retention and maintenance,
 # 11 secrets hygiene, 12 missing database guard, 13 the Jev-only default engine, 14 CV screening after the unlock (shadow by default, on, off),
 # 15 CV_SCREEN=on with the CV route refusing while the snippet route is healthy (one hold, the halt stays, no unlock after it, the recovery completes the queue),
-# 16 the Reed first-page failure (HTTP 400, code 50010): failed attempt, recovery, transient faults, an unsearchable place, no search page fetched.
+# 16 the Reed first-page failure (HTTP 400, code 50010): failed attempt, recovery, transient faults, an unsearchable place, no search page fetched,
+# 17 the re-screen of the pre-unlock rejections that Update A's review policy made because Jev was uncertain (tools/rescreen-policy-rejects.js): dry run, apply, queue, the next run, undo.
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
 # at $E2E_VENV, default ~/hermes-sim-venv, and filled with pip), E2E_SEED (random-kill seed, default 20260929),
@@ -42,7 +43,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY="$2"; shift 2 ;;
     --unit) UNIT=1; shift ;;
     --keep) export E2E_KEEP=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done

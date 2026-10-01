@@ -243,7 +243,7 @@ Remember the key for later pulls:
 git -C /opt/data/profiles/resourcer/workspace config core.sshCommand 'ssh -i /opt/data/profiles/resourcer/deploy/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/opt/data/profiles/resourcer/deploy/known_hosts -o StrictHostKeyChecking=yes'
 ```
 
-Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) then `docs/UPDATE-C.md` (one cycle from Update A to the current release: screening criteria, the CV stage, CV_SCREEN=on made safe, an install self-test, the Reed first-page fix; `docs/UPDATE-B.md` is superseded for an instance at `d60d917`) instead):
+Already cloned (only when the owner asks for an update, and then repeat steps 9.2, 10.3 and the checks in 2.8; for the updates of an installed instance follow `docs/UPDATE-JEV-ONLY.md` (first release to the Jev-only engine) then `docs/UPDATE-C.md` (one cycle from Update A to the current release: screening criteria, the CV stage, CV_SCREEN=on made safe, an install self-test, the Reed first-page fix; `docs/UPDATE-B.md` is superseded for an instance at `d60d917`), then `docs/UPDATE-RESCREEN.md` (the tools-only commit that adds the re-screen tool, `docs/RESCREEN.md`) instead):
 
 ```
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
