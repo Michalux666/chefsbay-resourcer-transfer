@@ -94,14 +94,15 @@ test('review: a halt file that cannot be read is treated as a halt (the apply is
   assert.equal((await run(h, ['--apply', '--confirm', '4'])).code, 0);
 });
 
-test('review: an unreadable ledger refuses a dry run and a queue (the already-cleared protection never vanishes silently)', async (t) => {
+test('review: an unreadable ledger is warned about by the dry run and refuses an apply and a queue (the once-only protection never vanishes silently)', async (t) => {
   const h = standardWorld();
   t.after(() => h.cleanup());
   await applied(h);
   fs.writeFileSync(h.p('runtime', 'rescreen-ledger-20260101T000000Z.jsonl'), 'this is not json\n');
   const dry = await run(h, []);
-  assert.equal(dry.code, 3);
-  assert.match(dry.err, /rescreen-ledger-20260101T000000Z\.jsonl.*not JSON/);
+  assert.equal(dry.code, 0, 'a dry run only warns');
+  assert.match(dry.out, /WARNING: ledger rescreen-ledger-20260101T000000Z\.jsonl 1 line\(s\) cannot be read/);
+  assert.match(dry.out, /--apply would be refused now: the once-only guard cannot read rescreen-ledger-20260101T000000Z\.jsonl/);
   assert.equal((await run(h, ['--queue', '--dry-run'])).code, 3);
 });
 

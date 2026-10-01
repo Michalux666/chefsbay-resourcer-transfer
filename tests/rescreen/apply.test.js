@@ -215,7 +215,7 @@ test('R2: a second apply finds nothing (idempotent): the dry run says 0, --confi
   const files = [ledgers(h).length, backups(h).length];
   const dry = await json(h, []);
   assert.equal(dry.j.dryRun.eligible.rowsToDelete, 0);
-  assert.equal(dry.j.dryRun.excluded.already_cleared, 4, 'the four cleared cards are recognised by the ledger');
+  assert.equal(dry.j.dryRun.excluded.cleared_before, 4, 'the four cleared cards are recognised by the ledger');
   assert.equal(dry.j.dryRun.excluded.no_stored_rejection, 2, 'the two cards that never had a stored rejection');
   const again = await run(h, ['--apply', '--confirm', '0']);
   assert.equal(again.code, 0);
@@ -430,20 +430,20 @@ test('R2/R6 hygiene: the backup listing and its manifest, the ledger and every o
   for (const id of ['1011', '1012', '1013', '1014', '1017', '1021', '1023']) assert.ok(!ledgerAndOutput.includes(id), `candidate ${id} (not selected) appears`);
 });
 
-test('R3: a candidate this tool already cleared is never cleared again, even when the rejection stored now has no newer shadow row (the second look was served from the decision cache); an undo makes the others selectable again', async (t) => {
+test('R3: a candidate this tool already cleared is never cleared again, even when the rejection stored now has no newer shadow row (the second look was served from the decision cache); an undo releases the rows it put back and keeps the one a second look replaced', async (t) => {
   const h = standardWorld();
   t.after(() => h.cleanup());
   assert.equal((await run(h, ['--apply', '--confirm', '4'])).code, 0);
   h.rej(1001, 'Chef', { date: '2026-10-01' }); // booked by the second look (a cached decision writes no shadow row)
   const dry = await json(h, []);
   assert.equal(dry.j.dryRun.eligible.rowsToDelete, 0);
-  assert.equal(dry.j.dryRun.excluded.already_cleared, 4);
+  assert.equal(dry.j.dryRun.excluded.cleared_before, 4);
   const again = await run(h, ['--apply', '--confirm', '1']);
   assert.equal(again.code, 3);
   assert.equal(h.rejections().filter((x) => x.caterer_id === 1001).length, 1, 'the new rejection of 1001 is still there');
-  // after an undo the restored rows are blocking again and selectable again; 1001 keeps its newer row and stays cleared
+  // after an undo the restored rows are blocking again and selectable again; 1001 keeps its newer row (a second look took place) and stays covered by the once-only guard
   assert.equal((await run(h, ['--undo', ledgers(h)[0]])).code, 0);
   const after = await json(h, []);
   assert.equal(after.j.dryRun.eligible.rowsToDelete, 3, '1002, 1003 and 1032');
-  assert.equal(after.j.dryRun.excluded.already_cleared, 1, '1001');
+  assert.equal(after.j.dryRun.excluded.cleared_before, 1, '1001');
 });

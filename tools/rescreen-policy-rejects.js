@@ -16,7 +16,8 @@
  *       Jev made itself and every post_unlock row are never selected.
  *   (b) a candidate_rejections row that still exists for that id and job title with origin exactly "pipeline", dated inside the window.
  * and then, per candidate, minus: unlocked or in Zoho; a newer Jev decision for the same card; a rejection that another row (a CV rejection, the '*' sentinel,
- * a duplicate) would still keep blocking. Every exclusion is counted by reason.
+ * a duplicate) would still keep blocking; and minus the ONCE-ONLY GUARD (cleared_before): a candidate and job title that any ledger of an apply that took
+ * effect and was not undone already cleared is never cleared again, whatever the tables or the shadow log say now (see coverage()). Every exclusion is counted by reason.
  *
  * Reed (docs/RESCREEN.md section 6): phase 1 of Reed does not read candidate_rejections at all. It skips a candidate that has a row in candidates (any row,
  * any title; a screened and rejected card is booked as "seen" there). Clearing a Reed candidate therefore means deleting its seen-only candidates row
@@ -27,9 +28,11 @@
  * Modes (dry run by default: nothing is written):
  *   (none)                    count what --apply would delete, by source, day and territory, and every exclusion by reason
  *   --apply --confirm N       refuses (exit 3, nothing written) unless N equals the dry-run row count exactly, no run is in flight, no screening halt is set,
- *                             the count is within --max-rows and a backup of candidates.db was written and verified FIRST; then, in ONE transaction,
- *                             writes the ledger (runtime/rescreen-ledger-<UTC stamp>.jsonl, mode 0600) and deletes exactly the selected rows
- *   --undo <ledger>           puts exactly the rows of a ledger back (idempotent; refuses a row that exists with different content)
+ *                             the count is within --max-rows, every earlier ledger can be read in full (the once-only guard) and a backup of candidates.db was
+ *                             written and verified FIRST; then, in ONE transaction, writes the ledger (runtime/rescreen-ledger-<UTC stamp>.jsonl, mode 0600) and
+ *                             deletes exactly the selected rows; after the commit it records the apply (runtime/rescreen-applied-<stamp>.json, mode 0600)
+ *   --undo <ledger>           puts exactly the rows of a ledger back (idempotent; refuses a row that exists with different content) and records the undo
+ *                             (runtime/rescreen-undone-<stamp>.json): the once-only guard then releases the rows that were put back
  *   --queue                   writes pending-search files for the territories whose candidates were cleared (from the ledgers), at most --per-day a UTC day
  *                             (territories at priority high or medium are left to their regular sweep: a queued run steps them down, a schedule change; the Caterer
  *                             credits and Reed views left bound the number)
@@ -250,7 +253,7 @@ const EXCLUSION_LABELS = {
   newer_other_decision: 'a newer shadow row shows another decision since (policy, rule, after the unlock)',
   bad_id: 'candidate id is not a platform number',
   unknown_source: 'the row names no known source',
-  already_cleared: 'this tool already cleared the candidate for this job title (a ledger): the rejection stored now is the result of the second look',
+  cleared_before: 'once-only guard: an apply of this tool (a ledger that was not undone) already cleared the candidate for this job title, so it has had its second look and is never cleared again for it, whatever the rejection or the shadow log say now',
   reed_not_blocked: 'Reed candidate has no seen row (nothing blocks it)',
   reed_row_not_plain: 'the candidates row of the Reed candidate is not a plain Reed seen row (it carries a Caterer id too), never touched',
 };
@@ -303,22 +306,82 @@ function attribute(item, idx) {
   return found.size === 1 ? [...found.values()][0] : null;
 }
 
-// The candidates (source|id|job title) that a ledger of this tool already cleared and that are still cleared (the ledger's row is gone from the table: not undone,
-// not rolled back). A rejection stored for them now was booked by the second look (or by a newer decision no shadow row shows, for instance one served from the
-// decision cache): it must never be cleared again.
-// A ledger that cannot be read refuses the whole call (this protection must not vanish silently), and "the row is still there" means the SAME row (every column
-// of the ledger line), not merely the same row id, so a re-used rowid cannot make a cleared candidate look untouched.
-function clearedSet(db, home) {
-  const out = new Set();
-  for (const f of listLedgers(home)) {
-    let lines;
-    try { lines = readLedgerFile(f); } catch (e) { throw new Refusal(`${path.basename(f)}: ${e instanceof Refusal ? e.message : 'the ledger could not be read'}: fix or move it away first`); }
-    for (const l of lines) {
-      const id = l.table === 'candidates' || l.source === 'reed' ? l.row.reed_id : l.row.caterer_id;
-      const title = typeof l.jobTitle === 'string' ? l.jobTitle : l.row.job_title;
-      if (id === null || id === undefined || !title) continue;
-      if (!ledgerRowPresent(db, l)) out.add(`${l.source}|${id}|${title}`);
+// THE ONCE-ONLY GUARD (owner requirement 2026-10-01: only re-screen what the old fallback rejected, never in a loop; the same failed profiles are not screened
+// again, only when they come up for a DIFFERENT role). Every (source, id, job title) that appears in ANY ledger of an apply that took effect and was not undone is
+// covered for ever, whatever the tables or the shadow log say now: a person cleared, screened again and rejected again by Jev has a NEW rejection row for the same
+// title (origin pipeline, a later date, possibly even the very same id and date), and the shadow row of that second look may be missing (shadow logging off, a pruned
+// file, a decision served from the cache). Such a candidate is left out as cleared_before.
+//   applied   = the marker runtime/rescreen-applied-<stamp>.json that a successful apply writes after its commit, OR (a kill between the commit and the marker) the
+//               table state: a row of the ledger is gone or changed. A ledger without either (a rolled-back or killed apply) cleared nothing and covers nothing.
+//   undone    = the marker runtime/rescreen-undone-<stamp>.json that a successful --undo writes after its commit. It releases the rows of that ledger that were put
+//               back; a row the undo left alone because a newer rejection of the same candidate and title exists (a second look took place) stays covered.
+//   fail safe = a ledger that cannot be read, has a damaged line, is shorter than the marker says or has lost its file (a marker without a ledger) is reported as a
+//               problem: the dry run warns, --apply and --queue refuse (exit 3, nothing written). The lines of such a ledger that can be read still count.
+// "the row is still there" means the SAME row (every column of the ledger line), not merely the same row id, so a re-used rowid cannot fool the table evidence.
+const LEDGER_NAME_RE = /^rescreen-ledger-(\d{8}T\d{6}Z(?:-\d+)?)\.jsonl$/;
+const MARKER_RE = /^rescreen-(applied|undone)-(\d{8}T\d{6}Z(?:-\d+)?)\.json$/;
+const ledgerKey = (l) => {
+  const id = l.table === 'candidates' || l.source === 'reed' ? l.row.reed_id : l.row.caterer_id;
+  const title = typeof l.jobTitle === 'string' ? l.jobTitle : l.row.job_title;
+  return id === null || id === undefined || !title ? null : `${l.source}|${id}|${title}`;
+};
+
+function readMarker(home, kind, stamp) {
+  let raw;
+  try { raw = fs.readFileSync(path.join(ledgerDir(home), `rescreen-${kind}-${stamp}.json`), 'utf8'); } catch (e) { return { state: e.code === 'ENOENT' ? 'none' : 'bad' }; }
+  const j = parseJson(raw);
+  return j && j.v === 1 && j.ledger === `rescreen-ledger-${stamp}.jsonl` ? { state: 'ok', data: j } : { state: 'bad' };
+}
+
+function writeMarker(home, kind, stamp, data) {
+  const dir = ledgerDir(home);
+  fs.mkdirSync(dir, { recursive: true });
+  const final = path.join(dir, `rescreen-${kind}-${stamp}.json`);
+  const tmp = path.join(dir, `.rescreen-${kind}-${stamp}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify({ v: 1, ledger: `rescreen-ledger-${stamp}.jsonl`, ...data })}\n`, { mode: 0o600, flag: 'wx' });
+  try {
+    fs.renameSync(tmp, final);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* gone */ }
+    throw e;
+  }
+  try { fs.chmodSync(final, 0o600); } catch { /* best effort */ }
+}
+
+function coverage(db, home) {
+  const out = { covered: new Set(), ledgers: 0, covering: 0, notApplied: 0, undone: 0, problems: [], warnings: [] };
+  let names = [];
+  try { names = fs.readdirSync(ledgerDir(home)); } catch (e) { if (e.code !== 'ENOENT') out.problems.push({ file: 'runtime', reason: 'the folder cannot be listed' }); }
+  names.sort();
+  const stamps = new Set();
+  for (const name of names) {
+    const m = LEDGER_NAME_RE.exec(name);
+    if (!m) continue;
+    const stamp = m[1];
+    stamps.add(stamp);
+    out.ledgers++;
+    const rd = readLedgerLenient(path.join(ledgerDir(home), name));
+    if (rd.error) out.problems.push({ file: name, reason: rd.error });
+    if (rd.bad) out.problems.push({ file: name, reason: `${rd.bad} line(s) cannot be read` });
+    const ap = readMarker(home, 'applied', stamp);
+    if (ap.state === 'ok' && Number.isInteger(ap.data.rows) && rd.lines.length < ap.data.rows) out.problems.push({ file: name, reason: `holds ${rd.lines.length} readable lines but ${ap.data.rows} were written` });
+    if (ap.state === 'bad') out.warnings.push(`${name}: its applied marker is damaged (the ledger is still treated as applied)`);
+    const applied = ap.state !== 'none' || rd.lines.some((l) => !ledgerRowPresent(db, l));
+    if (!applied) { out.notApplied++; continue; }
+    const un = readMarker(home, 'undone', stamp);
+    if (un.state === 'bad') out.warnings.push(`${name}: its undone marker is damaged (the ledger still counts as applied)`);
+    const kept = un.state === 'ok' ? new Set(Array.isArray(un.data.keptRows) ? un.data.keptRows : []) : null;
+    if (kept) out.undone++;
+    out.covering++;
+    for (const l of rd.lines) {
+      if (kept && !kept.has(l.row.id)) continue; // released by the undo: the row was put back (or was never gone)
+      const k = ledgerKey(l);
+      if (k) out.covered.add(k);
     }
+  }
+  for (const name of names) {
+    const m = MARKER_RE.exec(name);
+    if (m && m[1] === 'applied' && !stamps.has(m[2])) out.problems.push({ file: `rescreen-ledger-${m[2]}.jsonl`, reason: 'the file is gone although the apply recorded it' });
   }
   return out;
 }
@@ -348,7 +411,7 @@ function analyse(db, home, o, nowMs, shadow, opts) {
     candReed: candCols.has('reed_id') ? prep('SELECT * FROM candidates WHERE reed_id = ?') : null,
   };
 
-  const cleared = clearedSet(db, home);
+  const guard = coverage(db, home);
   const kindCounts = {};
   let postUnlock = 0;
   const byId = new Map();
@@ -377,7 +440,7 @@ function analyse(db, home, o, nowMs, shadow, opts) {
     if (!SOURCES.includes(R.source)) { bump('unknown_source'); continue; }
     if (!/^[1-9]\d{0,15}$/.test(R.id) || !R.title) { bump('bad_id'); continue; }
     const id = Number(R.id);
-    if (cleared.has(`${R.source}|${id}|${R.title}`)) { bump('already_cleared'); continue; }
+    if (guard.covered.has(`${R.source}|${id}|${R.title}`)) { bump('cleared_before'); continue; }
     const newer = (byId.get(`${R.source}|${R.id}`) || []).filter((x) => x.t > R.t
       && (x.title === R.title || (R.source === 'reed' && x.kind === 'jev' && x.approved)));
     if (newer.some((x) => x.kind === 'jev')) { bump('newer_jev_decision'); continue; }
@@ -428,7 +491,8 @@ function analyse(db, home, o, nowMs, shadow, opts) {
   }
 
   const rows = eligible.flatMap((e) => e.deletions.map((d) => ({ ...d, cand: e })));
-  return { sinceMs, untilMs, untilDay, kindCounts, postUnlock, considered: cands.size, excluded, reedHeldBack, eligible, rows };
+  const ledgerGuard = { ledgers: guard.ledgers, covering: guard.covering, notApplied: guard.notApplied, undone: guard.undone, covered: guard.covered.size, problems: guard.problems, warnings: guard.warnings };
+  return { sinceMs, untilMs, untilDay, kindCounts, postUnlock, considered: cands.size, excluded, reedHeldBack, eligible, rows, ledgerGuard };
 }
 
 // the plan is the rows themselves: a row that changed in any column between the dry run and the transaction is a different plan
@@ -456,6 +520,13 @@ function guards(home, now, io) {
   const h = haltOf(home);
   if (h) out.push(h.unreadable ? 'runtime/pipeline-halt.json cannot be read: treated as a screening halt, tell the owner' : 'the screening halt is set (pipeline-watchdog.js --status shows a halt): wait until it clears itself');
   return out;
+}
+
+// A ledger the once-only guard cannot read in full: the apply and the queue refuse (the dry run only warns, see renderDry).
+function ledgerRefusals(plan) {
+  const p = plan && plan.ledgerGuard ? plan.ledgerGuard.problems : [];
+  if (!p.length) return [];
+  return [`the once-only guard cannot read ${p.map((x) => `${x.file} (${x.reason})`).join(', ')}: restore the file from your copy or tell the owner, do not move or delete it, a damaged ledger could let a candidate be re-screened a second time`];
 }
 
 // ---------------------------------------------------------------- backup (the existing code of scripts/backup-db.js)
@@ -532,6 +603,9 @@ function ledgerLine(d, applyId, at) {
   };
 }
 
+const isLedgerLine = (j) => !!j && typeof j === 'object' && ((j.table === 'candidate_rejections' && j.kind === 'rejection') || (j.table === 'candidates' && j.kind === 'reed_seen'))
+  && j.v === 1 && !!j.row && typeof j.row === 'object' && Number.isInteger(j.row.id) && SOURCES.includes(j.source);
+
 function readLedgerFile(file) {
   const st = fs.statSync(file);
   if (!st.isFile() || st.size > LEDGER_CAP) throw new Refusal('the ledger is not a readable file of a sane size');
@@ -542,11 +616,28 @@ function readLedgerFile(file) {
     n++;
     let j;
     try { j = JSON.parse(text); } catch { throw new Refusal(`ledger line ${n} is not JSON`); }
-    const okTable = !!j && typeof j === 'object' && ((j.table === 'candidate_rejections' && j.kind === 'rejection') || (j.table === 'candidates' && j.kind === 'reed_seen'));
-    if (!okTable || j.v !== 1 || !j.row || typeof j.row !== 'object' || !Number.isInteger(j.row.id) || !SOURCES.includes(j.source)) throw new Refusal(`ledger line ${n} is not a line of this tool`);
+    if (!isLedgerLine(j)) throw new Refusal(`ledger line ${n} is not a line of this tool`);
     lines.push(j);
   }
   return lines;
+}
+
+// The reader of the once-only guard: it never throws and keeps every line it can prove (a damaged line or file is reported, see coverage()).
+function readLedgerLenient(file) {
+  const out = { lines: [], bad: 0, error: null };
+  let text;
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > LEDGER_CAP) { out.error = 'is not a readable file of a sane size'; return out; }
+    text = fs.readFileSync(file, 'utf8');
+  } catch { out.error = 'cannot be read'; return out; }
+  for (const t of text.split('\n')) {
+    if (!t) continue;
+    let j = null;
+    try { j = JSON.parse(t); } catch { j = null; }
+    if (isLedgerLine(j)) out.lines.push(j); else out.bad++;
+  }
+  return out;
 }
 
 function listLedgers(home) {
@@ -567,8 +658,9 @@ async function doApply(home, o, io, now, dry) {
   if (o.confirm === null) refusals.push('--confirm N is required: N is the row count of the dry run');
   else if (o.confirm !== n) refusals.push(`--confirm ${o.confirm} does not equal the dry-run row count ${n}: run the dry run again and give its number`);
   if (n > o.maxRows) refusals.push(`${n} rows is more than --max-rows ${o.maxRows}: narrow the window with --since and --until and apply in parts, or raise --max-rows`);
+  refusals.push(...ledgerRefusals(plan));
   refusals.push(...guards(home, now, io));
-  const result = { plan, refusals, applied: false, rows: n, ledger: null, backup: null, deleted: 0, shadow };
+  const result = { plan, refusals, applied: false, rows: n, ledger: null, backup: null, deleted: 0, shadow, warnings: [] };
   if (dry || refusals.length) return result;
   if (n === 0) return result; // nothing to do: no backup, no ledger
 
@@ -610,6 +702,12 @@ async function doApply(home, o, io, now, dry) {
     });
     result.deleted = tx.immediate();
     result.applied = true;
+    // the marker of the once-only guard, after the commit: a kill before it is covered by the table evidence (coverage())
+    try {
+      writeMarker(home, 'applied', LEDGER_NAME_RE.exec(result.ledger)[1], { at: now.toISOString(), applyId, rows: plan.rows.length, candidates: plan.eligible.length });
+    } catch (e) {
+      result.warnings.push(`the applied marker of ${result.ledger} could not be written (${String((e && e.code) || e).slice(0, 40)}): the once-only guard falls back on the table state; tell the owner`);
+    }
   } catch (e) {
     if (e instanceof Refusal) { result.refusals = [e.message]; return result; }
     throw new WriteFailure(`the transaction failed and was rolled back, nothing was deleted${result.ledger ? ` (ledger ${result.ledger} lists what may have been deleted; --undo restores it and is a no-op for rows that are still there)` : ''}: ${String((e && e.message) || e).slice(0, 160)}`);
@@ -631,12 +729,23 @@ async function doUndo(home, o, io, now, dry) {
   const Database = loadSqlite(home);
   const dbFile = path.join(home, 'candidates.db');
   const refusals = guards(home, now, io);
-  const result = { ledger: path.basename(file), lines: lines.length, restored: 0, present: 0, superseded: 0, conflicts: 0, refusals, backup: null };
+  const result = { ledger: path.basename(file), lines: lines.length, restored: 0, present: 0, superseded: 0, conflicts: 0, refusals, backup: null, released: null, keptCovered: null };
+  const stamp = LEDGER_NAME_RE.exec(result.ledger)[1];
+  // the once-only guard is released only once the rows are back (written after the commit: a kill before it leaves the ledger covered, and --undo can be run again)
+  const markUndone = (kept) => {
+    result.keptCovered = kept.length;
+    result.released = lines.length - kept.length;
+    if (readMarker(home, 'undone', stamp).state === 'ok') return;
+    try { writeMarker(home, 'undone', stamp, { at: now.toISOString(), lines: lines.length, restored: result.restored, keptRows: kept }); } catch (e) {
+      throw new WriteFailure(`the rows were put back but the undone marker could not be written (${String((e && e.code) || e).slice(0, 40)}): the ledger still counts for the once-only guard; run the same --undo again`);
+    }
+  };
   const plan = (db) => {
     const cols = {};
     for (const t of ['candidate_rejections', 'candidates']) { try { cols[t] = new Set(db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name)); } catch { cols[t] = new Set(); } }
     const todo = [];
     let present = 0; let superseded = 0; let conflicts = 0;
+    const keptRows = []; // rows left alone because a newer rejection exists: a second look took place, they stay covered by the once-only guard
     for (const l of lines) {
       const have = cols[l.table];
       if (!have.size || Object.keys(l.row).some((c) => !have.has(c))) throw new Refusal(`the table ${l.table} no longer has the columns of the ledger, nothing was changed`);
@@ -647,11 +756,11 @@ async function doUndo(home, o, io, now, dry) {
       }
       if (l.table === 'candidate_rejections') {
         const col = l.row.caterer_id !== null && l.row.caterer_id !== undefined ? 'caterer_id' : 'reed_id';
-        if (db.prepare(`SELECT 1 FROM candidate_rejections WHERE ${col} = ? AND job_title = ?`).get(l.row[col], l.row.job_title)) { superseded++; continue; }
-      } else if (db.prepare('SELECT 1 FROM candidates WHERE reed_id = ?').get(l.row.reed_id)) { superseded++; continue; }
+        if (db.prepare(`SELECT 1 FROM candidate_rejections WHERE ${col} = ? AND job_title = ?`).get(l.row[col], l.row.job_title)) { superseded++; keptRows.push(l.row.id); continue; }
+      } else if (db.prepare('SELECT 1 FROM candidates WHERE reed_id = ?').get(l.row.reed_id)) { superseded++; keptRows.push(l.row.id); continue; }
       todo.push(l);
     }
-    return { todo, present, superseded, conflicts };
+    return { todo, present, superseded, conflicts, keptRows };
   };
   const ro = new Database(dbFile, { readonly: true, fileMustExist: true, timeout: 5000 });
   let p;
@@ -659,7 +768,7 @@ async function doUndo(home, o, io, now, dry) {
   Object.assign(result, { present: p.present, superseded: p.superseded, conflicts: p.conflicts });
   if (p.conflicts) result.refusals = refusals.concat([`${p.conflicts} row(s) of the ledger exist with different content: nothing was changed`]);
   if (dry || result.refusals.length) { result.restored = 0; result.wouldRestore = p.todo.length; return result; }
-  if (!p.todo.length) return result;
+  if (!p.todo.length) { markUndone(p.keptRows); return result; }
 
   const roc = new Database(dbFile, { readonly: true, fileMustExist: true, timeout: 5000 });
   try { result.backup = await backupAndVerify(home, roc, tableCounts(roc), io); } catch (e) {
@@ -670,6 +779,7 @@ async function doUndo(home, o, io, now, dry) {
   if (again.length) { result.refusals = again; return result; }
 
   const rw = new Database(dbFile, { fileMustExist: true, timeout: 10000 });
+  let keptRows = null;
   try {
     const tx = rw.transaction(() => {
       const q = plan(rw);
@@ -684,12 +794,14 @@ async function doUndo(home, o, io, now, dry) {
     result.restored = q.todo.length;
     result.superseded = q.superseded;
     result.present = q.present;
+    keptRows = q.keptRows;
   } catch (e) {
     if (e instanceof Refusal) { result.refusals = [e.message]; return result; }
     throw new WriteFailure(`the transaction failed and was rolled back: ${String((e && e.message) || e).slice(0, 160)}`);
   } finally {
     try { rw.close(); } catch { /* closed */ }
   }
+  markUndone(keptRows);
   return result;
 }
 
@@ -903,6 +1015,7 @@ function summarise(plan, shadow, o, now, readiness) {
     preUnlockByKind: plan.kindCounts, postUnlockRows: plan.postUnlock,
     policyUncertainRejects: plan.considered, excluded: plan.excluded, reedHeldBack: plan.reedHeldBack,
     eligible: { candidates: plan.eligible.length, rowsToDelete: plan.rows.length, bySource, byDay, byTerritory: [...terr.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([territory, candidates]) => ({ territory, candidates })) },
+    ledgerGuard: plan.ledgerGuard,
     applyReadiness: readiness,
   };
 }
@@ -914,6 +1027,10 @@ function renderDry(s) {
   if (s.shadow.looseModeFiles.length) L.push(`WARNING: ${plural(s.shadow.looseModeFiles.length, 'shadow file')} not mode 0600 (${s.shadow.looseModeFiles.join(' ')}): they hold personal data, fix the mode`);
   if (s.shadow.badLines) L.push(`WARNING: shadow log lines that could not be read and were skipped (a truncated file?): ${s.shadow.badLines}; the counts below may be too low`);
   if (s.shadow.tooBig) L.push(`WARNING: ${plural(s.shadow.tooBig, 'shadow file')} too large to read and skipped`);
+  const g = s.ledgerGuard;
+  L.push(`once-only guard: ${plural(g.ledgers, 'ledger')} in runtime/: ${g.covering} took effect (${g.undone} of them undone: only the rows put back are released), ${g.notApplied} never took effect; ${g.covered} candidate and job title pairs are never cleared again`);
+  for (const p of g.problems) L.push(`WARNING: ledger ${p.file} ${p.reason}: the guard covers only what it can prove of it, and --apply and --queue refuse until it is restored (the owner decides; never delete or move a ledger)`);
+  for (const w of g.warnings) L.push(`WARNING: ${w}`);
   L.push(`cards the review policy rejected before the unlock because Jev was uncertain (distinct candidate and job title): ${s.policyUncertainRejects}`);
   const ex = Object.entries(s.excluded).sort();
   L.push(`left out: ${ex.length ? ex.map(([k, n]) => `${k} ${n}`).join(', ') : 'nothing'}`);
@@ -947,14 +1064,16 @@ function renderApply(r, o) {
     L.push(`deleted ${r.deleted} rows in one transaction (${r.plan.eligible.length} candidates)`);
     L.push(`undo: node tools/rescreen-policy-rejects.js --undo ${r.ledger}`);
     L.push(`next: node tools/rescreen-policy-rejects.js --queue --per-day ${o.perDay} (a few territories a day; docs/RESCREEN.md section 9)`);
+    L.push('once-only guard: these candidates are never cleared again for these job titles, whatever Jev decides in the second look (docs/RESCREEN.md section 5)');
   }
+  for (const w of r.warnings || []) L.push(`WARNING: ${w}`);
   return L.join('\n');
 }
 
 function renderUndo(r) {
   if (r.refusals.length) return `NOT UNDONE (nothing was written): ${r.refusals.join('; ')}`;
   const verb = r.wouldRestore !== undefined ? 'would restore' : 'restored';
-  return `ledger ${r.ledger}: ${plural(r.lines, 'line')}; ${verb} ${r.wouldRestore !== undefined ? r.wouldRestore : r.restored}, already present ${r.present}, left alone because a newer row for the same candidate and job title exists ${r.superseded}${r.backup ? `; backup ${r.backup.name} verified first` : ''}`;
+  return `ledger ${r.ledger}: ${plural(r.lines, 'line')}; ${verb} ${r.wouldRestore !== undefined ? r.wouldRestore : r.restored}, already present ${r.present}, left alone because a newer row for the same candidate and job title exists ${r.superseded}${r.backup ? `; backup ${r.backup.name} verified first` : ''}${r.released !== null ? `; once-only guard released ${r.released} lines, ${r.keptCovered} stay covered (a second look took place)` : ''}`;
 }
 
 function renderQueue(p, written, o, dry) {
@@ -997,7 +1116,7 @@ async function main(argv, io) {
       const r = await doApply(home, o, io, now, o.dryRun);
       result.mode = o.dryRun ? 'dry-run' : 'apply';
       if (!o.dryRun && r.shadow && r.shadow.looseModeFiles.length) err(`WARNING: ${plural(r.shadow.looseModeFiles.length, 'shadow file')} not mode 0600 (${r.shadow.looseModeFiles.join(' ')}): they hold personal data, fix the mode`);
-      result.apply = { applied: r.applied, rows: r.rows, deleted: r.deleted, ledger: r.ledger, backup: r.backup, refusals: r.refusals, candidates: r.plan.eligible.length };
+      result.apply = { applied: r.applied, rows: r.rows, deleted: r.deleted, ledger: r.ledger, backup: r.backup, refusals: r.refusals, candidates: r.plan.eligible.length, warnings: r.warnings };
       text.push(o.dryRun ? renderDry(summarise(r.plan, readShadow(home, o), o, now, { refusals: r.refusals })) : renderApply(r, o));
       if (r.refusals.length) code = 3;
     } else if (!o.queue || o.dryRun) {
@@ -1006,7 +1125,7 @@ async function main(argv, io) {
       const db = new Database(path.join(home, 'candidates.db'), { readonly: true, fileMustExist: true, timeout: 5000 });
       let plan;
       try { plan = analyse(db, home, o, now.getTime(), shadow); } finally { db.close(); }
-      const refusals = guards(home, now, io);
+      const refusals = ledgerRefusals(plan).concat(guards(home, now, io));
       if (plan.rows.length > o.maxRows) refusals.unshift(`${plan.rows.length} rows is more than --max-rows ${o.maxRows}: narrow the window with --since and --until, or raise --max-rows`);
       const s = summarise(plan, shadow, o, now, { refusals });
       result.dryRun = s;
@@ -1033,7 +1152,7 @@ async function main(argv, io) {
 }
 
 module.exports = {
-  main, parseArgs, classifyRow, compactRow, readShadow, analyse, analyseQueue, doApply, doUndo, doQueue, writeLedger, readLedgerFile, listLedgers, guards,
+  main, parseArgs, classifyRow, compactRow, readShadow, analyse, analyseQueue, doApply, doUndo, doQueue, writeLedger, readLedgerFile, readLedgerLenient, listLedgers, coverage, guards,
   DEFAULT_SINCE, DEFAULT_PER_DAY, DEFAULT_MAX_ROWS, CV_RESERVE, CREDIT_RESERVE, EXCLUSION_LABELS, USAGE,
 };
 

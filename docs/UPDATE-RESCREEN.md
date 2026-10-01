@@ -6,9 +6,9 @@ Audience: the operator LLM of the `resourcer` profile (terminal tool) and the ow
 
 ## What changes and why
 
-One new tool, its tests and its documents. Nothing that runs on the instance by itself changes: no file under `resourcer/` (no script, no setting, no criteria file), no cron wrapper, no job, no dashboard plugin file, no profile file (`SOUL.md`, `hermes/AGENTS.md`, the `resourcer-ops` skill). So there is nothing to copy, no restart, no `npm install`, no migration, and no setting to change. The tool re-screens the pre-unlock rejections that the review policy of Update A made only because Jev was uncertain; what it does, what it costs and how it is used is `docs/RESCREEN.md`. Installing this note does not run it: the tool is used only at the owner's word, with the owner's numbers.
+One new tool, its tests and its documents, and one rule of an existing tool: `tools/reed-catchup.js` now reserves Reed profile views only for catch-up searches that are still pending, not for the ones that finished (they were counted twice; `docs/OPERATIONS.md` 8.1). The re-screen tool carries the once-only guard (nobody is cleared twice for the same job title, `docs/RESCREEN.md` section 3). Nothing that runs on the instance by itself changes: no file under `resourcer/` (no script, no setting, no criteria file), no cron wrapper, no job, no dashboard plugin file, no profile file (`SOUL.md`, `hermes/AGENTS.md`, the `resourcer-ops` skill). So there is nothing to copy, no restart, no `npm install`, no migration, and no setting to change. The tool re-screens the pre-unlock rejections that the review policy of Update A made only because Jev was uncertain; what it does, what it costs and how it is used is `docs/RESCREEN.md`. Installing this note does not run it: the tool is used only at the owner's word, with the owner's numbers.
 
-The files that arrive: `tools/rescreen-policy-rejects.js`, `docs/RESCREEN.md`, `docs/UPDATE-RESCREEN.md`, changed sections of other documents (`README.md`, `HANDOFF.md`, `docs/INSTALL.md`, `docs/OPERATIONS.md`, `docs/KNOWN-LIMITS.md`, `docs/SECURITY.md`, `docs/DECISIONS.md`, `docs/parity/integration.md`), the tests (`tests/rescreen/`, scenario 17 of `tests/e2e/`, the document tests) and the new `MANIFEST.sha256`. The manifest covers `tools/`, so its digest changes with the new tool: that is why step 4 needs the owner's `<NEW_DIGEST>`.
+The files that arrive: `tools/rescreen-policy-rejects.js`, `tools/reed-catchup.js` (changed), `docs/RESCREEN.md`, `docs/UPDATE-RESCREEN.md`, changed sections of other documents (`README.md`, `HANDOFF.md`, `docs/INSTALL.md`, `docs/OPERATIONS.md`, `docs/KNOWN-LIMITS.md`, `docs/SECURITY.md`, `docs/DECISIONS.md`, `docs/parity/integration.md`), the tests (`tests/rescreen/`, `tests/reed/catchup.test.js`, scenario 17 of `tests/e2e/`, the document tests) and the new `MANIFEST.sha256`. The manifest covers `tools/`, so its digest changes with the new tool: that is why step 4 needs the owner's `<NEW_DIGEST>`.
 
 ## Rules for this update
 
@@ -22,7 +22,7 @@ The files that arrive: `tools/rescreen-policy-rejects.js`, `docs/RESCREEN.md`, `
 HUMAN: the owner has pushed the commit to the branch this instance tracks (step 3 is a fast-forward of that branch; `Already up to date` on a first run means the owner has not pushed: STOP), and gives you:
 
 - `<NEW_DIGEST>`: the 64-character manifest digest of this commit. The owner gets it from the person who finalised the release: it is the `manifest_sha256=` value that `node tools/make-manifest.js` prints on the owner's machine after the last commit. You take `<NEW_DIGEST>` from the owner's message and never from `MANIFEST.sha256` or from the checkout you are verifying: a manifest regenerated together with a tampered script would otherwise pass;
-- for the owner to compare: the digest the finaliser computed for this commit is `c932de1b487f310d7db4e66c4442835fca30d8cebfbde8bf43d1a84bcc3d9e32`. The owner confirms it on the owner's own machine (`node tools/make-manifest.js --dry-run` on the pushed commit prints the same `manifest_sha256=`) before giving it to you as `<NEW_DIGEST>`; it is shown here for that comparison only, you never take your `<NEW_DIGEST>` from this file;
+- for the owner to compare: the digest the finaliser computed for this commit is `b7caacce073123c0e2a787f40ef3c561c62017b8e0b3c0929dd9cc38ee80a1ad`. The owner confirms it on the owner's own machine (`node tools/make-manifest.js --dry-run` on the pushed commit prints the same `manifest_sha256=`) before giving it to you as `<NEW_DIGEST>`; it is shown here for that comparison only, you never take your `<NEW_DIGEST>` from this file;
 - the go-ahead to update now. Update when no run is in flight (`docs/OPERATIONS.md` section 12).
 
 OPERATOR: first note which of the two jobs are enabled now, because only those are resumed at the end (the owner may have paused one on purpose):
@@ -67,7 +67,7 @@ Expect: last lines `MANIFEST_OK` and `MANIFEST_SHA256=4bca8bb203613b5bd8c3e97669
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
 ```
 
-Expect: `Updating 315e99b..<new id>`, `Fast-forward`, and a file list that includes `tools/rescreen-policy-rejects.js`, `docs/RESCREEN.md` and `docs/UPDATE-RESCREEN.md`, and no file under `resourcer/`, `hermes/` or `plugin/`. `Already up to date`: the owner has not pushed: STOP. Any complaint about local changes or a non-fast-forward: STOP and report the text.
+Expect: `Updating 315e99b..<new id>`, `Fast-forward`, and a file list that includes `tools/rescreen-policy-rejects.js`, `tools/reed-catchup.js`, `docs/RESCREEN.md` and `docs/UPDATE-RESCREEN.md`, and no file under `resourcer/`, `hermes/` or `plugin/`. `Already up to date`: the owner has not pushed: STOP. Any complaint about local changes or a non-fast-forward: STOP and report the text.
 
 ## 4. Verify the checkout against the owner's digest (OPERATOR)
 

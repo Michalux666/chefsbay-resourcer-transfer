@@ -213,6 +213,42 @@ test('17 re-screen: old-shape shadow rows and their rejections -> dry run -> app
     assert.deepEqual(w.pendingFiles(), []);
   });
 
+  await t.test('the once-only guard (the loop): the cleared candidates had their second look, so they are never cleared again, with the second look in the shadow log or with it LOST', () => {
+    // 1. the real second look is in the shadow log (the run just made it): the guard is the first reason
+    const withLook = cli(['--since', since]);
+    assert.equal(withLook.code, 0, withLook.all);
+    assert.match(withLook.out, /rows that --apply would delete: 0 /);
+    assert.match(withLook.out, /once-only guard: 1 ledger in runtime\/: 1 took effect \(0 of them undone: only the rows put back are released\), 0 never took effect; 3 candidate and job title pairs are never cleared again/);
+    assert.match(withLook.out, /left out: .*cleared_before 3/);
+    // 2. the second look is LOST (shadow logging was off, the file was pruned, a cache hit wrote no row): only the old policy rows remain.
+    //    71000002 now has a NEW pipeline rejection of the same title (Jev rejected it again) and an old policy row: the loop the owner forbade.
+    const full = fs.readFileSync(shadowFile, 'utf8');
+    fs.writeFileSync(shadowFile, `${rows.map((r) => JSON.stringify(r)).join('\n')}\n`, { mode: 0o600 });
+    const lost = cli(['--since', since]);
+    assert.equal(lost.code, 0, lost.all);
+    assert.match(lost.out, /rows that --apply would delete: 0 /);
+    assert.match(lost.out, /left out: .*cleared_before 3/);
+    const rejNow = rejections();
+    const refused = cli(['--since', since, '--apply', '--confirm', '1']);
+    assert.equal(refused.code, 3);
+    assert.match(refused.out, /does not equal the dry-run row count 0/);
+    assert.deepEqual(rejections(), rejNow, 'nothing was deleted');
+    assert.equal(ledgers().length, 1, 'no second ledger');
+    // a ledger that cannot be read: the dry run warns, the apply refuses
+    const damaged = w.p('runtime', 'rescreen-ledger-20260101T000000Z.jsonl');
+    fs.writeFileSync(damaged, 'not json\n');
+    const warn = cli(['--since', since]);
+    assert.equal(warn.code, 0);
+    assert.match(warn.out, /WARNING: ledger rescreen-ledger-20260101T000000Z\.jsonl 1 line\(s\) cannot be read/);
+    const stop = cli(['--since', since, '--apply', '--confirm', '0']);
+    assert.equal(stop.code, 3);
+    assert.match(stop.out, /NOT APPLIED \(nothing was written\): the once-only guard cannot read rescreen-ledger-20260101T000000Z\.jsonl/);
+    fs.unlinkSync(damaged);
+    assert.equal(cli(['--since', since]).code, 0);
+    fs.writeFileSync(shadowFile, full, { mode: 0o600 }); // the evidence as the run left it
+    noPeople(withLook.all + lost.all + warn.all + stop.all, 'the guard output');
+  });
+
   await t.test('--undo puts back exactly the rows that were deleted, leaves alone the one the run re-booked, is idempotent, and takes a backup first', () => {
     const rejNow = rejections();
     const r = cli(['--undo', ledgerName]);
@@ -228,6 +264,18 @@ test('17 re-screen: old-shape shadow rows and their rejections -> dry run -> app
     assert.equal(rejections().length, after.length);
     assert.equal(w.list('backups', /\.db\.gz\.enc$/).length, 2);
     noPeople(r.all + again.all, 'the undo output');
+    // the once-only guard after the undo: the two rows that were put back are released (the guard no longer names them; the real run unlocked them, so the older
+    // exclusion unlocked now holds them back), the one candidate whose second look the undo found (a newer rejection) stays covered
+    assert.match(r.out, /once-only guard released 2 lines, 1 stay covered/);
+    assert.equal(w.list('runtime', /^rescreen-undone-.*\.json$/).length, 1);
+    const full = fs.readFileSync(shadowFile, 'utf8');
+    fs.writeFileSync(shadowFile, `${rows.map((x) => JSON.stringify(x)).join('\n')}\n`, { mode: 0o600 });
+    const released = cli(['--since', since]);
+    fs.writeFileSync(shadowFile, full, { mode: 0o600 });
+    assert.equal(released.code, 0, released.all);
+    assert.match(released.out, /rows that --apply would delete: 0 /);
+    assert.match(released.out, /left out: cleared_before 1, cv_rejection 1, unlocked 2/);
+    noPeople(released.all, 'the dry run after the undo');
     assert.deepEqual(w.lockProblems(), []);
   });
 });

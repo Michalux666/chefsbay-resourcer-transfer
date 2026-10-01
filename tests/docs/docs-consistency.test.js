@@ -754,7 +754,7 @@ test('RESCREEN.md: the runbook commands are hygienic and in order (pause, idle, 
   assert.match(ops, /\| `rescreen-policy-rejects\.js` \| 0 ok \(dry run, apply, queue, undo\), 1 unexpected, 2 usage, 3 refused with nothing written/);
   assert.match(tool.USAGE, /Exit codes: 0 ok, 1 unexpected error, 2 usage error, 3 refused \(nothing written\), 4 could not write\./);
   const src = read('tools/rescreen-policy-rejects.js');
-  for (const name of ['rescreen-ledger-', 'rescreen-queue.json', 'zz-rescreen-']) {
+  for (const name of ['rescreen-ledger-', 'rescreen-applied-', 'rescreen-undone-', 'rescreen-queue.json', 'zz-rescreen-']) {
     assert.ok(src.includes(name) && t.includes(name) && ops.includes(name.replace(/-$/, '')), `${name} is written by the code and named in RESCREEN.md and OPERATIONS.md`);
   }
 });
@@ -766,4 +766,26 @@ test('the usage text of the re-screen tool lists exactly the options its parser 
   const usage = new Set([...tool.USAGE.matchAll(/(--[a-z-]+)/g)].map((m) => m[1]));
   parsed.delete('--help');
   assert.deepEqual([...usage].filter((f) => f !== '--help').sort(), [...parsed].sort());
+});
+
+test('the once-only guard and the catch-up view reservation are documented where an operator looks, with the names and reasons of the code', () => {
+  const tool = require(path.join(REPO, 'tools/rescreen-policy-rejects.js'));
+  const reasons = Object.keys(tool.EXCLUSION_LABELS);
+  assert.ok(reasons.includes('cleared_before') && !reasons.includes('already_cleared'), 'the guard reason is cleared_before');
+  for (const f of ['docs/RESCREEN.md', 'docs/OPERATIONS.md', 'docs/KNOWN-LIMITS.md', 'docs/DECISIONS.md']) {
+    assert.ok(read(f).includes('cleared_before'), `${f} names cleared_before`);
+    assert.ok(!/already_cleared/.test(read(f)), `${f} still names the old reason already_cleared`);
+  }
+  assert.match(read('docs/RESCREEN.md'), /\*\*The once-only guard \(owner requirement, 2026-10-01\)\.\*\*/);
+  assert.match(read('docs/KNOWN-LIMITS.md'), /\| K-RSC8 \| ACCEPTED \(design; the once-only guard/);
+  assert.match(read('docs/DECISIONS.md'), /\| RSC-7 \| Once-only guard/);
+  assert.match(read('docs/OPERATIONS.md'), /Once only \(owner requirement\)/);
+  // the retention claim of the documents is the code: nothing in the nightly jobs names a ledger or a marker
+  for (const f of ['resourcer/scripts/maintenance.js', 'resourcer/scripts/retention-sweep.js', 'resourcer/scripts/backup-db.js', 'resourcer/scripts/lib/cv-retention.js']) assert.ok(!/rescreen/.test(read(f)), `${f} must not touch the ledgers`);
+  // the catch-up tool reserves views for pending searches only, and says so
+  const catchup = read('tools/reed-catchup.js');
+  assert.ok(/pendingCatchups/.test(catchup) && !/floor\(remaining \/ CV_RESERVE\) - doneToday/.test(catchup), 'the old double count is gone');
+  assert.match(read('docs/OPERATIONS.md'), /each catch-up search that is still PENDING/);
+  assert.match(read('docs/KNOWN-LIMITS.md'), /K-REED15[^\n]*reserves 20 views only for the catch-up searches that are still pending/);
+  assert.match(read('docs/DECISIONS.md'), /\| RSC-8 \| `tools\/reed-catchup\.js` reserves the 20 views/);
 });

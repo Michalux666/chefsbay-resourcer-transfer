@@ -340,3 +340,109 @@ test('R5: the failure rate of ACCEPTANCE RE08 is printed per run day without rea
   const r = await run([]);
   assert.match(r.out, /Reed attempts by run day[^\n]*2026-10-01 4 attempts, 1 failed \(25%\)/);
 });
+
+// ---------------------------------------------------------------- view reservation: only searches that are still PENDING reserve views
+
+// 28 catch-ups that FINISHED today (a run row dated today; their pending files are gone) and 40 territories that still lost their Reed half
+function reservationWorld(opts) {
+  const o = Object.assign({ finished: 28, fresh: 40, usage: [39, 600] }, opts || {});
+  const world = [];
+  for (let i = 1; i <= o.finished; i++) world.push(['Alpha Role', `FA${i}`, 'both', 1, [{ date: TODAY, sources: 'both', reed: OK }]]);
+  for (let i = 1; i <= o.fresh; i++) world.push(['Alpha Role', `NB${i}`, 'both', 1, [{ date: '2026-10-01', sources: 'both', reed: FAILED }]]);
+  build({ world, usage: o.usage });
+  if (o.noUsageTable) { const db = new Database(path.join(HOME, 'candidates.db')); db.exec('DROP TABLE reed_daily_usage'); db.close(); }
+  const keys = [];
+  for (let i = 1; i <= o.finished; i++) keys.push(tool.keyOf('Alpha Role', `FA${i}`, ''));
+  fs.mkdirSync(path.join(HOME, 'runtime'), { recursive: true });
+  fs.writeFileSync(path.join(HOME, 'runtime', 'reed-catchup.json'), JSON.stringify({ days: { [TODAY]: keys } }));
+  return keys;
+}
+const catchupPending = (n, extra) => {
+  for (let i = 0; i < n; i++) {
+    fs.writeFileSync(path.join(HOME, 'pending-searches', `zz-reed-catchup-1790000000${String(i).padStart(3, '0')}-0000000${i % 10}.json`),
+      JSON.stringify({ jobTitle: 'Alpha Role', location: `PD${i}`, sources: 'both', source: 'reed-catchup', priority: 'low', ...(extra || {}) }));
+  }
+};
+
+test('R5 reservation: the live case. 39 of 600 views used, 28 catch-ups queued and FINISHED today, a request for 30: the finished ones reserve nothing, 28 may be queued (the old formula gave floor(561 / 20) - 28 = 0)', async () => {
+  reservationWorld();
+  assert.equal(Math.floor((600 - 39) / tool.CV_RESERVE) - 28, 0, 'what the old formula allowed');
+  const s = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(s.queue.pendingCatchups, 0);
+  assert.equal(s.queue.queuedToday, 28);
+  assert.equal(s.queue.allowedByBudget, 28);
+  assert.equal(s.queue.wouldQueue, 28);
+  assert.match(s.queue.reason, /not enough of the Reed daily view budget left/);
+  assert.deepEqual(pendingFiles(), [], 'a dry run writes nothing');
+  const r = await run(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.match(r.out, /view budget allows 28 more \(0 catch-up searches still pending reserve 20 views each; finished ones are counted in the views used\): would queue 28/);
+  const real = await json(['--queue', '30', '--per-day', '100']);
+  assert.equal(real.queue.wouldQueue, 28);
+  assert.equal(pendingFiles().length, 28);
+  // they are pending now: each reserves its views, so a second request finds the budget used up (28 reserved of 28)
+  const again = await json(['--queue', '30', '--per-day', '100']);
+  assert.equal(again.queue.pendingCatchups, 28);
+  assert.equal(again.queue.allowedByBudget, 0);
+  assert.equal(again.queue.wouldQueue, 0);
+  assert.match(again.queue.reason, /budget/);
+  assert.equal(pendingFiles().length, 28, 'nothing more was queued');
+});
+
+test('R5 reservation: pending catch-ups reserve their views: files still in pending-searches/ (by name, by source, or unreadable) count; other searches, hidden files and the quarantine do not', async () => {
+  reservationWorld();
+  catchupPending(5); // queued earlier today, not run yet
+  fs.writeFileSync(path.join(HOME, 'pending-searches', 'hand-renamed.json'), JSON.stringify({ jobTitle: 'Alpha Role', location: 'HR1', sources: 'both', source: 'reed-catchup' }));
+  fs.writeFileSync(path.join(HOME, 'pending-searches', 'zz-reed-catchup-1790000009999-deadbeef.json'), '{ not json');
+  fs.writeFileSync(path.join(HOME, 'pending-searches', 'zz-rescreen-1790000000000-aaaaaaaa.json'), JSON.stringify({ jobTitle: 'Alpha Role', location: 'RS1', sources: 'both', source: 'rescreen-policy-rejects' }));
+  fs.writeFileSync(path.join(HOME, 'pending-searches', 'territory-5-20261002.json'), JSON.stringify({ jobTitle: 'Alpha Role', location: 'TS1', sources: 'both' }));
+  fs.writeFileSync(path.join(HOME, 'pending-searches', '.zz-reed-catchup-hidden.json'), JSON.stringify({ source: 'reed-catchup' }));
+  fs.mkdirSync(path.join(HOME, 'pending-searches', '.quarantine'), { recursive: true });
+  fs.writeFileSync(path.join(HOME, 'pending-searches', '.quarantine', 'zz-reed-catchup-1790000000000-quarant.json'), JSON.stringify({ jobTitle: 'Alpha Role', location: 'QU1', sources: 'both', source: 'reed-catchup' }));
+  const s = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(s.queue.pendingCatchups, 7, '5 by name, 1 by source, 1 unreadable');
+  assert.equal(s.queue.allowedByBudget, 21, 'floor(561 / 20) - 7');
+  assert.equal(s.queue.wouldQueue, 21);
+  // a run that finished deletes its file: its reserve goes away (its real views are in reed_daily_usage by then)
+  for (const f of fs.readdirSync(path.join(HOME, 'pending-searches')).filter((n) => /^zz-reed-catchup-17900000000(00|01)-/.test(n))) fs.unlinkSync(path.join(HOME, 'pending-searches', f));
+  const freed = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(freed.queue.pendingCatchups, 5);
+  assert.equal(freed.queue.allowedByBudget, 23);
+});
+
+test('R5 reservation: the per-day ledger keeps its meaning (a hard total per UTC day) and the budget never goes below zero', async () => {
+  reservationWorld();
+  const perDay = await json(['--queue', '30', '--per-day', '30', '--dry-run']);
+  assert.equal(perDay.queue.allowedByBudget, 28);
+  assert.equal(perDay.queue.wouldQueue, 2, '30 per day minus the 28 already queued today');
+  assert.equal(perDay.queue.reason, 'per-day limit reached');
+  catchupPending(40); // more pending than the whole budget
+  const over = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(over.queue.allowedByBudget, 0);
+  assert.equal(over.queue.wouldQueue, 0);
+  assert.match(over.queue.reason, /budget/);
+});
+
+test('R5 reservation: with the usage table missing the fallback limit (300) applies and pending catch-ups still reserve; with the table present but today without a row it is the same', async () => {
+  reservationWorld({ noUsageTable: true, finished: 0, fresh: 30 });
+  const none = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(none.reedBudget, null);
+  assert.equal(none.queue.allowedByBudget, 15, 'floor(300 / 20)');
+  assert.equal(none.queue.wouldQueue, 15);
+  catchupPending(3);
+  const some = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(some.queue.pendingCatchups, 3);
+  assert.equal(some.queue.allowedByBudget, 12);
+  assert.equal(some.queue.wouldQueue, 12);
+  reservationWorld({ usage: null, finished: 0, fresh: 30 });
+  const norow = await json(['--queue', '30', '--per-day', '100', '--dry-run']);
+  assert.equal(norow.queue.allowedByBudget, 15);
+});
+
+test('R5 reservation: a refused queue (Reed off) still reports the plan with the pending reserve and writes nothing', async () => {
+  reservationWorld();
+  catchupPending(2);
+  const off = await run(['--queue', '5', '--json'], { env: { RESOURCER_HOME: HOME, RESOURCER_SOURCES: 'caterer' } });
+  assert.equal(off.code, 3);
+  assert.equal(JSON.parse(off.out).queue.pendingCatchups, 2);
+  assert.equal(pendingFiles().length, 2, 'only the two that were there');
+});
