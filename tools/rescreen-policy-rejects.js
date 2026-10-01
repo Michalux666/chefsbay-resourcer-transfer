@@ -256,6 +256,7 @@ const EXCLUSION_LABELS = {
   cleared_before: 'once-only guard: an apply of this tool (a ledger that was not undone) already cleared the candidate for this job title, so it has had its second look and is never cleared again for it, whatever the rejection or the shadow log say now',
   reed_not_blocked: 'Reed candidate has no seen row (nothing blocks it)',
   reed_row_not_plain: 'the candidates row of the Reed candidate is not a plain Reed seen row (it carries a Caterer id too), never touched',
+  reed_title_record: 'Reed candidate has a role-scoped record for that job title (origin reed:, written by the role scope release, docs/ROLESCOPE.md): the record is the decision for this role and this tool does not remove it',
 };
 
 const tableTools = (db) => {
@@ -472,6 +473,7 @@ function analyse(db, home, o, nowMs, shadow, opts) {
       if (cand.source !== 'reed' || (cand.caterer_id !== null && cand.caterer_id !== undefined)) { bump('reed_row_not_plain'); continue; }
       const rejs = q.rejReed ? q.rejReed.all(id, R.title) : [];
       if (rejs.some((x) => typeof x.origin === 'string' && x.origin.startsWith('cv:'))) { bump('cv_rejection'); continue; }
+      if (rejs.some((x) => typeof x.origin === 'string' && x.origin.startsWith('reed:'))) { bump('reed_title_record'); continue; }
       if (!o.reedSeen) { reedHeldBack++; continue; }
       deletions.push({ table: 'candidates', kind: 'reed_seen', row: cand });
     }

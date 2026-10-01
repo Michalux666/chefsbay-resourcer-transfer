@@ -344,9 +344,12 @@ function resurfaceLine(ctx, ymd) {
   const t = st && st.today && st.today.day === ymd ? st.today : null;
   if (!t) return null;
   const n = (k) => Number(t[k]) || 0;
-  if (!n('started') && !n('capped') && !n('reserve') && !n('unreadable')) return null;
+  const looks = n('legacyCaterer') + n('legacyReed');
+  if (!n('started') && !n('capped') && !n('reserve') && !n('unreadable') && !looks && !n('legacyRejected')) return null;
   const held = n('capped') + n('reserve') + n('unreadable');
-  return `Resurfaced today (unlocked earlier, rejected for another role, screened again): ${nf(n('started'))} started, charged ${nf(n('charged'))}, not charged ${nf(n('notCharged'))}, charge unknown ${nf(n('unknown'))}; credits spent ${nf(n('credits'))}, Reed views ${nf(n('reedViews'))}; pushed ${nf(n('pushed'))}, rejected again ${nf(n('rejected'))}${held ? `; held back ${nf(held)} (cap, reserve or unreadable balance)` : ''}.`;
+  // the people whose role was never recorded (docs/ROLESCOPE.md): looks given, rejected again, pushed, what they cost; part of the numbers before it except the snippet rejections
+  const scope = looks || n('legacyRejected') ? ` Role scope (role never recorded, one more look): ${nf(looks)} given (Caterer ${nf(n('legacyCaterer'))}, Reed ${nf(n('legacyReed'))}), rejected again ${nf(n('legacyRejected'))}, pushed ${nf(n('legacyPushed'))}, charged ${nf(n('legacyCharged'))}, credits ${nf(n('legacyCredits'))}, Reed views ${nf(n('legacyViews'))}.` : '';
+  return `Resurfaced today (unlocked earlier, rejected for another role, screened again): ${nf(n('started'))} started, charged ${nf(n('charged'))}, not charged ${nf(n('notCharged'))}, charge unknown ${nf(n('unknown'))}; credits spent ${nf(n('credits'))}, Reed views ${nf(n('reedViews'))}; pushed ${nf(n('pushed'))}, rejected again ${nf(n('rejected'))}${held ? `; held back ${nf(held)} (cap, reserve or unreadable balance)` : ''}.${scope}`;
 }
 
 function buildDigest(ctx) {

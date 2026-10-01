@@ -1,7 +1,7 @@
 'use strict';
 // Role-scoped second look at a candidate who was unlocked and then rejected by CV screening (docs/RESURFACE.md).
 //
-// The rule (the same for Caterer and Reed, evaluated by classify()): an UNLOCKED candidate is not skipped for the search title R when
+// The CV rule (the same for Caterer and Reed, evaluated by classifyDetailed(), kind 'resurface'): an UNLOCKED candidate is not skipped for the search title R when
 //   (a) the candidate has no Zoho id and was never pushed (candidates.zoho_id and zoho_pushed_at are empty, no results file records a push),
 //   (b) the candidate has a record of an unlock-and-reject: a CV rejection (origin cv:...), a row of this module (origin resurface:...), or a legacy
 //       row whose title is the sentinel '*' or empty (role unknown). A plain pre-unlock snippet rejection of another role (a real title, origin
@@ -16,6 +16,17 @@
 // The durable record of the charge is a candidate_rejections row for the NEW title with origin 'resurface:started', written by claim()
 // BEFORE the CV is fetched again. The CV stage later turns it into 'cv:<codes>' when it rejects. That row is what makes a second charge for the
 // same candidate and role impossible: a crash, a retry, an overlapping run and a recovered queue all find it.
+//
+// Role scope (docs/ROLESCOPE.md, 2026-10-01): the same claim mechanism also serves people whose role was never recorded (ROLE_SCOPE_LEGACY, default on,
+// independent of CV_SCREEN). Kinds of eligibility, one list, one claim, no person handled twice:
+//   'resurface'  the rule above (a CV rejection or a resurface: row, CV_SCREEN on);
+//   'legacy'     Caterer: unlocked, never pushed, not in flight, no row for this title, and either no CV rejection and OLD (created_at NULL or older than
+//                ROLE_SCOPE_MIN_AGE_DAYS: no row at all, only the sentinel '*' or empty, or only plain pre-unlock rejections of OTHER real titles, which bind
+//                only the role that was searched), or a resurface: row of another role (a look that already happened, no age rule).
+//                Reed: a seen-only row (unlocked 0 or NULL, no Zoho id) with no row at all, or only resurface: rows of other roles;
+//   'scoped'     Reed only, not switchable: a seen-only row whose rows are plain snippet or approval records of other roles (reed:snippet, reed:approved):
+//                rejected for another role only, so screened as normal for this one.
+// Reed rows are the title-scoped ledger of Reed snippet rejections (origin reed:snippet) and approvals (reed:approved), written by reed-phase1.js.
 //
 // Counters (a small state file under runtime/, mode 0600, atomic writes, one London day): resurfaced candidates, charged / not charged /
 // unknown, credits and Reed views spent, stops by the cap or the reserve. Nothing here ever throws into the pipeline: a failure of the accounting
@@ -35,6 +46,10 @@ const ORIGIN_PUSHED = 'resurface:pushed';
 const ORIGIN_SNIPPET = 'resurface:snippet';
 const ORIGIN_POSTUNLOCK = 'resurface:postunlock';
 const ORIGIN_PREFIX = 'resurface:';
+const ORIGIN_REED_SNIPPET = 'reed:snippet';
+const ORIGIN_REED_APPROVED = 'reed:approved';
+const DEFAULT_MIN_AGE_DAYS = 14;
+const MIN_AGE_FLOOR_DAYS = 8; // the stranded-candidate recovery looks back 7 days (recover-stranded-phase1.js MAX_AGE_DAYS): never closer than that
 const ALERT_KEY = 'cv-resurface-cap-reached';
 const HISTORY_DAYS = 45;
 const MAX_FAILED = 200;
@@ -72,6 +87,55 @@ function settings() {
     }
   }
   return { on, max: intSetting('CV_RESURFACE_MAX_PER_DAY', DEFAULT_MAX_PER_DAY, warnings), minCredits: intSetting('CV_RESURFACE_MIN_CREDITS', DEFAULT_MIN_CREDITS, warnings), warnings };
+}
+
+/**
+ * The settings of the role scope for people whose role was never recorded (docs/ROLESCOPE.md): ROLE_SCOPE_LEGACY (default on; independent of CV_SCREEN and
+ * CV_RESURFACE) and ROLE_SCOPE_MIN_AGE_DAYS (default 14, never below 8: the stranded recovery owns the first 7 days). A value of ROLE_SCOPE_LEGACY that
+ * is neither on nor off is off, never on, and says so.
+ * @returns {{on:boolean, minAgeDays:number, warnings:string[]}}
+ */
+function legacySettings() {
+  const warnings = [];
+  let on = true;
+  const raw = env.get('ROLE_SCOPE_LEGACY');
+  if (raw !== undefined) {
+    const v = String(raw).trim().toLowerCase();
+    if (v === '' || v === 'on' || v === 'true' || v === '1' || v === 'yes') on = true;
+    else if (v === 'off' || v === 'false' || v === '0' || v === 'no') on = false;
+    else {
+      on = false;
+      warnings.push(`ROLE_SCOPE_LEGACY='${v.slice(0, 20)}' is neither on nor off: treated as off (people whose role was never recorded keep the old skip)`);
+    }
+  }
+  let minAgeDays = DEFAULT_MIN_AGE_DAYS;
+  const rawAge = env.get('ROLE_SCOPE_MIN_AGE_DAYS');
+  if (rawAge !== undefined) {
+    const s = String(rawAge).trim();
+    if (/^\d{1,5}$/.test(s)) {
+      const n = Number(s);
+      if (n < MIN_AGE_FLOOR_DAYS) warnings.push(`ROLE_SCOPE_MIN_AGE_DAYS=${n} is inside the 7 days the stranded recovery owns: using ${MIN_AGE_FLOOR_DAYS}`);
+      minAgeDays = Math.max(MIN_AGE_FLOOR_DAYS, n);
+    } else warnings.push(`ROLE_SCOPE_MIN_AGE_DAYS='${s.slice(0, 20)}' is not a whole number: using ${DEFAULT_MIN_AGE_DAYS}`);
+  }
+  return { on, minAgeDays, warnings };
+}
+
+/** True when ROLE_SCOPE_LEGACY is on. Any failure reads as off (the old skip). */
+function legacyActive() {
+  try {
+    return legacySettings().on;
+  } catch (e) {
+    return false;
+  }
+}
+
+/** Every warning about the settings of the second look and of the role scope (a typo is never silent). */
+function allWarnings() {
+  const out = [];
+  try { out.push(...settings().warnings); } catch (e) { /* advisory */ }
+  try { out.push(...legacySettings().warnings); } catch (e) { /* advisory */ }
+  return out;
 }
 
 /** The CV_SCREEN mode: 'on', 'shadow' or 'off' ('unknown' when the CV stage code is missing). */
@@ -166,6 +230,94 @@ function classifyRows(db, source, ids, jobTitle) {
   return out.sort((x, y) => rank.get(x) - rank.get(y));
 }
 
+const originOf = (r) => (typeof r.origin === 'string' ? r.origin : '');
+
+/** 'old' (created_at NULL or empty, or older than minDays), 'young', or 'unknown' (not a date we can read, or no created_at column): only 'old' is eligible. */
+function ageState(created, minDays, nowMs) {
+  if (created === null || created === undefined || String(created).trim() === '') return 'old';
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2})(?:\.\d+)?)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/.exec(String(created).trim());
+  if (!m) return 'unknown';
+  const zone = m[4] ? (m[4] === 'Z' ? 'Z' : m[4].replace(/^([+-]\d{2}):?(\d{2})$/, '$1:$2')) : 'Z';
+  const ms = Date.parse(`${m[1]}T${m[2] || '00:00'}:${m[3] || '00'}${zone}`);
+  if (!Number.isFinite(ms)) return 'unknown';
+  return nowMs - ms > minDays * 86400000 ? 'old' : 'young';
+}
+
+/**
+ * The whole rule of who may be screened again for jobTitle, with the KIND of each (see the header). Pure read; no gate on the cap or on flight.
+ * The role-scope kinds ('legacy', 'scoped') need no CV_SCREEN: they exist for people whose earlier look (or rejection) did not record its role.
+ * opts: force (the CV rule regardless of its switch), legacyForce (the legacy rule regardless of its switch), minAgeDays, now (tests).
+ * @returns {{id:number, kind:'resurface'|'legacy'|'scoped'}[]} in the order the caller gave
+ */
+function classifyDetailed(db, source, ids, jobTitle, opts) {
+  const o = opts || {};
+  const clean = [...new Set(asIds(ids))];
+  if (!clean.length || !hasTable(db, 'candidate_rejections')) return [];
+  const col = idCol(source);
+  if (!hasColumn(db, 'candidates', col) || !hasColumn(db, 'candidate_rejections', col)) return [];
+  const reed = source === 'reed';
+  const useA = !!(o.force || active());
+  const useL = !!(o.legacyForce || legacyActive());
+  if (!reed && !useA && !useL) return [];
+  const minDays = o.minAgeDays !== undefined ? o.minAgeDays : legacySettings().minAgeDays;
+  const nowMs = o.now !== undefined ? new Date(o.now).getTime() : Date.now();
+  const ph = placeholders(clean);
+  const pushedAt = hasColumn(db, 'candidates', 'zoho_pushed_at') ? ' OR zoho_pushed_at IS NOT NULL' : '';
+  const hasCreated = hasColumn(db, 'candidates', 'created_at');
+  const unlockedSql = reed ? '' : ' AND unlocked = 1';
+  const cands = db.prepare(`SELECT ${col} AS id, (zoho_id IS NOT NULL AND zoho_id <> ''${pushedAt}) AS pushed, unlocked AS unlocked${hasCreated ? ', created_at AS created' : ''} FROM candidates WHERE ${col} IN (${ph})${unlockedSql}`).all(...clean);
+  if (!cands.length) return [];
+  const rows = db.prepare(`SELECT ${col} AS id, job_title AS title, origin FROM candidate_rejections WHERE ${col} IN (${ph})`).all(...clean);
+  const byId = new Map();
+  for (const r of rows) {
+    if (!byId.has(r.id)) byId.set(r.id, []);
+    byId.get(r.id).push(r);
+  }
+  const out = [];
+  for (const c of cands) {
+    if (c.pushed) continue; // a person in Zoho is never looked at again, whatever else is true
+    const mine = byId.get(c.id) || [];
+    if (mine.some(r => r.title === jobTitle)) continue; // already judged for this role (any origin, also an unfinished claim): final, no loop
+    const hasCv = mine.some(r => originOf(r).startsWith('cv:'));
+    const hasRs = mine.some(r => originOf(r).startsWith(ORIGIN_PREFIX));
+    let kind = null;
+    if (reed) {
+      const seenOnly = !(Number(c.unlocked) > 0);
+      const recorded = hasCv || hasRs;
+      if (recorded && useA) kind = 'resurface';
+      else if (seenOnly) {
+        if (recorded) { if (useL && !hasCv && hasRs) kind = 'legacy'; } // a look of this system already happened for another role: a new role is fine
+        else if (!mine.length) { if (useL) kind = 'legacy'; } // seen, role unknown (nothing says what it was screened for)
+        else kind = 'scoped'; // rejected or approved for another role, recorded per title: screened as normal for this one
+      }
+    } else {
+      const record = mine.length > 0 && mine.some(isPostUnlockRecord);
+      if (record && useA) kind = 'resurface';
+      else if (useL && !hasCv) {
+        if (hasRs) kind = 'legacy';
+        // no usable record (no row, or only the sentinel) OR only plain pre-unlock rejections of OTHER real titles (the owner: a rejection from the keyword
+        // search binds only the role that was searched): the role of the unlock is not recorded, so one more look is accepted once the stranded recovery's
+        // window is over. A row for THIS title was excluded above; a CV row and a resurface: row are handled by the branches above.
+        else if (ageState(hasCreated ? c.created : 'x', minDays, nowMs) === 'old') kind = 'legacy';
+      }
+    }
+    if (kind) out.push({ id: c.id, kind });
+  }
+  const rank = new Map(clean.map((id, i) => [id, i]));
+  return out.sort((x, y) => rank.get(x.id) - rank.get(y.id));
+}
+
+/** The Reed ids among `ids` that already have a row for this job title (any origin): judged for this role, so skipped for it. Pure read; [] when it cannot be read. */
+function reedJudged(db, ids, jobTitle) {
+  try {
+    const clean = asIds(ids);
+    if (!clean.length || !hasTable(db, 'candidate_rejections') || !hasColumn(db, 'candidate_rejections', 'reed_id')) return [];
+    return db.prepare(`SELECT DISTINCT reed_id AS id FROM candidate_rejections WHERE reed_id IN (${placeholders(clean)}) AND job_title = ?`).all(...clean, String(jobTitle)).map(r => r.id);
+  } catch (e) {
+    return [];
+  }
+}
+
 /**
  * Candidates of which something is still in the pipeline or already in Zoho: a candidate file, a CV file, an entry of a queue whose Phase 2 has not
  * finished, or a results file that records a push. They stay skipped, so a second charge cannot start while the first outcome is still open, and a
@@ -206,23 +358,33 @@ function inFlightIds(ids, opts) {
 }
 
 /**
- * The rule for one page of a search: which ids are looked at again, and how many the daily cap held back.
- * Nothing is returned (and nothing read) while the switch is off.
- * @returns {{resurface:number[], capped:number}}
+ * The rule for one page of a search: which ids are screened for this title although they have a row, and how many the daily cap held back.
+ * Caterer: nothing is read while both switches (the CV rule, the role scope) are off. Reed: the 'scoped' class is evaluated whatever the switches say.
+ * @returns {{resurface:number[], legacy:number[], scoped:number[], capped:number}} resurface = the CV rule and the legacy kinds (to be claimed before the
+ *   charge), legacy = the part of it that is the role scope, scoped = Reed people rejected or approved for another title only (ordinary screening, no claim)
  */
 function classify(db, source, ids, jobTitle, opts) {
   const o = opts || {};
-  const none = { resurface: [], capped: 0 };
+  const none = { resurface: [], legacy: [], scoped: [], capped: 0 };
   try {
-    if (!(o.force || active())) return none;
-    let eligible = classifyRows(db, source, ids, jobTitle);
-    if (!eligible.length) return none;
-    const busy = inFlightIds(eligible, o);
-    eligible = eligible.filter(id => !busy.has(String(id)) && !failedToday(source, id, jobTitle, o));
-    if (!eligible.length) return none;
+    const items = classifyDetailed(db, source, ids, jobTitle, o);
+    if (!items.length) return none;
+    const busy = inFlightIds(items.map(i => i.id), o);
+    const open = items.filter(i => !busy.has(String(i.id)) && (i.kind === 'scoped' || !failedToday(source, i.id, jobTitle, o)));
+    if (!open.length) return none;
+    // what the daily cap counts: every Caterer look (each is an unlock), and the CV-rejection look of Reed; the Reed legacy look is bounded by the daily
+    // profile views and the run limits instead, and a 'scoped' Reed candidate is an ordinary first screening
+    const counts = i => i.kind === 'resurface' || (i.kind === 'legacy' && source !== 'reed');
     const left = remaining(o);
-    if (left === null) return { resurface: [], capped: eligible.length }; // accounting unreadable: the old skip
-    return { resurface: eligible.slice(0, left), capped: Math.max(0, eligible.length - left) };
+    let used = 0;
+    let capped = 0;
+    const kept = [];
+    for (const i of open) {
+      if (!counts(i)) kept.push(i);
+      else if (left !== null && used < left) { kept.push(i); used++; } else capped++; // accounting unreadable (left null): the old skip
+    }
+    const ids2 = k => kept.filter(i => i.kind === k).map(i => i.id);
+    return { resurface: kept.filter(i => i.kind !== 'scoped').map(i => i.id), legacy: ids2('legacy'), scoped: ids2('scoped'), capped };
   } catch (e) {
     return none;
   }
@@ -232,7 +394,9 @@ function classify(db, source, ids, jobTitle, opts) {
 // the counters: one small file, one London day, a lock around every read-modify-write
 // ---------------------------------------------------------------------------------------------
 
-const DAY_KEYS = ['started', 'caterer', 'reed', 'charged', 'notCharged', 'unknown', 'credits', 'reedViews', 'capped', 'reserve', 'unreadable', 'pushed', 'rejected'];
+// the last seven are the role scope for people whose role was never recorded (docs/ROLESCOPE.md): looks given, rejected again, pushed, charges
+const DAY_KEYS = ['started', 'caterer', 'reed', 'charged', 'notCharged', 'unknown', 'credits', 'reedViews', 'capped', 'reserve', 'unreadable', 'pushed', 'rejected',
+  'legacyCaterer', 'legacyReed', 'legacyRejected', 'legacyPushed', 'legacyCharged', 'legacyCredits', 'legacyViews'];
 
 function emptyDay(day) {
   const d = { day };
@@ -339,7 +503,9 @@ function releaseSlot(source, opts) {
 
 /**
  * Counts what happened to one resurfaced candidate. kind: 'charged' | 'notCharged' | 'unknown' (the cost of the re-download), plus the spend.
- * @param {{kind?:string, credits?:number, views?:number, stop?:'capped'|'reserve'|'unreadable', n?:number, pushed?:boolean, rejected?:boolean}} ev
+ * legacy: true marks a person whose role was never recorded (the same event also counts in the legacy keys); look: 'caterer' | 'reed' counts one such person
+ * given their one more look; legacyRejected counts one rejected again at the snippet stage (before any charge).
+ * @param {{kind?:string, credits?:number, views?:number, stop?:'capped'|'reserve'|'unreadable', n?:number, pushed?:boolean, rejected?:boolean, legacy?:boolean, look?:'caterer'|'reed', legacyRejected?:boolean}} ev
  */
 function record(ev, opts) {
   try {
@@ -351,6 +517,15 @@ function record(ev, opts) {
       if (ev.stop === 'capped' || ev.stop === 'reserve' || ev.stop === 'unreadable') s.today[ev.stop] += n;
       if (ev.pushed) s.today.pushed += n;
       if (ev.rejected) s.today.rejected += n;
+      if (ev.look === 'caterer' || ev.look === 'reed') s.today[ev.look === 'reed' ? 'legacyReed' : 'legacyCaterer'] += n;
+      if (ev.legacy) {
+        if (ev.kind === 'charged') s.today.legacyCharged += n;
+        if (ev.credits) s.today.legacyCredits += Number(ev.credits) || 0;
+        if (ev.views) s.today.legacyViews += Number(ev.views) || 0;
+        if (ev.pushed) s.today.legacyPushed += n;
+        if (ev.rejected) s.today.legacyRejected += n;
+      }
+      if (ev.legacyRejected) s.today.legacyRejected += n;
       return true;
     }, opts && opts.now);
   } catch (e) {
@@ -376,8 +551,8 @@ function alertStopped(o) {
     if (!raise) return false;
     const st = settings();
     const text = why === 'reserve'
-      ? `Resurfaced candidates are held back today: the Caterer balance is below the reserve of ${st.minCredits} credits (CV_RESURFACE_MIN_CREDITS). They stay skipped for now, nothing was recorded against them, and they are looked at again once the balance is above it.`
-      : `The cap of ${st.max} resurfaced candidates a day (CV_RESURFACE_MAX_PER_DAY) was reached: more people who were unlocked and rejected for another role came up than the cap allows. They stay skipped for now, nothing was recorded against them, and they are looked at again tomorrow. The day's numbers: node scripts/cv-report.js.`;
+      ? `Candidates for a second look are held back today: the Caterer balance is below the reserve of ${st.minCredits} credits (CV_RESURFACE_MIN_CREDITS). They stay skipped for now, nothing was recorded against them, and they are looked at again once the balance is above it.`
+      : `The cap of ${st.max} resurfaced candidates a day (CV_RESURFACE_MAX_PER_DAY) was reached: more people came up for a second look than the cap allows (unlocked and rejected for another role, or with no record of any role: docs/ROLESCOPE.md). They stay skipped for now, nothing was recorded against them, and they are looked at again tomorrow. The day's numbers: node scripts/cv-report.js.`;
     const send = o.notify || require('./notify').notify;
     try {
       send({ severity: 'warn', key: ALERT_KEY, text: o.detail ? `${text} ${o.detail}` : text, meta: { cap: st.max, minCredits: st.minCredits, why } });
@@ -438,13 +613,14 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 /**
  * The durable claim, written BEFORE the candidate is fetched again: one candidate_rejections row for the new title, origin 'resurface:started'.
- * It takes one slot of the daily cap, and it succeeds only if the rule still holds (a, b, c) at this moment, atomically, so two runs that
- * overlap cannot both claim the same candidate and role.
- * @returns {{claimed:true}|{claimed:false, why:'disabled'|'not-eligible'|'cap'|'already-claimed'|'error'}}
+ * It takes one slot of the daily cap (except for a Reed person whose role was never recorded: the Reed daily profile views bound those), and it succeeds
+ * only if the rule still holds at this moment (classifyDetailed: the CV rule or the legacy rule), atomically, so two runs that overlap cannot both claim
+ * the same candidate and role. 'scoped' Reed candidates are never claimed: they are ordinary first screenings.
+ * @returns {{claimed:true, kind:string, slot:boolean}|{claimed:false, why:'disabled'|'not-eligible'|'cap'|'already-claimed'|'error'}}
  */
 function claim(db, o) {
   try {
-    if (!(o.force || active())) return { claimed: false, why: 'disabled' };
+    if (!(o.force || o.legacyForce || active() || legacyActive())) return { claimed: false, why: 'disabled' };
     const source = o.source === 'reed' ? 'reed' : 'caterer';
     const id = parseInt(o.id, 10);
     if (!id || !o.jobTitle) return { claimed: false, why: 'not-eligible' };
@@ -452,16 +628,20 @@ function claim(db, o) {
     const col = idCol(source);
     let slot = false;
     const tx = db.transaction(() => {
-      if (!classifyRows(db, source, [id], o.jobTitle).length) return { claimed: false, why: 'not-eligible' };
+      const item = classifyDetailed(db, source, [id], o.jobTitle, o).find(i => i.id === id);
+      if (!item || item.kind === 'scoped') return { claimed: false, why: 'not-eligible' };
       if (failedToday(source, id, o.jobTitle, o)) return { claimed: false, why: 'failed-today' };
-      const r = reserveSlot(source, o);
-      if (!r.ok) return { claimed: false, why: r.reason };
-      slot = true;
+      const usesSlot = !(source === 'reed' && item.kind === 'legacy');
+      if (usesSlot) {
+        const r = reserveSlot(source, o);
+        if (!r.ok) return { claimed: false, why: r.reason };
+        slot = true;
+      }
       const info = db.prepare(`INSERT INTO candidate_rejections (${col}, job_title, rejected_at, origin)
         SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM candidate_rejections WHERE ${col} = ? AND job_title = ?)`)
         .run(id, String(o.jobTitle), today(), ORIGIN_STARTED, id, String(o.jobTitle));
-      if (info.changes !== 1) { slot = false; releaseSlot(source, o); return { claimed: false, why: 'already-claimed' }; }
-      return { claimed: true };
+      if (info.changes !== 1) { if (slot) { slot = false; releaseSlot(source, o); } return { claimed: false, why: 'already-claimed' }; }
+      return { claimed: true, kind: item.kind, slot: usesSlot };
     });
     try {
       return tx.immediate();
@@ -474,13 +654,13 @@ function claim(db, o) {
   }
 }
 
-/** Takes a claim back: only a row that is still 'resurface:started' goes, and its slot with it. Called only when the measurement says nothing was spent. */
+/** Takes a claim back: only a row that is still 'resurface:started' goes, and its slot with it (o.slot false: the claim took none). Called only when the measurement says nothing was spent. */
 function release(db, o) {
   try {
     const source = o.source === 'reed' ? 'reed' : 'caterer';
     const col = idCol(source);
     const info = db.prepare(`DELETE FROM candidate_rejections WHERE ${col} = ? AND job_title = ? AND origin = ?`).run(parseInt(o.id, 10), String(o.jobTitle), ORIGIN_STARTED);
-    if (info.changes === 1) releaseSlot(source, o);
+    if (info.changes === 1 && o.slot !== false) releaseSlot(source, o);
     return info.changes === 1;
   } catch (e) {
     return false;
@@ -491,12 +671,16 @@ function release(db, o) {
  * Writes a row for a rejection whose role is known and was not recorded before, so the person is never screened for that role again:
  *   resurface:snippet     a resurfaced candidate (Reed or Caterer) that the snippet screening rejected for the new role;
  *   resurface:postunlock  a candidate that Phase 1's own review rejected AFTER the unlock (written only while the second look is active: with it
- *                         off nothing is written, exactly as before), which makes that rejection role-scoped like a CV rejection.
+ *                         off nothing is written, exactly as before), which makes that rejection role-scoped like a CV rejection;
+ *   reed:snippet          any Reed candidate the snippet screening rejected for this title (role-scoped: another title screens them as normal);
+ *   reed:approved         a Reed candidate approved for this title whose Reed row already existed (so the title is never screened twice).
  */
 function recordSnippetReject(db, o) {
   try {
     const source = o.source === 'reed' ? 'reed' : 'caterer';
-    const origin = o.origin === ORIGIN_POSTUNLOCK ? ORIGIN_POSTUNLOCK : ORIGIN_SNIPPET;
+    // reed:snippet and reed:approved are the title-scoped ledger of Reed (docs/ROLESCOPE.md): written always, they belong to no switch
+    const origin = o.origin === ORIGIN_POSTUNLOCK ? ORIGIN_POSTUNLOCK
+      : (source === 'reed' && (o.origin === ORIGIN_REED_SNIPPET || o.origin === ORIGIN_REED_APPROVED) ? o.origin : ORIGIN_SNIPPET);
     if (origin === ORIGIN_POSTUNLOCK && !(o.force || active())) return false;
     const col = idCol(source);
     db.prepare(TABLE_SQL).run();
@@ -506,6 +690,7 @@ function recordSnippetReject(db, o) {
       .run(id, String(o.jobTitle), today(), origin, id, String(o.jobTitle));
     return info.changes === 1;
   } catch (e) {
+    if (typeof o.onError === 'function') { try { o.onError(e); } catch (e2) { /* advisory */ } } // a failed write is not silent: the caller logs it
     return false;
   }
 }
@@ -549,5 +734,6 @@ function combine(a, b) {
 module.exports = {
   settings, active, cvScreenOn, cvScreenMode, classify, classifyRows, inFlightIds, remaining, reserveSlot, releaseSlot, record, alertStopped, days, readState,
   claim, release, recordSnippetReject, markPushed, measure, combine, londonDay, failedToday, noteFailed, isPostUnlockRecord,
-  ALERT_KEY, ORIGIN_STARTED, ORIGIN_PUSHED, ORIGIN_SNIPPET, ORIGIN_POSTUNLOCK, ORIGIN_PREFIX, DEFAULT_MAX_PER_DAY, DEFAULT_MIN_CREDITS, stateFile,
+  legacySettings, legacyActive, allWarnings, classifyDetailed, reedJudged, ageState,
+  ALERT_KEY, ORIGIN_STARTED, ORIGIN_PUSHED, ORIGIN_SNIPPET, ORIGIN_POSTUNLOCK, ORIGIN_PREFIX, ORIGIN_REED_SNIPPET, ORIGIN_REED_APPROVED, DEFAULT_MAX_PER_DAY, DEFAULT_MIN_CREDITS, DEFAULT_MIN_AGE_DAYS, MIN_AGE_FLOOR_DAYS, stateFile,
 };

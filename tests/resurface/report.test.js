@@ -27,7 +27,7 @@ test('C7 the report shows what the second look did and what it cost: claims, cha
   writeState({ version: 1, today: day(today, { started: 9, caterer: 7, reed: 2, charged: 5, notCharged: 3, unknown: 1, credits: 5, reedViews: 1, pushed: 4, rejected: 3, capped: 2, reserve: 1, unreadable: 1 }), history: [] });
   const r = run(['--days', '7']);
   assert.equal(r.code, 0);
-  assert.match(r.out, /RESURFACED \(unlocked earlier, rejected for another role, screened again for this one; docs\/RESURFACE\.md; CV_RESURFACE on, CV_SCREEN shadow \(the second look is not active\), cap 40 a day, reserve 1000 credits\)/);
+  assert.match(r.out, /RESURFACED \(unlocked earlier, rejected for another role, screened again for this one; docs\/RESURFACE\.md; CV_RESURFACE on, CV_SCREEN shadow \(the second look is not active\), cap 40 a day, reserve 1000 credits; role scope for people whose role was never recorded, docs\/ROLESCOPE\.md: ROLE_SCOPE_LEGACY on, minimum age 14 days\)/);
   process.env.CV_SCREEN = 'on';
   assert.match(run(['--days', '7']).out, /CV_RESURFACE on, CV_SCREEN on \(the second look is active\), cap 40 a day/);
   delete process.env.CV_SCREEN;

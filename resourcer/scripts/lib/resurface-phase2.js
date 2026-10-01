@@ -34,7 +34,8 @@ function readViews(deps) {
  */
 async function reedResurfaced(deps, cand, jobTitle, run) {
   const rs = lib(deps);
-  if (!rs || !rs.active()) return { held: 'disabled' };
+  // each kind needs its own switch: the CV rule (CV_RESURFACE with CV_SCREEN on) or the role scope (ROLE_SCOPE_LEGACY); the claim checks the rule again
+  if (!rs || !(cand.legacy === true ? rs.legacyActive() : rs.active())) return { held: 'disabled' };
   const before = readViews(deps);
   if (!before) { rs.record({ stop: 'unreadable' }); return { held: 'unreadable' }; }
   if (before.limit - before.views < 1) { rs.record({ stop: 'reserve' }); return { held: 'daily-limit' }; }
@@ -56,14 +57,50 @@ async function reedResurfaced(deps, cand, jobTitle, run) {
   const failed = !!(result && result.error);
   if (failed && m.kind === 'notCharged') {
     // the day's views did not move: nothing was spent, so the claim goes back and the candidate can be tried again
-    const released = rs.release(db, { source: 'reed', id: cand.id, jobTitle });
+    const released = rs.release(db, { source: 'reed', id: cand.id, jobTitle, slot: c.slot });
+    if (released && typeof rs.noteFailed === 'function') rs.noteFailed('reed', cand.id, jobTitle); // not screened again for this title by every run of the day
     return { measure: null, released, failed: true };
   }
-  rs.record({ kind: m.kind, views: m.views });
+  // a person whose role was never recorded (docs/ROLESCOPE.md) is also counted as one given their one more look: the claim stayed, so the look happened
+  rs.record({ kind: m.kind, views: m.views, ...(cand.legacy ? { legacy: true, look: 'reed' } : {}) });
   return { measure: m, failed };
 }
 
 const count = (rows, f) => rows.filter(f).length;
+
+/**
+ * People whose role was never recorded (ROLE_SCOPE_LEGACY, docs/ROLESCOPE.md), given their one more look in this queue: Phase 1 says how many were screened
+ * and rejected at the snippet stage (and, for Caterer, rejected after the unlock and what the unlocks cost), the rows say what became of the others.
+ * `only` ('caterer' or 'reed') restricts it to one source (the blocks that travel in run_results.caterer_json and reed_json). null when no such person was met.
+ */
+function legacyBlock({ rows, c1, r1 }, only) {
+  const lrows = rows.filter((r) => r.legacy === true && (!only || (r.source || 'caterer') === only));
+  const sub = (s) => (s && s.legacy && typeof s.legacy === 'object' ? s.legacy : {});
+  const cl = only === 'reed' ? {} : sub(c1);
+  const rl = only === 'caterer' ? {} : sub(r1);
+  const n = (x) => Number(x) || 0;
+  const screened = n(cl.screened) + n(rl.screened);
+  const rejectedAtSnippet = n(cl.rejectedAtSnippet) + n(rl.rejectedAtSnippet);
+  if (!lrows.length && !screened && !rejectedAtSnippet) return null;
+  const cat = lrows.filter((r) => (r.source || 'caterer') === 'caterer');
+  const reed = lrows.filter((r) => r.source === 'reed');
+  const catCharged = cl.charged !== undefined ? n(cl.charged) : count(cat, (r) => r.charge === 'charged');
+  const catCredits = cl.credits !== undefined ? n(cl.credits) : cat.reduce((a, r) => a + n(r.credits), 0);
+  return {
+    screened: Math.max(screened, lrows.length + rejectedAtSnippet),
+    rejectedAtSnippet,
+    rejectedAfterUnlock: n(cl.rejectedAfterUnlock),
+    candidates: lrows.length,
+    caterer: cat.length,
+    reed: reed.length,
+    charged: catCharged + count(reed, (r) => r.charge === 'charged'),
+    credits: catCredits,
+    reedViews: reed.reduce((a, r) => a + n(r.views), 0),
+    pushed: count(lrows, (r) => r.status === 'new'),
+    cvRejected: count(lrows, (r) => r.status === 'cv_rejected'),
+    held: count(lrows, (r) => !!r.held),
+  };
+}
 
 /**
  * The results block of one queue: what the second look did. null when the queue holds no resurfaced candidate and no stop of the second look.
@@ -86,9 +123,11 @@ function summary(o) {
   const nqn = (k) => Number(nq[k]) || 0;
   const notQueued = { charged: nqn('charged'), notCharged: nqn('notCharged'), chargedUnknown: nqn('chargedUnknown'), credits: nqn('credits'), rejectedAfterUnlock: nqn('rejectedAfterUnlock') };
   const nqAny = notQueued.charged + notQueued.notCharged + notQueued.chargedUnknown + notQueued.credits;
-  if (!rows.length && !stops.capped && !stops.belowReserve && !stops.balanceUnreadable && !held.length && !nqAny && !(Number(c1.failedNotCharged) > 0)) return null;
+  const legacy = legacyBlock({ rows, c1, r1 });
+  if (!rows.length && !stops.capped && !stops.belowReserve && !stops.balanceUnreadable && !held.length && !nqAny && !(Number(c1.failedNotCharged) > 0) && !legacy) return null;
   const sub = (src) => {
     const mine = rows.filter((r) => (r.source || 'caterer') === src);
+    const lg = legacyBlock({ rows, c1, r1 }, src);
     return {
       candidates: mine.length,
       charged: count(mine, (r) => r.charge === 'charged'),
@@ -99,6 +138,7 @@ function summary(o) {
       pushed: count(mine, (r) => r.status === 'new'),
       cvRejected: count(mine, (r) => r.status === 'cv_rejected'),
       held: count(mine, (r) => !!r.held),
+      ...(lg ? { legacy: lg } : {}),
     };
   };
   const cat = sub('caterer');
@@ -122,6 +162,7 @@ function summary(o) {
       held: sum('held'),
       earlierAttempt: count(rows, (r) => r.charge === 'earlier'),
       ...stops,
+      ...(legacy ? { legacy } : {}),
     },
     caterer: cat.candidates ? cat : null,
     reed: reed.candidates ? reed : null,
@@ -133,4 +174,9 @@ function line(block) {
   return `Resurfaced (unlocked earlier, rejected for another role, screened again for this one): ${block.candidates} candidate(s), charged ${block.charged}, not charged ${block.notCharged}, charge unknown ${block.chargedUnknown}; credits spent ${block.credits} (${block.chargedNotQueued || 0} of the charges for people rejected right after the unlock), Reed views spent ${block.reedViews}; pushed ${block.pushed}, rejected again ${block.cvRejected}, held back ${block.held}; stopped by the cap ${block.capped}, by the reserve ${block.belowReserve}, balance unreadable ${block.balanceUnreadable}.`;
 }
 
-module.exports = { reedResurfaced, summary, line, readViews };
+/** The line a run prints about the people whose role was never recorded. */
+function legacyLine(l) {
+  return `Role scope (people whose role was never recorded, one more look for this role): ${l.screened} screened, rejected at the snippet stage ${l.rejectedAtSnippet}, queued ${l.candidates} (Caterer ${l.caterer}, Reed ${l.reed}), rejected after the unlock ${l.rejectedAfterUnlock}; charged ${l.charged}, credits spent ${l.credits}, Reed views spent ${l.reedViews}; pushed ${l.pushed}, rejected by the CV stage ${l.cvRejected}, held back ${l.held}.`;
+}
+
+module.exports = { reedResurfaced, summary, line, legacyLine, legacyBlock, readViews };

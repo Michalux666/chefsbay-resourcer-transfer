@@ -14,11 +14,15 @@ const { createLegacyDb } = require('../lifecycle/helpers/legacy-schema');
 const REPO = path.resolve(__dirname, '..', '..');
 const CLI = path.join(REPO, 'resourcer', 'candidates-db.js');
 
-const KEYS = ['CV_SCREEN', 'CV_RESURFACE', 'CV_RESURFACE_MAX_PER_DAY', 'CV_RESURFACE_MIN_CREDITS'];
+const KEYS = ['CV_SCREEN', 'CV_RESURFACE', 'CV_RESURFACE_MAX_PER_DAY', 'CV_RESURFACE_MIN_CREDITS', 'ROLE_SCOPE_LEGACY', 'ROLE_SCOPE_MIN_AGE_DAYS'];
 
-/** Sets the switches (undefined deletes one); by default the second look is fully on: CV_SCREEN=on, the rest at their defaults. */
+/**
+ * Sets the switches (undefined deletes one); by default the second look is fully on: CV_SCREEN=on, the rest at their defaults, EXCEPT the role scope for
+ * people whose role was never recorded (ROLE_SCOPE_LEGACY, on in production), which these tests of the CV rule switch off so that they keep proving the CV rule
+ * alone. The tests of the role scope (tests/resurface/rolescope-*.test.js) set it themselves.
+ */
 function settings(over) {
-  const o = Object.assign({ CV_SCREEN: 'on' }, over || {});
+  const o = Object.assign({ CV_SCREEN: 'on', ROLE_SCOPE_LEGACY: 'off' }, over || {});
   for (const k of KEYS) delete process.env[k];
   for (const [k, v] of Object.entries(o)) if (v !== undefined) process.env[k] = String(v);
 }
@@ -36,7 +40,11 @@ function build(spec) {
   const db = new Database(ws.db, { timeout: 5000 });
   try {
     const ins = db.prepare('INSERT INTO candidates (caterer_id, reed_id, source, unlocked, zoho_id, zoho_pushed_at) VALUES (?, ?, ?, ?, ?, ?)');
-    for (const c of s.cands || []) ins.run(c.caterer_id ?? null, c.reed_id ?? null, c.reed_id ? 'reed' : 'caterer', c.unlocked ?? 0, c.zoho_id ?? null, c.pushed_at ?? null);
+    for (const c of s.cands || []) {
+      ins.run(c.caterer_id ?? null, c.reed_id ?? null, c.reed_id ? 'reed' : 'caterer', c.unlocked ?? 0, c.zoho_id ?? null, c.pushed_at ?? null);
+      // the insert trigger stamps created_at with now: `created` (a date string, or null for the legacy rows that never had one) overrides it afterwards
+      if ('created' in c) db.prepare(`UPDATE candidates SET created_at = ? WHERE ${c.reed_id ? 'reed_id' : 'caterer_id'} = ?`).run(c.created, c.reed_id ?? c.caterer_id);
+    }
     for (const r of s.rows || []) {
       const reed = r[3] === 'reed';
       db.prepare(`INSERT INTO candidate_rejections (${reed ? 'reed_id' : 'caterer_id'}, job_title, rejected_at, origin) VALUES (?, ?, '2026-09-01', ?)`).run(r[0], r[1], r[2]);

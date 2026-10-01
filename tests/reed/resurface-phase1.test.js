@@ -40,7 +40,9 @@ const SEED = {
   cands: [{ id: 9001 }, { id: 9002 }, { id: 9003, zoho: 'ZOHO-9003' }, { id: 9004 }, { id: 9005 }],
   rejections: [[9001, OLD, 'cv:under_qualified'], [9003, OLD, 'cv:under_qualified'], [9004, 'Chef', 'cv:over_qualified'], [9004, OLD, 'cv:under_qualified'], [9005, OLD, 'cv:under_qualified'], [9005, 'Chef', 'resurface:started']],
 };
-const ON = { CV_SCREEN: 'on' };
+// these tests prove the CV rule: the role scope for people whose role was never recorded (ROLE_SCOPE_LEGACY, on in production) is switched off here, so a seen-only
+// person keeps the old skip; tests/reed/rolescope-phase1.test.js proves the role scope
+const ON = { CV_SCREEN: 'on', ROLE_SCOPE_LEGACY: 'off' };
 
 test('C10 a Reed candidate whose CV was rejected for another role is screened again and queued with the resurfaced flag; seen-only, pushed and already-judged candidates stay skipped', () => world(async ({ m, run }) => {
   realDb(m, SEED);
@@ -73,10 +75,10 @@ test('C4 a resurfaced Reed candidate the snippet screening rejects for this role
   assert.strictEqual(screenedIds(m).filter((x) => x === '9001').length, before, 'screened once for this role');
 }));
 
-test('C4 C10 an ordinary Reed snippet rejection leaves no row and is permanent, exactly as before', () => world(async ({ m, run }) => {
+test('C4 C10 an ordinary Reed snippet rejection is recorded for its job title (reed:snippet) and is skipped for that title for ever; nothing else is written (docs/ROLESCOPE.md)', () => world(async ({ m, run }) => {
   realDb(m, SEED);
   await run('reed-phase1.js', ARGS(), { env: { ...ON, FAKE_AI_REJECT_IDS: '9010' } });
-  assert.deepStrictEqual(rowsOf(m, 9010), []);
+  assert.deepStrictEqual(rowsOf(m, 9010), [{ title: 'Chef', origin: 'reed:snippet' }]);
   const again = await run('reed-phase1.js', ARGS(['--run-id', 't2']), { env: ON });
   assert.strictEqual(screenedIds(m).filter((x) => x === '9010').length, 1, '9010 was screened once and is skipped now');
   assert.ok(!queue(m, 't2').candidates.some((c) => c.id === 9010));
@@ -85,7 +87,8 @@ test('C4 C10 an ordinary Reed snippet rejection leaves no row and is permanent, 
 test('C5 C6 with CV_SCREEN shadow, off or unset, or CV_RESURFACE=off, a Reed candidate is skipped exactly as before: nothing flagged, no key in the queue', () => world(async ({ m, run }) => {
   realDb(m, SEED);
   let n = 0;
-  for (const env of [{ CV_SCREEN: 'shadow' }, { CV_SCREEN: 'off' }, {}, { CV_SCREEN: 'on', CV_RESURFACE: 'off' }, { CV_SCREEN: 'on', CV_RESURFACE_MAX_PER_DAY: '0' }]) {
+  for (const env0 of [{ CV_SCREEN: 'shadow' }, { CV_SCREEN: 'off' }, {}, { CV_SCREEN: 'on', CV_RESURFACE: 'off' }, { CV_SCREEN: 'on', CV_RESURFACE_MAX_PER_DAY: '0' }]) {
+    const env = { ...env0, ROLE_SCOPE_LEGACY: 'off' };
     n += 1;
     const r = await run('reed-phase1.js', ARGS(['--run-id', `off${n}`]), { env });
     assert.strictEqual(r.code, 0, r.stderr);

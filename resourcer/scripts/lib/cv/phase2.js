@@ -106,9 +106,9 @@ function recordRejection(deps, cand, jobTitle, codes) {
     )`).run();
     const col = idColumn(cand);
     const prior = db.prepare(`SELECT origin FROM candidate_rejections WHERE ${col} = ? AND job_title = ?`).get(Number(cand.id), String(jobTitle));
-    if (prior && typeof prior.origin === 'string' && prior.origin.startsWith('resurface:')) {
-      // The claim row of a resurfaced candidate (written before the CV was fetched again, docs/RESURFACE.md) becomes the CV rejection: one row per
-      // candidate and job title, and the row of the earlier role stays as it is.
+    if (prior && typeof prior.origin === 'string' && (prior.origin.startsWith('resurface:') || prior.origin === 'reed:approved')) {
+      // The claim row of a resurfaced candidate (written before the CV was fetched again, docs/RESURFACE.md), or the approval row of a Reed candidate for this
+      // job title (reed:approved, docs/ROLESCOPE.md), becomes the CV rejection: one row per candidate and job title, and the row of the earlier role stays as it is.
       db.prepare(`UPDATE candidate_rejections SET origin = ?, rejected_at = ? WHERE ${col} = ? AND job_title = ?`)
         .run(reasonText(codes), new Date().toISOString().slice(0, 10), Number(cand.id), String(jobTitle));
       const cols0 = tableInfo(db);

@@ -205,7 +205,7 @@ async function unlockPass(ctx, cardsForUnlock) {
       encId: uData.encId,
       auditId: uData.auditId,
       cvUrl: uData.cvUrl,
-      ...(charge ? resurface.entryFields(charge) : {}),
+      ...(charge ? resurface.entryFields(charge, card) : {}),
     });
     out(`    QUEUED (${st.approved.length} total)`);
     // The credit is spent: the candidate is durable in the checkpoint BEFORE the database marks it unlocked, so a kill

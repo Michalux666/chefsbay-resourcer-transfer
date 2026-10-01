@@ -1210,9 +1210,10 @@ async function run(queuePathArg, injected) {
       const flagged = candidates.filter(c => c && c.resurfaced === true);
       if (flagged.length) {
         for (const row of phaseResults) {
-          const cand = flagged.find(c => String(c.id) === row.id);
+          const cand = flagged.find(c => String(c.id) === row.id && (c.source === 'reed') === (row.source === 'reed')); // id AND source: a Caterer and a Reed id may be the same number
           if (!cand) continue;
           row.resurfaced = true;
+          if (cand.legacy === true) row.legacy = true; // a person whose role was never recorded (docs/ROLESCOPE.md)
           const key = String(cand.id);
           if (row.held) continue;
           if (cand.source === 'reed') {
@@ -1231,9 +1232,9 @@ async function run(queuePathArg, injected) {
             try {
               if (row.status === 'new') {
                 rs.markPushed(deps.candidateDb.getDb(), { source: row.source, id: row.id, jobTitle });
-                rs.record({ pushed: true });
+                rs.record({ pushed: true, ...(row.legacy ? { legacy: true } : {}) });
               } else if (row.status === 'cv_rejected' && !(cvRejected.get(row.id) && cvRejected.get(row.id).earlier)) {
-                rs.record({ rejected: true });
+                rs.record({ rejected: true, ...(row.legacy ? { legacy: true } : {}) });
               }
             } catch { /* the counters are reporting only */ }
           }
@@ -1595,7 +1596,10 @@ async function run(queuePathArg, injected) {
     console.log(`Errors:                   ${totalErrCount} (download ${dlErrCount}, push ${pushErrCount})`);
     console.log(`Total processed:  ${candidates.length}`);
     console.log(`CV/JSON cleaned:  ${cleanedCandidates} candidate(s) | CV attach failures kept: ${attachFailures}`);
-    if (rsvSummary) console.log(rsvP2.line(rsvSummary.block));
+    if (rsvSummary) {
+      console.log(rsvP2.line(rsvSummary.block));
+      if (rsvSummary.block.legacy) console.log(rsvP2.legacyLine(rsvSummary.block.legacy));
+    }
     if (cvSummary) console.log(`CV screening (${cvMode}): ${cvRejectedCount} rejected and not pushed | screened ${cvSummary.screened} | forced ${cvSummary.forced} | fallback ${cvSummary.fallback} (approved ${cvSummary.policyApprove}, rejected ${cvSummary.policyReject})`);
     console.log(`Results saved to: ${resultsPath}`);
 

@@ -124,7 +124,8 @@ function resurfaceDays(sinceMs) {
   }
 }
 
-const RS_KEYS = ['started', 'charged', 'notCharged', 'unknown', 'credits', 'reedViews', 'pushed', 'rejected', 'capped', 'reserve', 'unreadable'];
+const RS_KEYS = ['started', 'charged', 'notCharged', 'unknown', 'credits', 'reedViews', 'pushed', 'rejected', 'capped', 'reserve', 'unreadable',
+  'legacyCaterer', 'legacyReed', 'legacyRejected', 'legacyPushed', 'legacyCharged', 'legacyCredits', 'legacyViews'];
 
 function resurfaceTotals(days) {
   const t = {};
@@ -164,15 +165,18 @@ function render(s, lists) {
     const t = rsv.totals;
     const mode = resurface.cvScreenMode();
     const active = cfg.on && cfg.max > 0 && mode === 'on';
-    out.push(`RESURFACED (unlocked earlier, rejected for another role, screened again for this one; docs/RESURFACE.md; CV_RESURFACE ${cfg.on ? 'on' : 'off'}, CV_SCREEN ${mode} (${active ? 'the second look is active' : 'the second look is not active'}), cap ${cfg.max} a day, reserve ${cfg.minCredits} credits)`);
-    for (const w of cfg.warnings) out.push(`  WARNING: ${w}`);
-    if (!t.started && !t.capped && !t.reserve && !t.unreadable) out.push('  none in this period');
+    const lcfg = resurface.legacySettings();
+    out.push(`RESURFACED (unlocked earlier, rejected for another role, screened again for this one; docs/RESURFACE.md; CV_RESURFACE ${cfg.on ? 'on' : 'off'}, CV_SCREEN ${mode} (${active ? 'the second look is active' : 'the second look is not active'}), cap ${cfg.max} a day, reserve ${cfg.minCredits} credits; role scope for people whose role was never recorded, docs/ROLESCOPE.md: ROLE_SCOPE_LEGACY ${lcfg.on ? 'on' : 'off'}, minimum age ${lcfg.minAgeDays} days)`);
+    for (const w of resurface.allWarnings()) out.push(`  WARNING: ${w}`);
+    const legacyAny = t.legacyCaterer || t.legacyReed || t.legacyRejected || t.legacyPushed || t.legacyCharged;
+    if (!t.started && !t.capped && !t.reserve && !t.unreadable && !legacyAny) out.push('  none in this period');
     else {
       out.push(`  re-opened (claims made)   ${t.started}`);
       out.push(`  cost measured             charged ${t.charged}, not charged ${t.notCharged}, charge unknown ${t.unknown}; Caterer credits spent ${t.credits}, Reed profile views spent ${t.reedViews}`);
       out.push(`  what became of them       pushed to Zoho ${t.pushed}, rejected again ${t.rejected}`);
       out.push(`  held back (not recorded)  by the daily cap ${t.capped}, by the reserve ${t.reserve}, balance unreadable ${t.unreadable}`);
-      for (const d of rsv.days.slice(-14)) out.push(`  ${d.day}  started ${d.started} (Caterer ${d.caterer || 0}, Reed ${d.reed || 0})  charged ${d.charged || 0}  not charged ${d.notCharged || 0}  unknown ${d.unknown || 0}  credits ${d.credits || 0}  Reed views ${d.reedViews || 0}`);
+      out.push(`  role scope: one more look  given to ${t.legacyCaterer + t.legacyReed} people whose role was never recorded (Caterer ${t.legacyCaterer}, Reed ${t.legacyReed}); rejected again ${t.legacyRejected}, pushed to Zoho ${t.legacyPushed}; charged ${t.legacyCharged}, Caterer credits spent ${t.legacyCredits}, Reed profile views spent ${t.legacyViews} (the charges and the pushes are part of the lines above; the people rejected at the snippet stage cost nothing)`);
+      for (const d of rsv.days.slice(-14)) out.push(`  ${d.day}  started ${d.started} (Caterer ${d.caterer || 0}, Reed ${d.reed || 0})  charged ${d.charged || 0}  not charged ${d.notCharged || 0}  unknown ${d.unknown || 0}  credits ${d.credits || 0}  Reed views ${d.reedViews || 0}${(d.legacyCaterer || d.legacyReed) ? `  role scope ${(d.legacyCaterer || 0) + (d.legacyReed || 0)}` : ''}`);
     }
     out.push('');
   }
