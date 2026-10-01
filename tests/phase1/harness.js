@@ -53,6 +53,13 @@ function makeHome(scenario, opts) {
     fs.copyFileSync(path.join(SRC, 'scripts', 'lib', `${lib}.js`), path.join(home, 'scripts', 'lib', `${lib}.js`));
   }
 
+  // The role-scoped second look (docs/RESURFACE.md): its library and the CV_SCREEN reader it asks. Without them (every older test) the feature reads as off.
+  if (o.resurface) {
+    fs.copyFileSync(path.join(SRC, 'scripts', 'lib', 'resurface.js'), path.join(home, 'scripts', 'lib', 'resurface.js'));
+    fs.mkdirSync(path.join(home, 'scripts', 'lib', 'cv'), { recursive: true });
+    for (const f of ['config.js', 'defaults.json']) fs.copyFileSync(path.join(SRC, 'scripts', 'lib', 'cv', f), path.join(home, 'scripts', 'lib', 'cv', f));
+  }
+
   // Fakes, reached through tiny stubs at the paths phase 1 expects
   const fakesDir = path.join(home, '_fakes');
   copyDir(FAKES, fakesDir);

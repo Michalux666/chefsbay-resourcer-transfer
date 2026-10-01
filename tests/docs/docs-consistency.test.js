@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-E.md', 'docs/RESURFACE.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -636,4 +636,123 @@ test('CV_SCREEN defaults to shadow in the code and in every document that gives 
   for (const f of LIVE_DOCS.concat(['docs/CV-SCREENING.md', 'docs/DECISIONS.md', 'docs/parity/cv-stage.md'])) {
     assert.ok(!/CV_SCREEN[^\n]{0,40}(?:default `?off|\(default\) `?off|defaults to `?off)/i.test(read(f)), `${f} says CV_SCREEN defaults to off`);
   }
+});
+
+// ---- Update E: the role-scoped second look (docs/RESURFACE.md, docs/UPDATE-E.md) ----------------------------------------------------------------
+
+test('RESURFACE.md: the traceability matrix names real tests, and the documents say plainly what the feature needs and costs', () => {
+  const t = read('docs/RESURFACE.md');
+  const from = t.indexOf('## 9. What was agreed and where it is proven');
+  const to = t.indexOf('## 10. ');
+  assert.ok(from > 0 && to > from, 'section 9 exists');
+  const rows = t.slice(from, to).split('\n').filter((l) => /^\| C\d+ \|/.test(l)).map((l) => l.split(' | ').map((c) => c.replace(/^\|\s*|\s*\|$/g, '').trim()));
+  assert.ok(rows.length >= 50, `${rows.length} matrix rows`);
+  const lines = new Set();
+  for (const r of rows) {
+    assert.equal(r.length, 4, `a row has four cells: ${r[0]} ${String(r[1]).slice(0, 40)}`);
+    lines.add(r[0]);
+    const file = r[2].replace(/`/g, '');
+    const name = r[3].replace(/^`|`$/g, '');
+    if (/^\(not a repository test\)$/.test(file)) continue;
+    assert.ok(exists(file), `${file} does not exist`);
+    assert.ok(read(file).includes(name), `${file} has no test named: ${name}`);
+  }
+  for (let i = 1; i <= 11; i += 1) assert.ok(lines.has(`C${i}`), `no matrix row for C${i}`);
+  // the matrix says what cannot be proven offline and names the first live signal
+  assert.match(t, /## 10\. What cannot be proven offline, and the first live signal for each/);
+  assert.match(t, /The first live signal/);
+  // plain statements: it needs CV_SCREEN=on, it may cost a second credit, it is on by default, nothing is a kill switch
+  assert.match(t, /Effective only while `CV_SCREEN` is `on`/);
+  assert.match(t, /with the shipped `CV_SCREEN=shadow` this whole feature does nothing/);
+  assert.match(t, /there is no kill switch on a charge/);
+  assert.match(t, /never twice for the same role/i);
+  assert.match(read('docs/ENV.md'), /^\| `CV_RESURFACE` \| `on` /m);
+  assert.match(read('docs/ENV.md'), /^\| `CV_RESURFACE_MAX_PER_DAY` \| `40` /m);
+  assert.match(read('docs/ENV.md'), /^\| `CV_RESURFACE_MIN_CREDITS` \| `1000` /m);
+  const k = read('docs/KNOWN-LIMITS.md');
+  assert.match(k, /\| K-RS1 \| OPEN, UNVERIFIED-LIVE\. Whether Caterer charges a second credit/);
+  assert.match(k, /FIRST LIVE SIGNAL/);
+  // the code defaults are the documented defaults
+  const rs = require(path.join(REPO, 'resourcer/scripts/lib/resurface.js'));
+  assert.equal(rs.DEFAULT_MAX_PER_DAY, 40);
+  assert.equal(rs.DEFAULT_MIN_CREDITS, 1000);
+  assert.equal(rs.ALERT_KEY, 'cv-resurface-cap-reached');
+});
+
+test('DECISIONS section 17: RS-1 to RS-4 are the instructions of the owner of 2026-10-01, every other row says it is a design default, not yet confirmed by the owner', () => {
+  const d = read('docs/DECISIONS.md');
+  const sec = d.slice(d.indexOf('## 17. The role-scoped second look'));
+  const row = (id) => sec.split('\n').find((l) => l.startsWith(`| ${id} |`));
+  for (const id of ['RS-1', 'RS-2', 'RS-3', 'RS-4']) assert.match(row(id), new RegExp(`^\\| ${id} \\| 2026-10-01, the owner[.,]`), id);
+  assert.match(sec, /Every other row is a design default, not yet confirmed by the owner/);
+  for (const id of ['RS-5', 'RS-6', 'RS-7', 'RS-8', 'RS-9', 'RS-10', 'RS-11', 'RS-12', 'RS-13', 'RS-14', 'RS-15']) {
+    assert.ok(row(id), id);
+    assert.ok(!/2026-10-01, the owner\./.test(row(id).slice(0, 60)), `${id} is not an instruction of the owner`);
+  }
+  assert.match(row('RS-5'), /The number 40 is the assistant's, not the owner's/);
+  assert.match(row('RS-6'), /1000, the assistant's number/);
+  assert.match(d, /CVS-8 \| 2026-09-30\.[^\n]*CHANGED on 2026-10-01 by `RS-1` to `RS-4`/);
+});
+
+test('UPDATE-E.md: only commands this operator may run, code before checks before resume, no setting is changed, and a rollback that needs none', () => {
+  const t = read('docs/UPDATE-E.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 25, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the update changes no setting: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  const prose = t.split('/opt/hermes/bin/hermes -p resourcer').join('');
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(prose), 'a bare hermes command');
+  const steps = t.indexOf('## 1. Before you start');
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const record = at('git -C /opt/data/profiles/resourcer/workspace rev-parse HEAD');
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const copy = at('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md');
+  const full = at('check-manifest.js --expect <NEW_DIGEST>');
+  const selfTest = at('scripts/cv-review.js --self-test');
+  const report = at('scripts/cv-report.js --days 1');
+  const claim = at('candidates-db.js resurface-claim caterer 999999999999 Canary');
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
+  assert.ok(list < pause && pause < record && record < pull && pull < verify && verify < copy && copy < full && full < selfTest && selfTest < report && report < claim && claim < resume,
+    'order: list, pause, record, pull, verify, copy, full check, checks, resume');
+  for (const ph of ['<NEW_DIGEST>', '<OLD_COMMIT>', '<OLD_DIGEST>']) assert.ok(t.includes(ph), ph);
+  assert.match(t, /never set `CV_RESURFACE`/);
+  assert.match(t, /It works only while `CV_SCREEN` is `on`/);
+  assert.match(t, /There is no database migration/);
+  assert.match(t, /THE FIRST LIVE SIGNAL/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(rollback, /nothing to set back/);
+  assert.ok(read('docs/INSTALL.md').includes('docs/UPDATE-E.md') && read('HANDOFF.md').includes('docs/UPDATE-E.md'), 'INSTALL and HANDOFF point at the note');
+});
+
+test('UPDATE-E.md copies exactly the installed files that changed since the previous release, and says nothing else changed', (t) => {
+  // the previous release is the branch point from main: after the finalizer merged main in, that is main itself
+  const base = gitLines(['merge-base', 'HEAD', 'main']);
+  if (!base || !base[0]) { t.skip('no git history with main here'); return; }
+  const changed = gitLines(['diff', '--name-only', base[0]]);
+  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+  if (!changed || !added) { t.skip('no git history here'); return; }
+  const files = changed.concat(added);
+  const note = read('docs/UPDATE-E.md');
+  const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');
+  assert.deepEqual(wrappers, [], 'a cron wrapper, the job list or SOUL.md changed: the note says they did not');
+  assert.deepEqual(files.filter((f) => f.startsWith('plugin/')), [], 'the dashboard plugin changed: the note says it did not');
+  assert.ok(!files.includes('resourcer/package.json'), 'package.json changed: the note says no npm install');
+  assert.ok(!files.includes('resourcer/scripts/migrate-schema.js'), 'the schema script changed: the note says no migration');
+  const profile = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example');
+  assert.deepEqual(profile.slice().sort(), ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md']);
+  assert.ok(note.includes('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md'));
+  assert.ok(note.includes('hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/'));
+  assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five'];
+  assert.ok(note.includes(`this release changes exactly ${words[profile.length]}: `), 'the note says how many installed files change, and the number is right');
 });

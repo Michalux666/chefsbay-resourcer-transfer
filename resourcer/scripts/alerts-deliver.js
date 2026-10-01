@@ -337,6 +337,18 @@ function backupSummary(ctx) {
   return s;
 }
 
+// One line about the role-scoped second look (docs/RESURFACE.md), only on a day it did something: people unlocked earlier and rejected for another role,
+// screened again for this one. The numbers are the counters of runtime/cv-resurface.json (a failed read says nothing).
+function resurfaceLine(ctx, ymd) {
+  const st = fsx.readJson(path.join(ctx.files.dir, 'cv-resurface.json'), null);
+  const t = st && st.today && st.today.day === ymd ? st.today : null;
+  if (!t) return null;
+  const n = (k) => Number(t[k]) || 0;
+  if (!n('started') && !n('capped') && !n('reserve') && !n('unreadable')) return null;
+  const held = n('capped') + n('reserve') + n('unreadable');
+  return `Resurfaced today (unlocked earlier, rejected for another role, screened again): ${nf(n('started'))} started, charged ${nf(n('charged'))}, not charged ${nf(n('notCharged'))}, charge unknown ${nf(n('unknown'))}; credits spent ${nf(n('credits'))}, Reed views ${nf(n('reedViews'))}; pushed ${nf(n('pushed'))}, rejected again ${nf(n('rejected'))}${held ? `; held back ${nf(held)} (cap, reserve or unreadable balance)` : ''}.`;
+}
+
 function buildDigest(ctx) {
   const now = new Date(ctx.now());
   const ymd = timeLib.londonParts(now).ymd;
@@ -389,6 +401,8 @@ function buildDigest(ctx) {
   } else {
     lines.push('Caterer credits: no sync recorded.');
   }
+  const rsv = resurfaceLine(ctx, ymd);
+  if (rsv) lines.push(rsv);
   lines.push(`Backup: ${backupSummary(ctx)}.`);
   return lines.join('\n');
 }

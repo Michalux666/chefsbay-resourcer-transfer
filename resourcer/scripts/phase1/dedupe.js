@@ -1,6 +1,7 @@
 'use strict';
 const { dbRun, idStr } = require('./db');
 const { psBool, outwardCode, safeText } = require('./util');
+const resurface = require('./resurface');
 
 const show = (v) => (v === undefined || v === null ? '' : String(v));
 
@@ -19,6 +20,7 @@ function classifyCheck(r, cardId) {
 async function dedupePage(ctx, cards) {
   const { st, p, out } = ctx;
   const inDbSet = new Set();
+  const resurfaceSet = new Set();
   let batchOk = false;
 
   const pageIds = cards.map((c) => idStr(c && c.id)).join(',');
@@ -31,6 +33,20 @@ async function dedupePage(ctx, cards) {
         const obj = JSON.parse(line);
         if (!Array.isArray(obj.inDb)) throw new Error('inDb is not an array');
         for (const bid of obj.inDb) inDbSet.add(String(bid));
+        // the role-scoped second look (only present when it found something): unlocked, rejected for another role, never pushed
+        if (Array.isArray(obj.resurface)) for (const rid of obj.resurface) resurfaceSet.add(String(rid));
+        if (Number(obj.resurfaceCapped) > 0) resurface.noteCapped(ctx, Number(obj.resurfaceCapped));
+        resurface.warnOnce(ctx);
+        if (resurfaceSet.size) {
+          // the reserve is checked BEFORE the screening: below it (or with the balance unreadable) the people are left skipped, not even screened
+          const g = await resurface.gate(ctx);
+          if (!g.go) {
+            resurface.noteHeld(ctx, g.why, resurfaceSet.size);
+            out(`    RESURFACE: ${resurfaceSet.size} candidate(s) left skipped (${g.why === 'unreadable' ? 'the balance could not be read' : 'the balance is below the reserve'}); not screened`);
+            for (const rid of resurfaceSet) inDbSet.add(rid); // left skipped, exactly as before the second look existed
+            resurfaceSet.clear();
+          }
+        }
         batchOk = true;
       } catch (e) {
         out(`WARN check-batch parse failed - using per-card check: ${safeText(e.message, 200)}`);
@@ -67,6 +83,12 @@ async function dedupePage(ctx, cards) {
       continue;
     }
 
+    const again = resurfaceSet.has(idStr(cardId));
+    if (again) {
+      out('    RESURFACE: unlocked earlier and rejected for another role - screened again for this role');
+      resurface.stats(ctx).eligible++;
+    }
+
     candidatesForReview.push({
       id: cardId,
       snippet: card.snippet,
@@ -77,6 +99,7 @@ async function dedupePage(ctx, cards) {
       cityRaw: card.cityRaw,
       experience: card.experience,
       name: card.name,
+      ...(again ? { resurfaced: true } : {}),
     });
   }
   return { candidatesForReview };

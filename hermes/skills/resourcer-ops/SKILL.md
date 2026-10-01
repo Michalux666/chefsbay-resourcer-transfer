@@ -84,6 +84,8 @@ node /opt/data/profiles/resourcer/workspace/resourcer/scripts/cv-report.js --day
 
 It reads `R/shadow/cv-*.jsonl` (numbers and codes, no CV text; the platform candidate ids in it are personal data: report counts, list ids only when the owner asks). Report the Jev-decided share, the fallback share, the unreadable share, the would-be reject rate and the SWITCH-ON CHECK verdict. Switching `CV_SCREEN` to `on` is the owner's decision after the shadow week (docs/CV-SCREENING.md section 10). Never open a CV.
 
+With `CV_SCREEN` on, a person who was unlocked and rejected by CV screening for one role is screened again when they come up under another role (the role-scoped second look, docs/RESURFACE.md). The same report has a block `RESURFACED` with what it did and what it cost (claims made, charged, not charged, charge unknown, credits and Reed views spent, pushed, rejected again, held back by the cap or the reserve), and the 18:00 digest has one line on a day it did something. Read and report these numbers, never change `CV_RESURFACE`, `CV_RESURFACE_MAX_PER_DAY` or `CV_RESURFACE_MIN_CREDITS` yourself. The WARN alert `cv-resurface-cap-reached` (once a day) means the cap or the credit reserve held someone back: report it with the day's numbers; nothing was lost or recorded against them.
+
 ## 5. Backups
 
 ```

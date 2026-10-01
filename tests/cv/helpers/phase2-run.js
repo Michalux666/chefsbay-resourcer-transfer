@@ -62,10 +62,10 @@ function writeCvFile(id, body, source) {
 
 // scenario: id -> what the injected reviewer answers (a function of the request and the call number is allowed)
 // defaultMode: leave cvScreenMode alone, so the queue step reads CV_SCREEN itself (the real default)
-async function execute({ ids, scenario, mode = 'on', cvOverrides, hooks, queueExtra, keepState, config, useRealCli, force, before, cands, defaultMode }) {
+async function execute({ ids, scenario, mode = 'on', cvOverrides, hooks, queueExtra, keepState, config, useRealCli, force, before, cands, defaultMode, tweak, setupOpts }) {
   const candidates = cands || ids.map(id => card(id));
   if (!keepState) {
-    setup(ids);
+    setup(ids, setupOpts);
     for (const id of ids) writeCvFile(id);
   }
   const qf = writeQueue(ws, QUEUE, { candidates, ...(queueExtra || {}) });
@@ -91,6 +91,7 @@ async function execute({ ids, scenario, mode = 'on', cvOverrides, hooks, queueEx
   }
   if (config) built.deps.config = { ...built.deps.config, ...config };
   if (force) built.deps.force = true;
+  if (tweak) tweak(built.deps, built);
   const cap = captureConsole();
   let res;
   try { res = await pq.run(qf, built.deps); } finally { cap.restore(); built.close(); }

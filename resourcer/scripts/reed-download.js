@@ -92,7 +92,10 @@ function updateDailyUsageDb(type = 'profile_view') {
   }
 }
 
-function getTodayUsageFromDb() {
+// opts.strict: a database that cannot be read throws instead of answering "no views today" (the second look, docs/RESURFACE.md, must tell
+// "nothing was spent" from "could not read the counter").
+function getTodayUsageFromDb(opts) {
+  const strict = !!(opts && opts.strict);
   const fallback = () => ({ date: today(), profile_views: 0, cv_downloads: 0, daily_limit: DEFAULT_DAILY_LIMIT });
   try {
     const Database = require('better-sqlite3');
@@ -103,7 +106,8 @@ function getTodayUsageFromDb() {
     } finally {
       db.close();
     }
-  } catch {
+  } catch (e) {
+    if (strict) throw e;
     return fallback();
   }
 }

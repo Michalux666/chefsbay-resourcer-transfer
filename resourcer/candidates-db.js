@@ -151,31 +151,75 @@ function checkCandidatesBatch(ids) {
  * Everyone else is reconsidered, so someone rejected for Chef can still be
  * screened for Kitchen Porter / Catering Assistant, which is the whole point.
  *
+ * One exception (docs/RESURFACE.md; CV_RESURFACE, effective only with CV_SCREEN=on): an unlocked candidate who
+ * was never pushed to Zoho and was rejected for another role is NOT skipped for a role they were not judged
+ * for. That rule lives in scripts/lib/resurface.js; with the switch off (or CV_SCREEN not on) the result of
+ * this function is exactly what it was.
+ *
  * Falls back to the unscoped behaviour if candidate_rejections is missing, so a
  * DB that hasn't been migrated still behaves exactly as before.
  */
-function checkCandidatesBatchScoped(ids, jobTitle) {
+function skipBatchScoped(db, clean, jobTitle) {
+  const hasTable = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='candidate_rejections'"
+  ).get();
+  if (!hasTable) {
+    const placeholders = clean.map(() => '?').join(',');
+    return db.prepare(`SELECT caterer_id FROM candidates WHERE caterer_id IN (${placeholders})`).all(...clean).map(r => r.caterer_id);
+  }
+
+  const ph = clean.map(() => '?').join(',');
+  // Already hold the CV -> always skip.
+  const unlocked = db.prepare(
+    `SELECT caterer_id FROM candidates WHERE caterer_id IN (${ph}) AND unlocked = 1`
+  ).all(...clean).map(r => r.caterer_id);
+  // Already judged for this exact role (or blocked by the unknown-title sentinel).
+  const rejected = db.prepare(
+    `SELECT caterer_id FROM candidate_rejections
+      WHERE caterer_id IN (${ph}) AND (job_title = ? OR job_title = '*')`
+  ).all(...clean, jobTitle).map(r => r.caterer_id);
+
+  return [...new Set([...unlocked, ...rejected])];
+}
+
+// The role-scoped second look (scripts/lib/resurface.js). A missing library (a stripped test home) reads as "never".
+let _resurface;
+function resurfaceLib() {
+  if (_resurface === undefined) {
+    try { _resurface = require('./scripts/lib/resurface'); } catch (e) { _resurface = null; }
+  }
+  return _resurface;
+}
+
+/**
+ * The same check with the second look applied: { skip, resurface, capped }.
+ *   skip       the ids to skip for this job title (without the ones in `resurface`)
+ *   resurface  unlocked, never pushed, rejected for another role only: screened again for this one (empty unless CV_RESURFACE and CV_SCREEN=on)
+ *   capped     how many more the daily cap (CV_RESURFACE_MAX_PER_DAY) held back: they stay in `skip`, nothing is recorded against them
+ */
+function classifyBatchScoped(ids, jobTitle) {
   const clean = ids.map(n => parseInt(n, 10)).filter(Boolean);
-  if (!clean.length) return [];
+  if (!clean.length) return { skip: [], resurface: [], capped: 0 };
   return withDb(db => {
-    const hasTable = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='candidate_rejections'"
-    ).get();
-    if (!hasTable) return checkCandidatesBatch(clean);
-
-    const ph = clean.map(() => '?').join(',');
-    // Already hold the CV -> always skip.
-    const unlocked = db.prepare(
-      `SELECT caterer_id FROM candidates WHERE caterer_id IN (${ph}) AND unlocked = 1`
-    ).all(...clean).map(r => r.caterer_id);
-    // Already judged for this exact role (or blocked by the unknown-title sentinel).
-    const rejected = db.prepare(
-      `SELECT caterer_id FROM candidate_rejections
-        WHERE caterer_id IN (${ph}) AND (job_title = ? OR job_title = '*')`
-    ).all(...clean, jobTitle).map(r => r.caterer_id);
-
-    return [...new Set([...unlocked, ...rejected])];
+    const skip = skipBatchScoped(db, clean, jobTitle);
+    const lib = resurfaceLib();
+    if (!lib) return { skip, resurface: [], capped: 0 };
+    const c = lib.classify(db, 'caterer', clean, jobTitle);
+    if (!c.resurface.length) return { skip, resurface: [], capped: c.capped };
+    const back = new Set(c.resurface);
+    return { skip: skip.filter(id => !back.has(id)), resurface: c.resurface, capped: c.capped };
   });
+}
+
+function checkCandidatesBatchScoped(ids, jobTitle) {
+  return classifyBatchScoped(ids, jobTitle).skip;
+}
+
+/** The second look for Reed ids (scripts/reed-phase1.js): { resurface, capped }, both empty while the switch is off. */
+function resurfaceBatchReed(ids, jobTitle) {
+  const lib = resurfaceLib();
+  if (!lib || !lib.active()) return { resurface: [], capped: 0 };
+  return withDb(db => lib.classify(db, 'reed', ids, jobTitle));
 }
 
 /**
@@ -410,6 +454,13 @@ Candidate DB (Caterer + Reed)
   check-batch-scoped <ids|--file f> <jobTitle>
                                Same, but only skips unlocked or rejected-for-this-title
   reject-title <id> <title>    Record a rejection scoped to a job title (exit 1 if it could not be written)
+  resurface-claim <caterer|reed> <id> <title>
+                               Claim the role-scoped second look of a candidate BEFORE the CV is fetched again (one JSON line)
+  resurface-release <caterer|reed> <id> <title>
+                               Take that claim back (only when nothing was spent)
+  resurface-reject <caterer|reed> <id> <title> [postunlock]
+                               Record that the snippet screening rejected a resurfaced candidate for this title (postunlock: Phase 1's own review
+                               rejected an unlocked candidate for it; written only while the second look is active)
   check-reed <id>              Check if Reed ID exists (exit 0=exists, exit 1=new, exit 2=error or bad usage)
   add <id>                     Register Caterer candidate as unlocked (credit spent)
   seen <id>                    Register Caterer candidate as seen/screened (no credit)
@@ -459,8 +510,34 @@ async function main() {
       let titleArg = args[1];
       if (raw === '--file' && args[1]) { raw = fs.readFileSync(args[1], 'utf8'); titleArg = args[2]; }
       const ids = raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
-      const inDb = checkCandidatesBatchScoped(ids, titleArg || '');
-      console.log(JSON.stringify({ inDb }));
+      const r = classifyBatchScoped(ids, titleArg || '');
+      // the second look adds two keys, and only when it found something to say: with it off the line is exactly {"inDb":[...]}
+      const out = { inDb: r.skip };
+      if (r.resurface.length || r.capped) { out.resurface = r.resurface; out.resurfaceCapped = r.capped; }
+      console.log(JSON.stringify(out));
+      process.exit(0);
+    }
+
+    case 'resurface-claim':
+    case 'resurface-release':
+    case 'resurface-reject': {
+      // Usage: resurface-claim|resurface-release|resurface-reject <caterer|reed> <id> <jobTitle>
+      const source = args[0] === 'reed' ? 'reed' : 'caterer';
+      const id = parseInt(args[1], 10);
+      if (!['caterer', 'reed'].includes(args[0]) || !id || !args[2]) { console.error(`Usage: ${command} <caterer|reed> <id> <jobTitle>`); process.exit(2); }
+      const lib = resurfaceLib();
+      if (!lib) { console.log(JSON.stringify(command === 'resurface-claim' ? { claimed: false, why: 'disabled' } : { done: false })); process.exit(0); }
+      let out;
+      try {
+        const db = getDb();
+        if (command === 'resurface-claim') out = lib.claim(db, { source, id, jobTitle: args[2] });
+        else if (command === 'resurface-release') out = { released: lib.release(db, { source, id, jobTitle: args[2] }) };
+        else out = { recorded: lib.recordSnippetReject(db, { source, id, jobTitle: args[2], origin: args[3] === 'postunlock' ? lib.ORIGIN_POSTUNLOCK : lib.ORIGIN_SNIPPET }) };
+      } catch (err) {
+        console.error(`${command} failed: ${err && err.message ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      console.log(JSON.stringify(out));
       process.exit(0);
     }
 
@@ -582,6 +659,8 @@ module.exports = {
   addCandidate,
   seenCandidate,
   checkCandidatesBatchScoped,
+  classifyBatchScoped,
+  resurfaceBatchReed,
   rejectCandidateForTitle,
   setZohoId,
   getZohoId,

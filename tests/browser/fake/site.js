@@ -235,8 +235,9 @@ function buildPage(state, site) {
   } else if (kind === 'home') {
     title = 'Recruiter Dashboard'; text = 'Recruiter Dashboard';
   } else if (kind === 'search') {
-    title = 'Candidate Search'; text = `Search Credits Remaining ${fmtCredits(site.credits)}`;
-    if (site.creditsWidget !== false) root.append(new Element('span', { class: 'litCandidatesViewed' }, fmtCredits(site.credits)));
+    const balance = site.credits - (state.spent || 0); // a fetch fixture with `credit` spends credits (see makeFetch)
+    title = 'Candidate Search'; text = site.creditsHidden ? 'Search' : `Search Credits Remaining ${fmtCredits(balance)}`;
+    if (site.creditsWidget !== false && !site.creditsHidden) root.append(new Element('span', { class: 'litCandidatesViewed' }, fmtCredits(balance)));
   } else if (kind === 'safelist') {
     title = 'Verify'; text = 'Please verify your account. We have sent a verification email.';
   } else if (kind === 'error') {
@@ -257,6 +258,12 @@ function makeFetch(state, site, save, counters) {
     const fx = (site.fetch || []).find((f) => key.indexOf(f.match) !== -1);
     const bucket = fx ? `fetch:${fx.match}` : 'fetch:unmatched';
     counters[bucket] = (counters[bucket] || 0) + 1;
+    // A fixture can spend credits: `credit` on the first request of that URL, `creditRepeat` on every later one (default: the same). The balance on the
+    // search page falls by that much (state.spent), so a test can model a platform that charges, or does not charge, for a second look.
+    if (fx && fx.credit !== undefined) {
+      const first = counters[bucket] === 1;
+      state.spent = (state.spent || 0) + Number(first || fx.creditRepeat === undefined ? fx.credit : fx.creditRepeat);
+    }
     save();
     const signal = opts && opts.signal;
     return new Promise((resolve, reject) => {

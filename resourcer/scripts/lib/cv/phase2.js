@@ -105,7 +105,19 @@ function recordRejection(deps, cand, jobTitle, codes) {
       job_title TEXT NOT NULL, rejected_at TEXT NOT NULL, origin TEXT
     )`).run();
     const col = idColumn(cand);
-    if (db.prepare(`SELECT 1 FROM candidate_rejections WHERE ${col} = ? AND job_title = ?`).get(Number(cand.id), String(jobTitle))) return { ok: true, existed: true };
+    const prior = db.prepare(`SELECT origin FROM candidate_rejections WHERE ${col} = ? AND job_title = ?`).get(Number(cand.id), String(jobTitle));
+    if (prior && typeof prior.origin === 'string' && prior.origin.startsWith('resurface:')) {
+      // The claim row of a resurfaced candidate (written before the CV was fetched again, docs/RESURFACE.md) becomes the CV rejection: one row per
+      // candidate and job title, and the row of the earlier role stays as it is.
+      db.prepare(`UPDATE candidate_rejections SET origin = ?, rejected_at = ? WHERE ${col} = ? AND job_title = ?`)
+        .run(reasonText(codes), new Date().toISOString().slice(0, 10), Number(cand.id), String(jobTitle));
+      const cols0 = tableInfo(db);
+      if (cols0 && cols0.has('reason_code')) {
+        try { db.prepare(`UPDATE candidate_rejections SET reason_code = ? WHERE ${col} = ? AND job_title = ?`).run(primaryReasonCode(codes), Number(cand.id), String(jobTitle)); } catch (e) { /* optional column */ }
+      }
+      return { ok: true, existed: false, claimed: true };
+    }
+    if (prior) return { ok: true, existed: true };
     db.prepare(`INSERT INTO candidate_rejections (${col}, job_title, rejected_at, origin) VALUES (?, ?, ?, ?)`)
       .run(Number(cand.id), String(jobTitle), new Date().toISOString().slice(0, 10), reasonText(codes));
     const cols = tableInfo(db);

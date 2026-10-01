@@ -3,6 +3,7 @@ const fs = require('fs');
 const fsx = require('../lib/fsx');
 const { readJsonStrict, todayLondon, safeText } = require('./util');
 const { reasonOf } = require('./incomplete');
+const resurface = require('./resurface');
 
 // Queue files hold names, emails and phone numbers: owner-only.
 const QUEUE_MODE = 0o600;
@@ -135,6 +136,9 @@ function buildQueueObject(ctx, fin) {
   };
   const why = reasonOf(st);
   if (why) obj.phase1Stats.incomplete = why;
+  // only when a resurfaced candidate (or a stop of the second look) happened in this run: otherwise the queue is exactly what it always was
+  const rsv = resurface.queueStats(ctx);
+  if (rsv) obj.phase1Stats.resurfaced = rsv;
   return obj;
 }
 

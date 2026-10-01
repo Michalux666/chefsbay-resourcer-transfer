@@ -8,6 +8,7 @@ const { writeCheckpoint, writeStatus } = require('./queue');
 const { argVal, screeningModelFrom } = require('./screen');
 const { KINDS, markIncomplete, raiseAlert } = require('./incomplete');
 const cvHold = require('./cv-hold');
+const resurface = require('./resurface');
 const cities = require('./cities');
 const { safeText, maskEmail, parseFailure } = require('./util');
 
@@ -98,7 +99,8 @@ function unlockFailed(ctx) {
 // PASS 3: unlock the approved cards, screen them again, and queue the survivors.
 async function unlockPass(ctx, cardsForUnlock) {
   const { st, p, cfg, out } = ctx;
-  for (const card of cardsForUnlock) {
+  // the resurfaced cards go last (see phase1/resurface.js); with none on the page the order is untouched
+  for (const card of resurface.orderForUnlock(cardsForUnlock)) {
     if (st.dbBroken) {
       out('STOPPING unlocks: candidates.db is not usable');
       break;
@@ -123,20 +125,42 @@ async function unlockPass(ctx, cardsForUnlock) {
       continue;
     }
 
+    // A resurfaced card (unlocked earlier, rejected for another role, approved again for this one) is claimed BEFORE it is fetched again and its
+    // cost is measured around the fetch (docs/RESURFACE.md). A normal unlock only makes the last balance reading stale.
+    let begun = null;
+    if (card.resurfaced) {
+      begun = await resurface.begin(ctx, card);
+      if (!begun.go) continue;
+    } else {
+      resurface.invalidate(ctx);
+    }
+
     const u = await unlockOne(ctx, card);
     if (u.parseError) {
       out(`    UNLOCK PARSE ERROR: ${unlockErrorText(u)}`);
+      if (begun) {
+        // a refused second look never counts toward the run-stopping streak of the normal unlocks: it is bounded by the day's failed list instead
+        await resurface.end(ctx, card, begun, false);
+        st.errors++;
+        continue;
+      }
       if (unlockFailed(ctx)) break;
       continue;
     }
     const uData = u.uData;
     if (!uData.success) {
       out(`    UNLOCK FAILED: ${safeText(uData.error, 300)}`);
+      if (begun) {
+        await resurface.end(ctx, card, begun, false);
+        st.errors++;
+        continue;
+      }
       if (unlockFailed(ctx)) break;
       continue;
     }
     st.unlockFailStreak = 0;
     out(`    UNLOCKED: ${cardId} | ${maskEmail(uData.email)}`);
+    const charge = begun ? await resurface.end(ctx, card, begun, true) : null;
 
     // Post-unlock title normalisation: a postcode or empty title is not a role, so derive one for the reviewer.
     let titleStr = uData.jobTitle ? String(uData.jobTitle).trim() : '';
@@ -154,6 +178,7 @@ async function unlockPass(ctx, cardsForUnlock) {
       out(`    REJECTED post-unlock AI: ${single.reason}`);
       st.skippedReview++;
       st.consecutiveRejections++;
+      await resurface.postUnlockRejected(ctx, card); // role-scoped like a CV rejection while the second look is active; counted for a resurfaced card
       await dbWrite(ctx, ['add', cardId]);
       continue;
     }
@@ -180,6 +205,7 @@ async function unlockPass(ctx, cardsForUnlock) {
       encId: uData.encId,
       auditId: uData.auditId,
       cvUrl: uData.cvUrl,
+      ...(charge ? resurface.entryFields(charge) : {}),
     });
     out(`    QUEUED (${st.approved.length} total)`);
     // The credit is spent: the candidate is durable in the checkpoint BEFORE the database marks it unlocked, so a kill

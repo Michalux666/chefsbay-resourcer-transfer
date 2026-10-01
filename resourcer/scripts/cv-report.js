@@ -19,6 +19,7 @@
 const shadow = require('./lib/cv/shadow');
 const config = require('./lib/cv/config');
 const { applyOperatingPoint } = require('./lib/cv/gate');
+const resurface = require('./lib/resurface');
 
 const pct = (k, n) => (n ? Math.round((k / n) * 1000) / 10 : 0);
 const USAGE = 'Usage: node scripts/cv-report.js [--days N] [--from YYYY-MM-DD] [--mode on|shadow|cli] [--forced] [--rejects] [--json]\n';
@@ -114,6 +115,23 @@ function acceptance(s) {
   return { checks, numbersOk: checks.every(c => c.ok) };
 }
 
+/** The days of the role-scoped second look (docs/RESURFACE.md) from `sinceMs` on: the counters of runtime/cv-resurface.json, one entry per London day. */
+function resurfaceDays(sinceMs) {
+  try {
+    return resurface.days(resurface.londonDay(sinceMs));
+  } catch (e) {
+    return [];
+  }
+}
+
+const RS_KEYS = ['started', 'charged', 'notCharged', 'unknown', 'credits', 'reedViews', 'pushed', 'rejected', 'capped', 'reserve', 'unreadable'];
+
+function resurfaceTotals(days) {
+  const t = {};
+  for (const k of RS_KEYS) t[k] = days.reduce((a, d) => a + (Number(d[k]) || 0), 0);
+  return t;
+}
+
 const line = r => `  ${String(r.ts).slice(0, 10)} id ${String(r.candidateId)} ${String(r.jobTitle).padEnd(20)} ${String(r.final).padEnd(7)} confidence ${r.confidence} pReject ${r.pReject} ${(r.finalReasonCodes || []).join(',')}`;
 
 function render(s, lists) {
@@ -138,6 +156,24 @@ function render(s, lists) {
     out.push(cap.queuesStoppedByTime || cap.queuesStoppedByFailures
       ? `  ${cap.skippedByTime} of ${cap.queued} queued CVs (${cap.shareByTime}%) were skipped because the screening of their queue passed phase2.shadowMaxSeconds (${cap.queuesStoppedByTime} queue(s)); ${cap.skippedByFailures} more (${cap.shareByFailures}%) after CVs in a row could not be screened (${cap.queuesStoppedByFailures} queue(s)). They are not in the numbers above: a large share means the sample favours small, fast queues, so read every rate with that in mind.`
       : `  none: no queue was cut short by the time cap or by failures (0 of ${cap.queued} queued CVs). Counted from the release that added the cap.`);
+    out.push('');
+  }
+  const rsv = s.resurfaced;
+  if (rsv) {
+    const cfg = resurface.settings();
+    const t = rsv.totals;
+    const mode = resurface.cvScreenMode();
+    const active = cfg.on && cfg.max > 0 && mode === 'on';
+    out.push(`RESURFACED (unlocked earlier, rejected for another role, screened again for this one; docs/RESURFACE.md; CV_RESURFACE ${cfg.on ? 'on' : 'off'}, CV_SCREEN ${mode} (${active ? 'the second look is active' : 'the second look is not active'}), cap ${cfg.max} a day, reserve ${cfg.minCredits} credits)`);
+    for (const w of cfg.warnings) out.push(`  WARNING: ${w}`);
+    if (!t.started && !t.capped && !t.reserve && !t.unreadable) out.push('  none in this period');
+    else {
+      out.push(`  re-opened (claims made)   ${t.started}`);
+      out.push(`  cost measured             charged ${t.charged}, not charged ${t.notCharged}, charge unknown ${t.unknown}; Caterer credits spent ${t.credits}, Reed profile views spent ${t.reedViews}`);
+      out.push(`  what became of them       pushed to Zoho ${t.pushed}, rejected again ${t.rejected}`);
+      out.push(`  held back (not recorded)  by the daily cap ${t.capped}, by the reserve ${t.reserve}, balance unreadable ${t.unreadable}`);
+      for (const d of rsv.days.slice(-14)) out.push(`  ${d.day}  started ${d.started} (Caterer ${d.caterer || 0}, Reed ${d.reed || 0})  charged ${d.charged || 0}  not charged ${d.notCharged || 0}  unknown ${d.unknown || 0}  credits ${d.credits || 0}  Reed views ${d.reedViews || 0}`);
+    }
     out.push('');
   }
   const acc = acceptance(s);
@@ -186,6 +222,8 @@ function main(argv, io) {
   const tau = rows.length && typeof rows[rows.length - 1].tau === 'number' ? rows[rows.length - 1].tau : cfg.tau;
   const s = summarize(rows, { tau, forced: cfg.forced });
   s.shadowCap = capShare(rows, stops);
+  const rsvDays = resurfaceDays(since);
+  s.resurfaced = { days: rsvDays, totals: resurfaceTotals(rsvDays) };
   const forcedRows = rows.filter(r => r.forced).sort((x, y) => (x.confidence === null ? 1 : x.confidence) - (y.confidence === null ? 1 : y.confidence));
   const rejectRows = rows.filter(r => r.final === 'reject').sort((x, y) => String(x.ts).localeCompare(String(y.ts)));
   if (a.json) {
@@ -199,4 +237,4 @@ function main(argv, io) {
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
-module.exports = { main, summarize, render, parseArgs, acceptance, capShare, ACCEPT };
+module.exports = { main, summarize, resurfaceTotals, resurfaceDays, render, parseArgs, acceptance, capShare, ACCEPT };

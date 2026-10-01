@@ -11,7 +11,17 @@ async function main() {
     email: `person${id}@example.invalid`, phone: '07 700 900 001', cvUrl: `/CandidateSearch/CandidateDownloadCV.aspx?candidateId=enc${id}&CandidateSearchAuditId=aud${id}`,
     encId: `enc${id}`, auditId: `aud${id}`, jobTitle: 'Head Chef',
   };
-  logCall('caterer-unlock', { id, tokenPresent: Boolean(token), token });
+  // sc.probeDb: what candidates.db holds for this candidate at the moment of the unlock (the claim of the second look must already be there)
+  let rowsAtCall;
+  if (sc.probeDb) {
+    try {
+      const Database = require('better-sqlite3');
+      const db = new Database(require('path').join(process.env.P1_HOME, 'candidates.db'), { readonly: true });
+      rowsAtCall = db.prepare('SELECT job_title AS title, origin FROM candidate_rejections WHERE caterer_id = ? ORDER BY id').all(Number(id));
+      db.close();
+    } catch (e) { rowsAtCall = { error: String(e.message).slice(0, 80) }; }
+  }
+  logCall('caterer-unlock', { id, tokenPresent: Boolean(token), token, success: plan.success, rowsAtCall });
   if (plan.__hang) await sleepMs(Number(process.env.P1_HANG_MS || 15000));
   if (plan.__raw !== undefined) {
     process.stdout.write(String(plan.__raw) + '\n');

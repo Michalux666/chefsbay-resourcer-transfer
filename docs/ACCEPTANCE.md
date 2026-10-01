@@ -241,7 +241,7 @@ If a WATCH item goes wrong, do not fix anything yourself. Report: what you ran, 
 | DC6 | Shadow log keeps card text 180 days (IN06) | |
 | DC7 | Scale-to-zero and always-awake cost (HF01) | |
 | DC8 | When the old laptop system is retired (`docs/TEARDOWN.md`) | |
-| DC9 (the technical blocker K-CV8 was fixed by Update C and is proven by rehearsal scenario 15; the live check of the CV canary, K-CV7, belongs to the shadow week) | CV screening from `shadow` to `on` (SR13) and the three decisions of `docs/CV-SCREENING.md` section 9: whether a person may be turned down automatically, whether porter-only histories may be rejected for a chef search, and that a rejected person is not offered again for another role (DECISIONS OD-L, CVS-8) | |
+| DC9 (the technical blocker K-CV8 was fixed by Update C and is proven by rehearsal scenario 15; the live check of the CV canary, K-CV7, belongs to the shadow week) | CV screening from `shadow` to `on` (SR13) and the two decisions of `docs/CV-SCREENING.md` section 9 that are still open: whether a person may be turned down automatically and whether porter-only histories may be rejected for a chef search (DECISIONS OD-L; that a rejected person is screened again for another role was decided on 2026-10-01 and built, RS-1 to RS-4, `docs/RESURFACE.md`) | |
 
 ## 12. Sign-off and waivers
 

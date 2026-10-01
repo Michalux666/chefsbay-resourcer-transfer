@@ -130,6 +130,7 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | cv-screening-unavailable | CV screening (mode on) could not reach Jev, or `config/cv-screening.json` is broken; the queue is held with every CV kept and nothing more is unlocked | see Halts; auth or credits need HUMAN, a broken file is fixed by the owner; it retries by itself |
 | cv-config-invalid | CV screening (shadow): `config/cv-screening.json` is broken or missing, so the stage did not run for that queue; nothing was blocked | report; the owner fixes or restores the file (docs/CV-SCREENING.md section 5) |
 | cv-reject-not-recorded | a CV rejection (mode on) could not be written to `candidates.db`; files kept, decided again next run | report; check `node scripts/preflight-db.js` |
+| cv-resurface-cap-reached | WARN, once a day: people who were unlocked and rejected for another role came up again, and the daily cap (`CV_RESURFACE_MAX_PER_DAY`) or the credit reserve (`CV_RESURFACE_MIN_CREDITS`) held some back; they stay skipped for now, nothing is recorded against them, they are looked at again later | report the text and the day's numbers (`node scripts/cv-report.js --days 1`); the owner decides whether to change the cap; never change it yourself |
 | cv-review-errors | the CV reviewer process failed on some CVs; they went through like unreadable ones | report the text |
 | phase2-fatal | the Zoho push run aborted | report with the text; recovery runs by itself up to 3 times |
 | stranded-recovered | an interrupted run was pushed | none |
@@ -162,7 +163,7 @@ Any key not in this table: read its text, report it, and only run a command that
 ## What only the owner can do
 
 Enter or rotate any secret; approve a dangerous command prompt; read the Caterer verification e-mail; do the Reed human login;
-change `RESOURCER_SOURCES` (Reed on), `CV_SCREEN` (CV screening: shadow, on or off; it starts in shadow and switching it to `on` rejects candidates), the screening criteria files (`config/screening-criteria.json`, `config/cv-screening.json`), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
+change `RESOURCER_SOURCES` (Reed on), `CV_SCREEN` (CV screening: shadow, on or off; it starts in shadow and switching it to `on` rejects candidates), `CV_RESURFACE`, `CV_RESURFACE_MAX_PER_DAY` and `CV_RESURFACE_MIN_CREDITS` (the role-scoped second look at people rejected after an unlock: on by default, effective only with `CV_SCREEN` on, capped, and it may cost a second credit; docs/RESURFACE.md), the screening criteria files (`config/screening-criteria.json`, `config/cv-screening.json`), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
 in the portal; buy credits; accept the privacy and data protection steps in docs/SECURITY.md; change code; tear down the old system.
 
 ## What you may do on your own

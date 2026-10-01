@@ -11,6 +11,7 @@ const env = require('./lib/env');
 const { notify } = require('./lib/notify');
 const retention = require('./lib/cv-retention');
 const cvStage = require('./lib/cv/phase2');
+const rsvP2 = require('./lib/resurface-phase2');
 
 const execFileAsync = promisify(execFile);
 
@@ -64,6 +65,8 @@ function realDeps() {
       return db;
     },
     getCredits: () => getCreditsReal(),
+    reedUsage: () => require('./reed-download').getTodayUsageFromDb({ strict: true }),
+    resurface: () => require('./lib/resurface'),
     allowedSources: () => env.get('RESOURCER_SOURCES', 'caterer'),
     cvScreenMode: () => cvStage.mode(env.get('CV_SCREEN')),
     cvScreen: req => cvStage.runCli(req),
@@ -769,6 +772,8 @@ async function run(queuePathArg, injected) {
       }
     }
 
+    const resurfaceHeld = new Map(); // key -> why a resurfaced Reed candidate was not downloaded
+    const resurfaceMeasure = new Map(); // key -> what its re-download cost (Reed, measured in this attempt)
     const catererGate = makeGate(cfg.catererDownloadConcurrency);
     const dlTimings = [];
     const pushTimings = [];
@@ -783,7 +788,7 @@ async function run(queuePathArg, injected) {
     if (toDownload.length > 0) {
       console.log(`\n[Phase 2] Step 3 - Downloading ${toDownload.length} CVs (concurrency ${cfg.concurrency})...`);
 
-      await runConcurrent(toDownload, async (cand) => {
+      const downloadOne = async (cand) => {
         const dlStart = Date.now();
         let result;
         const candSource = cand.source || 'caterer';
@@ -830,7 +835,31 @@ async function run(queuePathArg, injected) {
           dlTimings.push({ id: String(cand.id), secs: dlSecs, sizeKb });
           console.log(`  [${cand.id}] CV downloaded: ${fname} (${sizeKb}KB, ${dlSecs.toFixed(1)}s)`);
         }
-      }, cfg.concurrency);
+        return result;
+      };
+
+      // A resurfaced Reed candidate (CV rejected for another role earlier, screened again for this one) is downloaded ALONE after the others: the claim is
+      // written first and the cost is the change of the day's profile views around the call (docs/RESURFACE.md). Any candidate that cannot be counted is
+      // held back, not downloaded and not pushed. Caterer ones were claimed and measured in Phase 1 and download like any other.
+      const reedAgain = toDownload.filter(c => c.resurfaced === true && c.source === 'reed');
+      await runConcurrent(toDownload.filter(c => !reedAgain.includes(c)), downloadOne, cfg.concurrency);
+      for (const cand of reedAgain) {
+        const r = await rsvP2.reedResurfaced(deps, cand, jobTitle, downloadOne);
+        const key = String(cand.id);
+        if (r.held) {
+          resurfaceHeld.set(key, r.held);
+          toSkipZoho.add(cand.id);
+          console.log(`  [${cand.id}] RESURFACE held back (${r.held}): not downloaded, not pushed, nothing recorded against the candidate`);
+        } else if (r.failed) {
+          // no profile and no CV came back: not pushed as a bare card; a claim that cost nothing was taken back, one that cost something stays
+          resurfaceHeld.set(key, 'download-failed');
+          toSkipZoho.add(cand.id);
+          console.log(`  [${cand.id}] RESURFACE download failed${r.released ? ' (nothing was spent: the claim was taken back)' : ' (the claim stays: it may have been charged)'}: not pushed`);
+        } else if (r.measure) {
+          resurfaceMeasure.set(key, r.measure);
+          console.log(`  [${cand.id}] RESURFACE re-downloaded: ${r.measure.kind === 'charged' ? `charged, ${r.measure.views} profile view(s)` : (r.measure.kind === 'notCharged' ? 'not charged' : 'charge unknown')}`);
+        }
+      }
     } else {
       console.log('\n[Phase 2] Step 3 - No CVs to download (all present or skipped)');
     }
@@ -964,6 +993,9 @@ async function run(queuePathArg, injected) {
           console.log(`  [${cand.id}] -> error (no email on profile or CV)`);
           logError('zoho_push', noEmailErr, { candidateId: String(cand.id), jobTitle, location });
           phaseResults.push({ id: String(cand.id), name, status: 'error', error: noEmailErr, cvAttached: !!cvPath });
+        } else if (resurfaceHeld.has(String(cand.id))) {
+          console.log(`  [${cand.id}] -> resurfaced candidate held back (${resurfaceHeld.get(String(cand.id))}) - not pushed`);
+          phaseResults.push({ id: String(cand.id), name, status: 'skipped', source: cand.source || 'caterer', zohoId: null, cvAttached: false, held: resurfaceHeld.get(String(cand.id)) });
         } else if (cvRejected.has(String(cand.id))) {
           const cvRej = cvRejected.get(String(cand.id));
           console.log(`  [${cand.id}] -> rejected by CV screening (${cvRej.reasonCodes.join(',')}) - not pushed${cvRej.earlier ? ' (decided in an earlier run)' : ''}`);
@@ -1172,6 +1204,44 @@ async function run(queuePathArg, injected) {
       if (cand !== candidates[candidates.length - 1]) await sleep(cfg.zohoDelayMs);
     }
 
+    // ---- the second look (docs/RESURFACE.md): mark the rows of resurfaced candidates and count what became of them ------------------
+    // Rows only get the keys when the queue holds a resurfaced candidate, so every other queue is exactly what it always was.
+    {
+      const flagged = candidates.filter(c => c && c.resurfaced === true);
+      if (flagged.length) {
+        for (const row of phaseResults) {
+          const cand = flagged.find(c => String(c.id) === row.id);
+          if (!cand) continue;
+          row.resurfaced = true;
+          const key = String(cand.id);
+          if (row.held) continue;
+          if (cand.source === 'reed') {
+            const m = resurfaceMeasure.get(key);
+            if (m) Object.assign(row, { charge: m.kind, views: m.views });
+            else row.charge = 'earlier'; // the CV was already on disk: the download was measured in an earlier attempt of this queue
+          } else {
+            Object.assign(row, { charge: cand.resurfaceCharge || 'unknown', credits: Number(cand.resurfaceCredits) || 0 });
+          }
+        }
+        if (!rerun) {
+          let rs = null;
+          try { rs = deps.resurface(); } catch { rs = null; }
+          for (const row of phaseResults) {
+            if (!rs || row.resurfaced !== true) continue;
+            try {
+              if (row.status === 'new') {
+                rs.markPushed(deps.candidateDb.getDb(), { source: row.source, id: row.id, jobTitle });
+                rs.record({ pushed: true });
+              } else if (row.status === 'cv_rejected' && !(cvRejected.get(row.id) && cvRejected.get(row.id).earlier)) {
+                rs.record({ rejected: true });
+              }
+            } catch { /* the counters are reporting only */ }
+          }
+        }
+      }
+    }
+    const rsvSummary = rsvP2.summary({ rows: phaseResults, catererP1, reedP1, held: resurfaceHeld });
+
     // ---- Step 6: results ---------------------------------------------------------------------
     const completedAt = new Date().toISOString();
     const runtimeSecs = Math.round((new Date(completedAt) - new Date(startedAt)) / 1000);
@@ -1286,6 +1356,7 @@ async function run(queuePathArg, injected) {
       // cvRejected is the TOTAL of the queue: every candidate rejected by CV screening, including those rejected before a hold. cvScreen counts the
       // decisions taken in THIS run only (reject = would reject/rejected now); rejectedEarlier is the difference, so the two always reconcile:
       // cvRejected = cvScreen.rejected + cvScreen.rejectedEarlier in mode on. run_results.skipped carries cvRejected (the dashboard funnel explains every candidate).
+      ...(rsvSummary ? { resurfaced: rsvSummary.block } : {}),
       ...(cvSummary ? { cvRejected: cvRejectedCount, cvScreen: { ...cvSummary, rejectedEarlier: cvRejectedEarlier, scope: 'decisions taken in this run only; cvRejected is every candidate of the queue that CV screening rejected, including rejections made before a hold (rejectedEarlier)' } } : {}),
       // Per-source breakdown: always emitted for caterer/both (reed/both) runs even with 0 candidates.
       catererStats: (() => {
@@ -1300,6 +1371,7 @@ async function run(queuePathArg, injected) {
           errors: catCands.filter(r => r.status === 'error' || r.downloadError).length,
           phase1: { pagesScraped: catererP1.pagesScraped ?? 0, approved: catererP1.approved ?? 0,
             skippedDb: catererP1.skippedDb ?? 0, skippedReview: catererP1.skippedReview ?? 0 },
+          ...(rsvSummary && rsvSummary.caterer ? { resurfaced: rsvSummary.caterer } : {}),
         };
       })(),
       reedStats: (() => {
@@ -1323,6 +1395,7 @@ async function run(queuePathArg, injected) {
             noPermit: reedP1.noPermit ?? 0,
             authFailed: reedP1.authFailed || false,
             authFailureReason: reedP1.authFailureReason || null },
+          ...(rsvSummary && rsvSummary.reed ? { resurfaced: rsvSummary.reed } : {}),
         };
       })(),
       timing,
@@ -1522,6 +1595,7 @@ async function run(queuePathArg, injected) {
     console.log(`Errors:                   ${totalErrCount} (download ${dlErrCount}, push ${pushErrCount})`);
     console.log(`Total processed:  ${candidates.length}`);
     console.log(`CV/JSON cleaned:  ${cleanedCandidates} candidate(s) | CV attach failures kept: ${attachFailures}`);
+    if (rsvSummary) console.log(rsvP2.line(rsvSummary.block));
     if (cvSummary) console.log(`CV screening (${cvMode}): ${cvRejectedCount} rejected and not pushed | screened ${cvSummary.screened} | forced ${cvSummary.forced} | fallback ${cvSummary.fallback} (approved ${cvSummary.policyApprove}, rejected ${cvSummary.policyReject})`);
     console.log(`Results saved to: ${resultsPath}`);
 

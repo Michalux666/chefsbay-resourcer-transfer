@@ -132,6 +132,30 @@ function seenReedCandidate(reedId) {
   }
 }
 
+// The role-scoped second look (docs/RESURFACE.md): a Reed candidate whose CV was rejected for ANOTHER role, never pushed to Zoho, who is not known for
+// this role. Empty while CV_RESURFACE or CV_SCREEN=on is off, and on any error (the old skip). The daily cap holds some back (counted, alerted once a day).
+function resurfaceIdsForPage(pageCandidates, jobTitle) {
+  try {
+    const rs = require('./lib/resurface');
+    if (!rs.active()) return new Set();
+    const r = candidateDb.resurfaceBatchReed(pageCandidates.map((c) => c.id), jobTitle);
+    if (r.capped) {
+      rs.record({ stop: 'capped', n: r.capped });
+      if (rs.alertStopped({ why: 'cap', detail: `${jobTitle}.` })) out('ALERT: the daily cap of resurfaced candidates was reached');
+    }
+    return new Set(r.resurface.map(String));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+// A resurfaced candidate that the snippet screening rejects for this role is recorded for this role (Reed keeps no row for any other rejection), so it is not screened for it again.
+function recordResurfaceReject(cand, jobTitle) {
+  try {
+    require('./lib/resurface').recordSnippetReject(candidateDb.getDb(), { source: 'reed', id: cand.id, jobTitle });
+  } catch (e) { log(`WARN: could not record the rejection of resurfaced candidate ${cand.id}: ${e.message}`); }
+}
+
 // Short, secret-free description of why the first page failed: HTTP status and API error code, or the error code of the failure.
 function firstPageFailureReason(err) {
   const m = /"errorCode"\s*:\s*"?(\d{3,6})/.exec(String(err && err.message));
@@ -708,6 +732,7 @@ async function main(argv) {
       screeningModel: 'unknown',
     };
     const cvCache = new Map();
+    const resurfaceStats = { eligible: 0 };
     const approvedIds = new Set();
     let apiFailureCount = 0;
     let pageFetchFailures = 0; // search pages that could not be fetched (after the retries of reed-browser-fetch)
@@ -751,8 +776,10 @@ async function main(argv) {
       // Page-local counters: applied to stats only once the page is settled, so a retried page is not double counted.
       const pg = { inDb: 0, crossDedup: 0, noPermit: 0 };
       const toScreen = [];
+      const resurfaceIds = resurfaceIdsForPage(pageCandidates, jobTitle);
       for (const cand of pageCandidates) {
-        if (approvedIds.has(String(cand.id)) || checkByReedId(cand.id)) {
+        const again = resurfaceIds.has(String(cand.id)) && !approvedIds.has(String(cand.id));
+        if (approvedIds.has(String(cand.id)) || (checkByReedId(cand.id) && !again)) {
           pg.inDb++;
           log(`  [${cand.id}] SKIP (already in DB)`);
           continue;
@@ -767,6 +794,11 @@ async function main(argv) {
           pg.noPermit++;
           log(`  [${cand.id}] SKIP (no work permit)`);
           continue;
+        }
+        if (again) {
+          cand._resurfaced = true;
+          resurfaceStats.eligible++;
+          log(`  [${cand.id}] RESURFACE (CV rejected for another role, never pushed): screened again for this role`);
         }
         toScreen.push(cand);
       }
@@ -852,6 +884,7 @@ async function main(argv) {
             noticePeriod: cand.noticePeriod,
             lastLogin: cand.lastLogin,
             screeningReason: reason,
+            ...(cand._resurfaced ? { resurfaced: true } : {}),
           });
 
           if (cvLimit && approvedCandidates.length >= cvLimit) {
@@ -863,6 +896,7 @@ async function main(argv) {
           stats.rejected++;
           out(`    x [${cand.id}] - REJECTED: ${reason}`);
           seenReedCandidate(cand.id);
+          if (cand._resurfaced) recordResurfaceReject(cand, jobTitle);
         }
       }
 
@@ -895,6 +929,9 @@ async function main(argv) {
       phase1CompletedAt,
     };
     if (stats.screeningHalted) phase1Stats.screeningHalted = true;
+    // only when the second look met a candidate in this run: otherwise the queue is exactly what it always was
+    const resurfacedApproved = approvedCandidates.filter((c) => c.resurfaced).length;
+    if (resurfaceStats.eligible || resurfacedApproved) phase1Stats.resurfaced = { eligible: resurfaceStats.eligible, candidates: resurfacedApproved };
     if (noPageFetched) { phase1Stats.failed = true; phase1Stats.failureReason = noPageFetched; phase1Stats.errors = Math.max(1, phase1Stats.errors); }
     const queueData = writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, searchDate, approvedCandidates, phase1Stats);
     const marked = markApprovedSeen(queueData.outputPath, approvedCandidates);

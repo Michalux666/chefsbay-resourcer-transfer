@@ -308,6 +308,27 @@ test('digest names the Reed attempts that failed today, and stays silent about R
   assert.ok(!b.lines.find((l) => l.includes('daily digest')).includes('Reed attempts that failed'));
 });
 
+test('C7 the digest has one line on the role-scoped second look, only on a day it did something (and only for that London day)', async (t) => {
+  const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  const ymd = require(path.join(H.SRC_SCRIPTS, 'lib', 'time.js')).londonParts(new Date(a.clock())).ymd;
+  await a.run();
+  const quiet = a.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'));
+  assert.ok(quiet && !/Resurfaced today/.test(quiet), 'no counter file: no line');
+  const b = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  H.writeJson(path.join(b.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: ymd, started: 12, caterer: 9, reed: 3, charged: 7, notCharged: 4, unknown: 1, credits: 7, reedViews: 2, capped: 5, reserve: 0, unreadable: 0, pushed: 6, rejected: 5 }, history: [] });
+  await b.run();
+  const d = b.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'));
+  assert.match(d, /Resurfaced today \(unlocked earlier, rejected for another role, screened again\): 12 started, charged 7, not charged 4, charge unknown 1; credits spent 7, Reed views 2; pushed 6, rejected again 5; held back 5 \(cap, reserve or unreadable balance\)\./);
+  const c = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  H.writeJson(path.join(c.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: '2026-09-28', started: 12 }, history: [] });
+  await c.run();
+  assert.ok(!/Resurfaced today/.test(c.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'))), 'yesterday is not today');
+  const z = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  H.writeJson(path.join(z.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: ymd, started: 0 }, history: [] });
+  await z.run();
+  assert.ok(!/Resurfaced today/.test(z.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'))), 'a day with nothing to say has no line');
+});
+
 test('digest survives a missing database and never runs in quiet hours unless forced', async (t) => {
   const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 22, 30), fresh: true });
   await a.run();

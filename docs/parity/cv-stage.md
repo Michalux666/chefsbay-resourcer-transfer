@@ -27,7 +27,7 @@ Settings (registered in `docs/ENV.md`): `CV_SCREEN` (default `shadow`), `CV_SCRE
 | 901- Step 6: results file | Step 6; two optional keys `cvRejected` and `cvScreen` when the stage ran | absent when the mode is `off` |
 | 1253 Step 7.5: chat report | `notify()` alerts | the stage's alert keys are in section 5 |
 | `candidates-db.js` `rejectCandidateForTitle` (166-172; `origin` `'pipeline'`) | `lib/cv/phase2.js` `recordRejection` (origin `cv:<reason codes>`, `reed_id` for Reed) | same table, same scoping by job title, same "idempotent" insert; the schema is never changed; `reason_code` is filled only when the optional column exists |
-| `candidates-db.js` `checkCandidatesBatchScoped` (`unlocked = 1` is always skipped) | unchanged | why a rejected person is not offered again for another role (`docs/CV-SCREENING.md` section 6) |
+| `candidates-db.js` `checkCandidatesBatchScoped` (`unlocked = 1` is always skipped) | unchanged in Update B; CHANGED in Update E (2026-10-01, `CV_RESURFACE`, only with `CV_SCREEN=on`): an unlocked, never-pushed candidate rejected for another role is not skipped for a role they were not judged for | decisions RS-1 to RS-4 (`docs/RESURFACE.md`); `CV_RESURFACE=off` is the old rule exactly |
 | `lib/cv-retention.js` `removeCandidateArtifacts` | called by Phase 2 `removeCvArtifacts` for a reject | the one place a candidate's CV and JSON are deleted |
 | `ai-review.js` (snippet, before and after the unlock) | unchanged | the stage shares nothing with it but the HTTP helper, the error classes, the halt reason strings and the pool helper (section 2b) |
 

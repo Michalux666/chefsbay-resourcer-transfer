@@ -123,7 +123,7 @@ async function main() {
   log({ event: 'call', argv, session, cmd, script: script ? script.slice(0, 6000) : undefined, env: seenEnv() });
 
   if (cmd === 'close') {
-    state = { alive: false, url: 'about:blank', page: 'blank', loggedIn: false, hasFingerprint: false, bannerDismissed: false, counters: state.counters, ruleHits: state.ruleHits };
+    state = { alive: false, url: 'about:blank', page: 'blank', loggedIn: false, hasFingerprint: false, bannerDismissed: false, counters: state.counters, ruleHits: state.ruleHits, spent: state.spent };
     saveState();
     if (scn.site && scn.site.dnsBrokenUntilClose) { scn.site.dnsBroken = false; scn.site.dnsBrokenUntilClose = false; try { fs.writeFileSync(F_SCN, JSON.stringify(scn, null, 2)); } catch { /* ignore */ } }
     return finish(0, '\u2713 Browser closed');
