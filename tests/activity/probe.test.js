@@ -1,7 +1,7 @@
 'use strict';
 // tools/activity-probe.js (docs/OPERATIONS.md, docs/ACTIVITY.md): what the "active within" windows really do. Read-only, counts and fixed
 // strings only, refuses while the pipeline is busy. Everything here runs against fake adapters; the real adapters are exercised by the
-// end-to-end rehearsal (tests/e2e/20-activity.e2e.js) against the fake Caterer and Reed sites.
+// end-to-end rehearsal (tests/e2e/21-activity.e2e.js) against the fake Caterer and Reed sites.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

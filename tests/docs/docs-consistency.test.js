@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-RESCREEN.md', 'docs/RESCREEN.md', 'docs/UPDATE-E.md', 'docs/RESURFACE.md', 'docs/ACTIVITY.md', 'docs/UPDATE-G.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-RESCREEN.md', 'docs/RESCREEN.md', 'docs/UPDATE-E.md', 'docs/RESURFACE.md', 'docs/UPDATE-F.md', 'docs/ROLESCOPE.md', 'docs/ACTIVITY.md', 'docs/UPDATE-G.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -907,6 +907,163 @@ test('UPDATE-E.md copies exactly the installed files that changed since the prev
   assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
   const words = ['zero', 'one', 'two', 'three', 'four', 'five'];
   assert.ok(note.includes(`this release changes exactly ${words[profile.length]}: `), 'the note says how many installed files change, and the number is right');
+});
+
+// ---- Update F: the role scope (docs/ROLESCOPE.md, docs/UPDATE-F.md) ---------------------------------------------------------------------------------
+
+test('ROLESCOPE.md: the traceability matrix names real tests (every line of the owner and of the brief has a row), and the documents say plainly what the setting controls and what cannot be proven offline', () => {
+  const t = read('docs/ROLESCOPE.md');
+  const from = t.indexOf('## 9. What was agreed and where it is proven');
+  const to = t.indexOf('### 9b.');
+  assert.ok(from > 0 && to > from, 'section 9 exists');
+  const rows = t.slice(from, to).split('\n').filter((l) => /^\| (OD|R-C)\d+ \|/.test(l)).map((l) => l.split(' | ').map((c) => c.replace(/^\|\s*|\s*\|$/g, '').trim()));
+  assert.ok(rows.length >= 60, `${rows.length} matrix rows`);
+  const lines = new Set();
+  for (const r of rows) {
+    assert.equal(r.length, 4, `a row has four cells: ${r[0]} ${String(r[1]).slice(0, 40)}`);
+    lines.add(r[0]);
+    const file = r[2].replace(/`/g, '');
+    const name = r[3].replace(/^`|`$/g, '');
+    assert.ok(exists(file), `${file} does not exist`);
+    if (/^\(not a repository test\)$/.test(name)) continue;
+    assert.ok(read(file).includes(name), `${file} has no test named: ${name}`);
+  }
+  for (let i = 1; i <= 5; i += 1) assert.ok(lines.has(`OD${i}`), `no matrix row for OD${i}`);
+  for (let i = 1; i <= 9; i += 1) assert.ok(lines.has(`R-C${i}`), `no matrix row for R-C${i}`);
+  // the status table has a row for every line
+  const status = t.slice(t.indexOf('### 9.0 Status of each line'), t.indexOf('| Line | What was agreed |'));
+  for (const id of ['OD1', 'OD2', 'OD3', 'OD4', 'OD5', 'R-C1', 'R-C2', 'R-C3', 'R-C4', 'R-C5', 'R-C6', 'R-C7', 'R-C8', 'R-C9']) assert.ok(status.includes(`| **${id}** |`), `no status for ${id}`);
+  // what cannot be proven offline names the first live signal
+  assert.match(t, /## 10\. What cannot be proven offline, and the first live signal for each/);
+  assert.match(t, /The first live signal/);
+  // plain statements: what the setting controls, what has no switch, that it needs no CV_SCREEN, that the same role is never charged twice
+  assert.match(t, /controls ONE thing/);
+  assert.match(t, /has no switch/);
+  assert.match(t, /independent of `CV_SCREEN`|does not depend on `CV_SCREEN`/);
+  assert.match(t, /never screened \(or paid for\) again/);
+  assert.match(t, /Reed was found to violate \(1\)/);
+  // the settings are in ENV.md with the defaults of the code
+  const env = read('docs/ENV.md');
+  assert.match(env, /^\| `ROLE_SCOPE_LEGACY` \| `on` /m);
+  assert.match(env, /^\| `ROLE_SCOPE_MIN_AGE_DAYS` \| `14` /m);
+  assert.match(env, /^\| `ROLE_SCOPE_REED_MAX_PER_RUN` \| `100` /m);
+  assert.match(read('resourcer/scripts/reed-phase1.js'), /ROLE_SCOPE_REED_MAX_PER_RUN', 100\)/);
+  const rs = require(path.join(REPO, 'resourcer/scripts/lib/resurface.js'));
+  assert.equal(rs.DEFAULT_MIN_AGE_DAYS, 14);
+  assert.equal(rs.MIN_AGE_FLOOR_DAYS, 8);
+  assert.equal(rs.ORIGIN_REED_SNIPPET, 'reed:snippet');
+  assert.equal(rs.ORIGIN_REED_APPROVED, 'reed:approved');
+  // the minimum age is beyond the stranded recovery window (7 days), as the document says
+  assert.match(read('resourcer/scripts/recover-stranded-phase1.js'), /MAX_AGE_DAYS\s*=\s*7;/);
+  assert.ok(rs.MIN_AGE_FLOOR_DAYS > 7 && rs.DEFAULT_MIN_AGE_DAYS > 7);
+  // the limits the document names exist, and K-RS3 and K-RS7 say they are resolved
+  const k = read('docs/KNOWN-LIMITS.md');
+  for (let i = 1; i <= 13; i += 1) assert.match(k, new RegExp(`^\\| K-RL${i} \\|`, 'm'), `K-RL${i}`);
+  assert.match(k, /^\| K-RS3 \| RESOLVED by Update F/m);
+  assert.match(k, /^\| K-RS7 \| RESOLVED by Update F/m);
+  assert.match(k, /K-RL1 \| OPEN, UNVERIFIED-LIVE\./);
+  assert.match(k, /FIRST LIVE SIGNAL: the first day a legacy person is looked at/);
+});
+
+test('DECISIONS section 18: RL-1 to RL-5 are the instructions of the owner of 2026-10-01, every other row says it is a design default, not yet confirmed by the owner', () => {
+  const d = read('docs/DECISIONS.md');
+  const sec = d.slice(d.indexOf('## 18. The role scope'));
+  assert.ok(sec.length > 1000);
+  const row = (id) => sec.split('\n').find((l) => l.startsWith(`| ${id} |`));
+  for (const id of ['RL-1', 'RL-2', 'RL-3', 'RL-4', 'RL-5']) assert.match(row(id), new RegExp(`^\\| ${id} \\| 2026-10-01, the owner[.,:( ]`), id);
+  assert.match(sec, /Every other row is a design default, not yet confirmed by the owner/);
+  for (let i = 6; i <= 17; i += 1) {
+    const r = row(`RL-${i}`);
+    assert.ok(r, `RL-${i}`);
+    assert.ok(!/2026-10-01, the owner/.test(r.slice(0, 60)), `RL-${i} is not an instruction of the owner`);
+  }
+  assert.match(row('RL-7'), /the number 14 is the assistant's, not the owner's/);
+  assert.match(row('RL-10'), /NOT counted against `CV_RESURFACE_MAX_PER_DAY`/);
+});
+
+test('UPDATE-F.md: only commands this operator may run, code before checks before resume, no setting is changed, nothing is copied, the old commit and digest are recorded, and a rollback that needs none', () => {
+  const t = read('docs/UPDATE-F.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 20, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the update changes no setting: ${b.slice(0, 80)}`);
+    // the update copies exactly two profile files: AGENTS.md and the resourcer-ops skill
+    if (/(^|\s)cp\s/.test(b)) assert.ok(b.startsWith('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md') || b.startsWith('cp -r /opt/data/profiles/resourcer/workspace/hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/'), `the update copies only AGENTS.md and the skill: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  const prose = t.split('/opt/hermes/bin/hermes -p resourcer').join('');
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(prose), 'a bare hermes command');
+  const steps = t.indexOf('## 1. Before you start');
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const record = at('git -C /opt/data/profiles/resourcer/workspace rev-parse HEAD');
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const copyAgents = at('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md');
+  const copySkill = at('cp -r /opt/data/profiles/resourcer/workspace/hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/');
+  const full = at('check-manifest.js --expect <NEW_DIGEST>');
+  const selfTest = at('scripts/cv-review.js --self-test');
+  const report = at('scripts/cv-report.js --days 1');
+  const claim = at('candidates-db.js resurface-claim caterer 999999999999 Canary');
+  const dedupe = at('candidates-db.js check-batch-scoped 999999999999 Canary');
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick');
+  assert.ok(list < pause && pause < record && record < pull && pull < verify && verify < copyAgents && copyAgents < copySkill && copySkill < full && full < selfTest && selfTest < report && report < claim && claim < dedupe && dedupe < resume,
+    'order: list, pause, record, pull, verify, copy the two profile files, full check, checks, resume');
+  for (const ph of ['<NEW_DIGEST>', '<OLD_COMMIT>', '<OLD_DIGEST>']) assert.ok(t.includes(ph), ph);
+  // the release it starts from: the commit and the digest are recorded and compared
+  assert.match(t, /START with `bc3e750`/);
+  assert.match(t, /`8d33312998b1c90becf4779898517e69d9eeb8a9d2d0bef16599b3533c99b4ab`/);
+  assert.match(t, /Updating bc3e750\.\.<new id>/);
+  assert.match(t, /never set `ROLE_SCOPE_LEGACY`, `ROLE_SCOPE_MIN_AGE_DAYS`, `ROLE_SCOPE_REED_MAX_PER_RUN`/);
+  // the owner's order to switch CV screening on: a step of its own, the owner's, after the resume, never in a command block and never the operator's
+  const step10 = at('## 10. CV screening on');
+  assert.ok(step10 > resume && step10 < at('## Rolling back'), 'step 10 comes after the resume and before the rollback');
+  assert.match(t.slice(step10), /config set CV_SCREEN on/);
+  assert.match(t.slice(step10), /HUMAN, never the operator/);
+  assert.match(t, /It works with `CV_SCREEN` in any mode/);
+  assert.match(t, /There is no database migration/);
+  assert.match(t, /THE FIRST LIVE SIGNAL/);
+  assert.match(t, /Reed profile views/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(rollback, /nothing to set back/);
+  assert.ok(read('docs/INSTALL.md').includes('docs/UPDATE-F.md') && read('HANDOFF.md').includes('docs/UPDATE-F.md'), 'INSTALL and HANDOFF point at the note');
+});
+
+test('UPDATE-F.md copies exactly the installed files that changed since the release it starts from (AGENTS.md and the resourcer-ops skill), and says nothing else changed', (t) => {
+  // pinned to the release that is installed on the instance (bc3e750): the branch point from main stops working once main is fast-forwarded to this release
+  const base = gitLines(['rev-parse', '--verify', '--quiet', 'bc3e750^{commit}']);
+  if (!base || !base[0]) { t.skip('no git history with the release commit bc3e750 here'); return; }
+  const changed = gitLines(['diff', '--name-only', base[0]]);
+  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+  if (!changed || !added) { t.skip('no git history here'); return; }
+  const files = changed.concat(added);
+  const note = read('docs/UPDATE-F.md');
+  const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');
+  assert.deepEqual(wrappers, [], 'a cron wrapper, the job list or SOUL.md changed: the note says they did not');
+  assert.deepEqual(files.filter((f) => f.startsWith('plugin/')), [], 'the dashboard plugin changed: the note says it did not');
+  assert.ok(!files.includes('resourcer/package.json'), 'package.json changed: the note says no npm install');
+  assert.ok(!files.includes('resourcer/scripts/migrate-schema.js'), 'the schema script changed: the note says no migration');
+  const profile = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example').sort();
+  assert.deepEqual(profile, ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md'], 'the files that the profile keeps a copy of and that changed: exactly the two the note copies');
+  assert.ok(note.includes('this release changes exactly two'), 'the note says which installed copies change');
+  assert.ok(note.includes('hermes/AGENTS.md') && note.includes('resourcer-ops'), 'the note names them');
+  const ag = read('hermes/AGENTS.md');
+  assert.ok(/`ROLE_SCOPE_LEGACY` and `ROLE_SCOPE_MIN_AGE_DAYS`/.test(ag), 'AGENTS.md lists the two settings as the owner\'s');
+  assert.ok(ag.includes('it works in EVERY `CV_SCREEN` mode'), 'AGENTS.md says the role scope works in every CV_SCREEN mode');
+  for (const f of ['resourcer/scripts/lib/resurface.js', 'docs/ROLESCOPE.md', 'resourcer/scripts/reed-phase1.js', 'resourcer/candidates-db.js']) assert.ok(files.includes(f), `${f}: the files the pull step names are in the release`);
+});
+
+test('no alert key and no exit code is added by the role scope: the code raises no key of its own', () => {
+  const keys = [...codeAlertKeys()];
+  assert.ok(keys.length > 40);
+  assert.ok(!keys.some((k) => /role-?scope|legacy/i.test(k)), 'no alert key of the role scope');
+  assert.ok(keys.includes('cv-resurface-cap-reached'), 'the one existing key is what the role scope raises');
 });
 
 // ---- Update G (the search window and the CV limit: docs/ACTIVITY.md, docs/UPDATE-G.md) ------------------------------------------------------------

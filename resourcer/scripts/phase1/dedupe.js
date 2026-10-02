@@ -21,6 +21,7 @@ async function dedupePage(ctx, cards) {
   const { st, p, out } = ctx;
   const inDbSet = new Set();
   const resurfaceSet = new Set();
+  const legacySet = new Set(); // the part of resurfaceSet whose role was never recorded (docs/ROLESCOPE.md)
   let batchOk = false;
 
   const pageIds = cards.map((c) => idStr(c && c.id)).join(',');
@@ -35,6 +36,7 @@ async function dedupePage(ctx, cards) {
         for (const bid of obj.inDb) inDbSet.add(String(bid));
         // the role-scoped second look (only present when it found something): unlocked, rejected for another role, never pushed
         if (Array.isArray(obj.resurface)) for (const rid of obj.resurface) resurfaceSet.add(String(rid));
+        if (Array.isArray(obj.legacy)) for (const rid of obj.legacy) if (resurfaceSet.has(String(rid))) legacySet.add(String(rid));
         if (Number(obj.resurfaceCapped) > 0) resurface.noteCapped(ctx, Number(obj.resurfaceCapped));
         resurface.warnOnce(ctx);
         if (resurfaceSet.size) {
@@ -45,6 +47,7 @@ async function dedupePage(ctx, cards) {
             out(`    RESURFACE: ${resurfaceSet.size} candidate(s) left skipped (${g.why === 'unreadable' ? 'the balance could not be read' : 'the balance is below the reserve'}); not screened`);
             for (const rid of resurfaceSet) inDbSet.add(rid); // left skipped, exactly as before the second look existed
             resurfaceSet.clear();
+            legacySet.clear();
           }
         }
         batchOk = true;
@@ -84,7 +87,12 @@ async function dedupePage(ctx, cards) {
     }
 
     const again = resurfaceSet.has(idStr(cardId));
-    if (again) {
+    const legacy = again && legacySet.has(idStr(cardId));
+    if (legacy) {
+      out('    ROLE SCOPE: unlocked earlier, the role is not recorded and nothing was ever pushed - screened for this role (one more look, recorded for this role)');
+      resurface.stats(ctx).eligible++;
+      resurface.stats(ctx).legacyScreened++;
+    } else if (again) {
       out('    RESURFACE: unlocked earlier and rejected for another role - screened again for this role');
       resurface.stats(ctx).eligible++;
     }
@@ -100,6 +108,7 @@ async function dedupePage(ctx, cards) {
       experience: card.experience,
       name: card.name,
       ...(again ? { resurfaced: true } : {}),
+      ...(legacy ? { legacy: true } : {}),
     });
   }
   return { candidatesForReview };

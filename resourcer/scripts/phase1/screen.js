@@ -6,6 +6,7 @@ const fsx = require('../lib/fsx');
 const { runNode } = require('./proc');
 const { scriptPath } = require('./config');
 const { dbWrite, idStr } = require('./db');
+const resurface = require('./resurface');
 const { safeText } = require('./util');
 const { writeStatus } = require('./queue');
 const { KINDS, raiseAlert, markIncomplete } = require('./incomplete');
@@ -201,8 +202,14 @@ async function screenPage(ctx, cands) {
     if (!approved) {
       out(`    REJECTED pre-unlock: ${reason}`);
       await dbWrite(ctx, [cand.unlockedPrev ? 'add' : 'seen', idStr(cand.id)]);
-      // Scoped to THIS job title so the candidate stays eligible for other roles (2026-08-03).
-      await dbWrite(ctx, ['reject-title', idStr(cand.id), p.JOB_TITLE]);
+      if (cand.legacy) {
+        // a person whose role was never recorded, screened once more for THIS role (docs/ROLESCOPE.md): the rejection is recorded for this role in the
+        // form the role scope reads (origin resurface:snippet), so they stay eligible for any other role and are never screened for this one again
+        await resurface.legacyRejected(ctx, cand);
+      } else {
+        // Scoped to THIS job title so the candidate stays eligible for other roles (2026-08-03).
+        await dbWrite(ctx, ['reject-title', idStr(cand.id), p.JOB_TITLE]);
+      }
       st.skippedReview++;
       st.consecutiveRejections++;
       continue;

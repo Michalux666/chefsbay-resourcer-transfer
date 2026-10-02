@@ -1,6 +1,6 @@
 # The search window ("active within") and the CV limit
 
-Audience: the owner. This is what was wrong, what changed (Update G), what you can set, what is still unverified, and how the first live run shows it. The install note for the operator is `docs/UPDATE-G.md`; the commands and the alert are in `docs/OPERATIONS.md` section 5.1 and section 11; the decisions are `docs/DECISIONS.md` section 18 (every number and mapping there is a design default, not yet confirmed by the owner, except your instruction of 2026-10-01); the open limits are `docs/KNOWN-LIMITS.md` section 13.
+Audience: the owner. This is what was wrong, what changed (Update G), what you can set, what is still unverified, and how the first live run shows it. The install note for the operator is `docs/UPDATE-G.md`; the commands and the alert are in `docs/OPERATIONS.md` section 5.1 and section 11; the decisions are `docs/DECISIONS.md` section 19 (every number and mapping there is a design default, not yet confirmed by the owner, except your instruction of 2026-10-01); the open limits are `docs/KNOWN-LIMITS.md` section 14.
 
 ## 1. What was wrong
 
@@ -68,4 +68,4 @@ The probe is `tools/activity-probe.js` (read only: search pages only, no unlock,
 
 ## 6. Where it is proven
 
-`tests/activity/mapping.test.js` (labels, config validation, setting, Reed mapping, page reader, alert once a day), `url.test.js` (the URL and the run params: scheduled byte for byte as before, one-off carries the id, all and off), `reed-handoff.test.js` (the Reed arguments, every label, the stored defaults unchanged, the lowered limit), `selfcheck.test.js` (match yes, no, unreadable inside a real phase 1 run), `results.test.js` (the block reaches the run results), `probe.test.js` (the probe, refusal while busy, no personal data) and the whole-pipeline rehearsal `tests/e2e/20-activity.e2e.js` (a one-off request for 12 months and 30 CVs, a scheduled territory, the three settings, an unmapped window, a mismatch).
+`tests/activity/mapping.test.js` (labels, config validation, setting, Reed mapping, page reader, alert once a day), `url.test.js` (the URL and the run params: scheduled byte for byte as before, one-off carries the id, all and off), `reed-handoff.test.js` (the Reed arguments, every label, the stored defaults unchanged, the lowered limit), `selfcheck.test.js` (match yes, no, unreadable inside a real phase 1 run), `results.test.js` (the block reaches the run results), `probe.test.js` (the probe, refusal while busy, no personal data) and the whole-pipeline rehearsal `tests/e2e/21-activity.e2e.js` (a one-off request for 12 months and 30 CVs, a scheduled territory, the three settings, an unmapped window, a mismatch).

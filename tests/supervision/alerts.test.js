@@ -329,6 +329,27 @@ test('C7 the digest has one line on the role-scoped second look, only on a day i
   assert.ok(!/Resurfaced today/.test(z.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'))), 'a day with nothing to say has no line');
 });
 
+test('RL8 the digest line also says what the role scope did (people whose role was never recorded): looks given, rejected again, pushed, charges; still ONE line, and a day with only such people has it too', async (t) => {
+  const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  const ymd = require(path.join(H.SRC_SCRIPTS, 'lib', 'time.js')).londonParts(new Date(a.clock())).ymd;
+  H.writeJson(path.join(a.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: ymd, started: 3, caterer: 3, charged: 3, credits: 3, pushed: 2, rejected: 1, legacyCaterer: 4, legacyReed: 6, legacyRejected: 5, legacyPushed: 3, legacyCharged: 5, legacyCredits: 3, legacyViews: 2 }, history: [] });
+  await a.run();
+  const d = a.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'));
+  assert.match(d, /Role scope \(role never recorded, one more look\): 10 given \(Caterer 4, Reed 6\), rejected again 5, pushed 3, charged 5, credits 3, Reed views 2\./);
+  assert.equal(d.split('\n').filter((l) => /Resurfaced today/.test(l)).length, 1, 'one line');
+  assert.equal(d.split('\n').filter((l) => /Role scope/.test(l)).length, 1);
+  assert.ok(/Resurfaced today[^\n]*Role scope/.test(d), 'on the same line');
+  const b = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  H.writeJson(path.join(b.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: ymd, legacyReed: 2, legacyRejected: 2 }, history: [] });
+  await b.run();
+  const e = b.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'));
+  assert.match(e, /Resurfaced today[^\n]*0 started[^\n]*Role scope \(role never recorded, one more look\): 2 given \(Caterer 0, Reed 2\), rejected again 2, pushed 0, charged 0, credits 0, Reed views 0\./);
+  const c = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 18, 0), fresh: true });
+  H.writeJson(path.join(c.home, 'runtime', 'cv-resurface.json'), { version: 1, today: { day: ymd, started: 2, charged: 2, credits: 2, pushed: 1 }, history: [] });
+  await c.run();
+  assert.ok(!/Role scope/.test(c.lines.find((l) => l.includes('Resourcer daily digest 2026-09-29'))), 'without such people the line is exactly what it was');
+});
+
 test('digest survives a missing database and never runs in quiet hours unless forced', async (t) => {
   const a = mkAlerts(t, { start: H.londonEpoch(2026, 9, 29, 22, 30), fresh: true });
   await a.run();

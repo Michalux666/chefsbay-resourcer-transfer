@@ -25,8 +25,11 @@
 # 15 CV_SCREEN=on with the CV route refusing while the snippet route is healthy (one hold, the halt stays, no unlock after it, the recovery completes the queue),
 # 16 the Reed first-page failure (HTTP 400, code 50010): failed attempt, recovery, transient faults, an unsearchable place, no search page fetched,
 # 17 the re-screen of the pre-unlock rejections that Update A's review policy made because Jev was uncertain (tools/rescreen-policy-rejects.js): dry run, apply, queue, the next run, undo,
-# 18 the role-scoped second look at people rejected after an unlock (docs/RESURFACE.md): CV_SCREEN=on, a charging fake Caterer, seven searches; the standard world with the feature on and off in shadow and off mode.
-# 20 the search window and the CV limit reach both sources (docs/ACTIVITY.md): the read-only probe, a one-off request for 12 months and 30 CVs (the Caterer URL carries the mapped id and the fake page echoes it; Reed gets year and 30), a scheduled territory (the URL of main, byte for byte; Reed month and 20), CATERER_ACTIVITY_FILTER all and off, a window with no Caterer id, a page that echoes another window (one alert a day).
+# 18 the role-scoped second look at people rejected after an unlock (docs/RESURFACE.md): CV_SCREEN=on, a charging fake Caterer, seven searches; the standard world with the feature on and off in shadow and off mode,
+# 19 the role scope for people whose role was never recorded, Caterer AND Reed (docs/ROLESCOPE.md): both sources in one world at the shipped CV_SCREEN default (shadow), six searches, the old skip with ROLE_SCOPE_LEGACY=off,
+#    and the default and the switch compared with nothing legacy in the database. Against the previous release: bash tests/e2e-identity.sh <tree of that release> (not part of this run).
+# 20 the same world as 19 with CV_SCREEN=on (the role scope together with a CV stage that really rejects): the invariants only (nobody screened, charged or pushed twice for one role).
+# 21 the search window and the CV limit reach both sources (docs/ACTIVITY.md): the read-only probe, a one-off request for 12 months and 30 CVs (the Caterer URL carries the mapped id and the fake page echoes it; Reed gets year and 30), a scheduled territory (the URL of main, byte for byte; Reed month and 20), CATERER_ACTIVITY_FILTER all and off, a window with no Caterer id, a page that echoes another window (one alert a day).
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
 # at $E2E_VENV, default ~/hermes-sim-venv, and filled with pip), E2E_SEED (random-kill seed, default 20260929),

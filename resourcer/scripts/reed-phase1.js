@@ -53,6 +53,9 @@ const numEnv = (name, dflt) => {
 };
 // 2026-06-09: 30s aborted slow-but-valid captures (launcher up to ~30s + capture 45s); 90s covers both. Env override is for tests.
 const REFRESH_KILL_TIMEOUT_MS = () => numEnv('REED_REFRESH_TIMEOUT_MS', 90000);
+// The most people of whom the role was never recorded that ONE Reed run lets through to screening (docs/ROLESCOPE.md, K-RL4): bounds the run time of a sweep
+// through a territory of old profiles, and the rest keep the old skip until a later run. 100 is a design default, not an owner decision. 0 lets none through.
+const LEGACY_PER_RUN = () => Math.floor(numEnv('ROLE_SCOPE_REED_MAX_PER_RUN', 100));
 // Legacy login used fixed sleeps (~24s) under a 60s kill; the login now polls with larger ceilings, so it gets the refresh's 90s.
 const LOGIN_KILL_TIMEOUT_MS = () => numEnv('REED_LOGIN_TIMEOUT_MS', 90000);
 const LAUNCH_KILL_TIMEOUT_MS = () => numEnv('REED_LAUNCH_TIMEOUT_MS', 60000);
@@ -132,28 +135,43 @@ function seenReedCandidate(reedId) {
   }
 }
 
-// The role-scoped second look (docs/RESURFACE.md): a Reed candidate whose CV was rejected for ANOTHER role, never pushed to Zoho, who is not known for
-// this role. Empty while CV_RESURFACE or CV_SCREEN=on is off, and on any error (the old skip). The daily cap holds some back (counted, alerted once a day).
-function resurfaceIdsForPage(pageCandidates, jobTitle) {
+// The role scope of one page (docs/RESURFACE.md, docs/ROLESCOPE.md). A Reed row is the old "seen" ledger; since the role scope a rejection or an approval is
+// also recorded per job title (candidate_rejections, origin reed:snippet or reed:approved), and the skip reads both:
+//   again   screened again for this title and claimed in Phase 2 before the profile view: a CV rejection of another role (CV_RESURFACE, CV_SCREEN on), or a
+//           person whose role was never recorded (ROLE_SCOPE_LEGACY, default on); `legacy` is the part that is the second reason
+//   scoped  rejected or approved for another title only: screened as normal for this one (not switchable)
+//   judged  a row for this title exists: skipped for it
+// Everything empty on any error: the old skip (any Reed row skips). The daily cap holds some back (counted, alerted once a day).
+function roleScopeForPage(pageCandidates, jobTitle) {
+  const none = { again: new Set(), legacy: new Set(), scoped: new Set(), judged: new Set() };
   try {
     const rs = require('./lib/resurface');
-    if (!rs.active()) return new Set();
     const r = candidateDb.resurfaceBatchReed(pageCandidates.map((c) => c.id), jobTitle);
     if (r.capped) {
       rs.record({ stop: 'capped', n: r.capped });
       if (rs.alertStopped({ why: 'cap', detail: `${jobTitle}.` })) out('ALERT: the daily cap of resurfaced candidates was reached');
     }
-    return new Set(r.resurface.map(String));
+    const set = (a) => new Set((a || []).map(String));
+    return { again: set(r.resurface), legacy: set(r.legacy), scoped: set(r.scoped), judged: set(r.judged) };
   } catch (e) {
-    return new Set();
+    return none;
   }
 }
 
-// A resurfaced candidate that the snippet screening rejects for this role is recorded for this role (Reed keeps no row for any other rejection), so it is not screened for it again.
+// A resurfaced candidate that the snippet screening rejects for this role is recorded for this role (origin resurface:snippet), so it is not screened for it again.
 function recordResurfaceReject(cand, jobTitle) {
   try {
     require('./lib/resurface').recordSnippetReject(candidateDb.getDb(), { source: 'reed', id: cand.id, jobTitle });
   } catch (e) { log(`WARN: could not record the rejection of resurfaced candidate ${cand.id}: ${e.message}`); }
+}
+
+// Every other Reed snippet rejection is recorded per job title too (origin reed:snippet, docs/ROLESCOPE.md): the same profile under ANOTHER title is screened
+// as normal, under this one it is skipped. Written BEFORE the seen row: a kill between the two leaves a skip for this title, never a loop. A failed write
+// leaves the old state (the seen row, no title record: a person whose role is not recorded).
+function recordReedTitleRow(cand, jobTitle, origin) {
+  try {
+    require('./lib/resurface').recordSnippetReject(candidateDb.getDb(), { source: 'reed', id: cand.id, jobTitle, origin, onError: (e) => log(`WARN: could not record the ${origin} row of Reed candidate ${cand.id} (the person may be screened again for this title): ${String(e && e.message).slice(0, 120)}`) });
+  } catch (e) { log(`WARN: could not record the ${origin} row of Reed candidate ${cand.id}: ${e.message}`); }
 }
 
 // Short, secret-free description of why the first page failed: HTTP status and API error code, or the error code of the failure.
@@ -536,15 +554,20 @@ function writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, s
   return { outputPath, queueData };
 }
 
-// Approvals are marked seen only once the queue carrying them reads back, so a kill or failed write before that re-screens them.
-function markApprovedSeen(queuePath, approved) {
+// Approvals are marked seen only once the queue carrying them reads back, so a kill or failed write before that re-screens them. Each approval that is not
+// a claimed second look also gets its title row (reed:approved) FIRST, so the same title is never screened, viewed and charged twice for the same person;
+// a claimed one has its claim row written by Phase 2 before the profile view.
+function markApprovedSeen(queuePath, approved, jobTitle) {
   const written = fsx.readJson(queuePath, null);
   const inQueue = new Set(((written && Array.isArray(written.candidates)) ? written.candidates : []).map((c) => String(c.id)));
   let marked = 0;
   for (const cand of approved) {
     if (!inQueue.has(String(cand.id))) throw new Error(`approved queue ${path.basename(queuePath)} does not contain candidate ${cand.id}; approvals left unmarked`);
   }
-  for (const cand of approved) if (seenReedCandidate(cand.id)) marked++;
+  for (const cand of approved) {
+    if (!cand.resurfaced) recordReedTitleRow(cand, jobTitle, 'reed:approved');
+    if (seenReedCandidate(cand.id)) marked++;
+  }
   return marked;
 }
 
@@ -733,6 +756,7 @@ async function main(argv) {
     };
     const cvCache = new Map();
     const resurfaceStats = { eligible: 0 };
+    const scopeStats = { legacyScreened: 0, legacyRejected: 0, scopedScreened: 0, scopedRejected: 0 };
     const approvedIds = new Set();
     let apiFailureCount = 0;
     let pageFetchFailures = 0; // search pages that could not be fetched (after the retries of reed-browser-fetch)
@@ -774,12 +798,14 @@ async function main(argv) {
       out(`  [Page ${page}/${Math.min(maxPages, totalPages)}] ${pageCandidates.length} candidates fetched`);
 
       // Page-local counters: applied to stats only once the page is settled, so a retried page is not double counted.
-      const pg = { inDb: 0, crossDedup: 0, noPermit: 0 };
+      const pg = { inDb: 0, crossDedup: 0, noPermit: 0, legacy: 0, scoped: 0 };
       const toScreen = [];
-      const resurfaceIds = resurfaceIdsForPage(pageCandidates, jobTitle);
+      const scope = roleScopeForPage(pageCandidates, jobTitle);
       for (const cand of pageCandidates) {
-        const again = resurfaceIds.has(String(cand.id)) && !approvedIds.has(String(cand.id));
-        if (approvedIds.has(String(cand.id)) || (checkByReedId(cand.id) && !again)) {
+        const sid = String(cand.id);
+        const again = scope.again.has(sid) && !approvedIds.has(sid);
+        const scoped = !again && scope.scoped.has(sid) && !approvedIds.has(sid);
+        if (approvedIds.has(sid) || scope.judged.has(sid) || (checkByReedId(cand.id) && !again && !scoped)) {
           pg.inDb++;
           log(`  [${cand.id}] SKIP (already in DB)`);
           continue;
@@ -795,14 +821,29 @@ async function main(argv) {
           log(`  [${cand.id}] SKIP (no work permit)`);
           continue;
         }
+        if (again && scope.legacy.has(sid) && scopeStats.legacyScreened + pg.legacy >= LEGACY_PER_RUN()) {
+          pg.inDb++;
+          log(`  [${cand.id}] SKIP (already in DB; the limit of ${LEGACY_PER_RUN()} people of unrecorded role per run is reached: a later run)`);
+          continue;
+        }
         if (again) {
           cand._resurfaced = true;
           resurfaceStats.eligible++;
-          log(`  [${cand.id}] RESURFACE (CV rejected for another role, never pushed): screened again for this role`);
+          if (scope.legacy.has(sid)) {
+            cand._legacy = true;
+            pg.legacy++;
+            log(`  [${cand.id}] ROLE SCOPE (seen before, the role was never recorded, never pushed): screened once for this role`);
+          } else {
+            log(`  [${cand.id}] RESURFACE (CV rejected for another role, never pushed): screened again for this role`);
+          }
+        } else if (scoped) {
+          cand._scoped = true;
+          pg.scoped++;
+          log(`  [${cand.id}] ROLE SCOPE (rejected or approved for another role only, never pushed): screened as normal for this role`);
         }
         toScreen.push(cand);
       }
-      const applyPageCounters = () => { stats.inDb += pg.inDb; stats.crossDedup += pg.crossDedup; stats.noPermit += pg.noPermit; };
+      const applyPageCounters = () => { stats.inDb += pg.inDb; stats.crossDedup += pg.crossDedup; stats.noPermit += pg.noPermit; scopeStats.legacyScreened += pg.legacy; scopeStats.scopedScreened += pg.scoped; };
       out(`    -> ${pageCandidates.length - toScreen.length} skipped (${stats.inDb + pg.inDb} DB, ${stats.crossDedup + pg.crossDedup} cross-dedup), ${toScreen.length} to screen`);
 
       if (!toScreen.length) { applyPageCounters(); continue; }
@@ -885,6 +926,7 @@ async function main(argv) {
             lastLogin: cand.lastLogin,
             screeningReason: reason,
             ...(cand._resurfaced ? { resurfaced: true } : {}),
+            ...(cand._legacy ? { legacy: true } : {}),
           });
 
           if (cvLimit && approvedCandidates.length >= cvLimit) {
@@ -895,8 +937,18 @@ async function main(argv) {
         } else {
           stats.rejected++;
           out(`    x [${cand.id}] - REJECTED: ${reason}`);
-          seenReedCandidate(cand.id);
-          if (cand._resurfaced) recordResurfaceReject(cand, jobTitle);
+          if (cand._resurfaced && !cand._legacy) {
+            seenReedCandidate(cand.id);
+            recordResurfaceReject(cand, jobTitle);
+          } else {
+            recordReedTitleRow(cand, jobTitle, 'reed:snippet');
+            seenReedCandidate(cand.id);
+            if (cand._legacy) {
+              scopeStats.legacyRejected++;
+              try { require('./lib/resurface').record({ look: 'reed', legacyRejected: true }); } catch (e) { log(`WARN: could not count a legacy look: ${e.message}`); }
+            }
+            if (cand._scoped) scopeStats.scopedRejected++;
+          }
         }
       }
 
@@ -931,10 +983,15 @@ async function main(argv) {
     if (stats.screeningHalted) phase1Stats.screeningHalted = true;
     // only when the second look met a candidate in this run: otherwise the queue is exactly what it always was
     const resurfacedApproved = approvedCandidates.filter((c) => c.resurfaced).length;
-    if (resurfaceStats.eligible || resurfacedApproved) phase1Stats.resurfaced = { eligible: resurfaceStats.eligible, candidates: resurfacedApproved };
+    if (resurfaceStats.eligible || resurfacedApproved) {
+      phase1Stats.resurfaced = { eligible: resurfaceStats.eligible, candidates: resurfacedApproved };
+      const legacyApproved = approvedCandidates.filter((c) => c.legacy).length;
+      if (scopeStats.legacyScreened) phase1Stats.resurfaced.legacy = { screened: scopeStats.legacyScreened, rejectedAtSnippet: scopeStats.legacyRejected, candidates: legacyApproved };
+    }
+    if (scopeStats.scopedScreened) phase1Stats.roleScope = { scopedScreened: scopeStats.scopedScreened, scopedRejected: scopeStats.scopedRejected, scopedApproved: scopeStats.scopedScreened - scopeStats.scopedRejected };
     if (noPageFetched) { phase1Stats.failed = true; phase1Stats.failureReason = noPageFetched; phase1Stats.errors = Math.max(1, phase1Stats.errors); }
     const queueData = writeApprovedQueue(runId, jobTitle, location, distance, activeWithin, searchDate, approvedCandidates, phase1Stats);
-    const marked = markApprovedSeen(queueData.outputPath, approvedCandidates);
+    const marked = markApprovedSeen(queueData.outputPath, approvedCandidates, jobTitle);
     out(`[Reed Phase 1] approvals recorded as seen: ${marked}`);
 
     out('');

@@ -192,22 +192,24 @@ function resurfaceLib() {
 }
 
 /**
- * The same check with the second look applied: { skip, resurface, capped }.
+ * The same check with the second look and the role scope applied: { skip, resurface, legacy, capped }.
  *   skip       the ids to skip for this job title (without the ones in `resurface`)
- *   resurface  unlocked, never pushed, rejected for another role only: screened again for this one (empty unless CV_RESURFACE and CV_SCREEN=on)
+ *   resurface  unlocked, never pushed, not judged for this role: screened again for this one. Two reasons, both in this list: rejected for another role by the
+ *              CV stage (empty unless CV_RESURFACE and CV_SCREEN=on), or a person whose role was never recorded (ROLE_SCOPE_LEGACY, docs/ROLESCOPE.md)
+ *   legacy     the part of `resurface` that is the second reason
  *   capped     how many more the daily cap (CV_RESURFACE_MAX_PER_DAY) held back: they stay in `skip`, nothing is recorded against them
  */
 function classifyBatchScoped(ids, jobTitle) {
   const clean = ids.map(n => parseInt(n, 10)).filter(Boolean);
-  if (!clean.length) return { skip: [], resurface: [], capped: 0 };
+  if (!clean.length) return { skip: [], resurface: [], legacy: [], capped: 0 };
   return withDb(db => {
     const skip = skipBatchScoped(db, clean, jobTitle);
     const lib = resurfaceLib();
-    if (!lib) return { skip, resurface: [], capped: 0 };
+    if (!lib) return { skip, resurface: [], legacy: [], capped: 0 };
     const c = lib.classify(db, 'caterer', clean, jobTitle);
-    if (!c.resurface.length) return { skip, resurface: [], capped: c.capped };
+    if (!c.resurface.length) return { skip, resurface: [], legacy: [], capped: c.capped };
     const back = new Set(c.resurface);
-    return { skip: skip.filter(id => !back.has(id)), resurface: c.resurface, capped: c.capped };
+    return { skip: skip.filter(id => !back.has(id)), resurface: c.resurface, legacy: c.legacy || [], capped: c.capped };
   });
 }
 
@@ -215,11 +217,27 @@ function checkCandidatesBatchScoped(ids, jobTitle) {
   return classifyBatchScoped(ids, jobTitle).skip;
 }
 
-/** The second look for Reed ids (scripts/reed-phase1.js): { resurface, capped }, both empty while the switch is off. */
+/**
+ * The role scope for Reed ids (scripts/reed-phase1.js), one answer per page:
+ *   resurface  screened again for this title and claimed in Phase 2 before the profile view (a CV rejection of another role, or a person whose role was
+ *              never recorded: ROLE_SCOPE_LEGACY); `legacy` is the part that is the second reason
+ *   scoped     rejected or approved for another title only, recorded per title: screened as normal for this one (not switchable)
+ *   judged     already has a row for this title: skipped for it, whatever else is true
+ *   capped     how many the daily cap held back (CV-rejection looks only)
+ * Everything empty when the database cannot answer (the old skip: any row skips the candidate).
+ */
 function resurfaceBatchReed(ids, jobTitle) {
+  const none = { resurface: [], legacy: [], scoped: [], judged: [], capped: 0 };
   const lib = resurfaceLib();
-  if (!lib || !lib.active()) return { resurface: [], capped: 0 };
-  return withDb(db => lib.classify(db, 'reed', ids, jobTitle));
+  if (!lib) return none;
+  try {
+    return withDb(db => {
+      const c = lib.classify(db, 'reed', ids, jobTitle);
+      return { resurface: c.resurface, legacy: c.legacy, scoped: c.scoped, capped: c.capped, judged: lib.reedJudged(db, ids, jobTitle) };
+    });
+  } catch (e) {
+    return none;
+  }
 }
 
 /**
@@ -458,9 +476,10 @@ Candidate DB (Caterer + Reed)
                                Claim the role-scoped second look of a candidate BEFORE the CV is fetched again (one JSON line)
   resurface-release <caterer|reed> <id> <title>
                                Take that claim back (only when nothing was spent)
-  resurface-reject <caterer|reed> <id> <title> [postunlock]
+  resurface-reject <caterer|reed> <id> <title> [postunlock|legacy]
                                Record that the snippet screening rejected a resurfaced candidate for this title (postunlock: Phase 1's own review
-                               rejected an unlocked candidate for it; written only while the second look is active)
+                               rejected an unlocked candidate for it; written only while the second look is active; legacy: the candidate is one
+                               whose role was never recorded, docs/ROLESCOPE.md: the look is counted)
   check-reed <id>              Check if Reed ID exists (exit 0=exists, exit 1=new, exit 2=error or bad usage)
   add <id>                     Register Caterer candidate as unlocked (credit spent)
   seen <id>                    Register Caterer candidate as seen/screened (no credit)
@@ -513,7 +532,7 @@ async function main() {
       const r = classifyBatchScoped(ids, titleArg || '');
       // the second look adds two keys, and only when it found something to say: with it off the line is exactly {"inDb":[...]}
       const out = { inDb: r.skip };
-      if (r.resurface.length || r.capped) { out.resurface = r.resurface; out.resurfaceCapped = r.capped; }
+      if (r.resurface.length || r.capped) { out.resurface = r.resurface; out.resurfaceCapped = r.capped; if (r.legacy.length) out.legacy = r.legacy; }
       console.log(JSON.stringify(out));
       process.exit(0);
     }
@@ -532,7 +551,10 @@ async function main() {
         const db = getDb();
         if (command === 'resurface-claim') out = lib.claim(db, { source, id, jobTitle: args[2] });
         else if (command === 'resurface-release') out = { released: lib.release(db, { source, id, jobTitle: args[2] }) };
-        else out = { recorded: lib.recordSnippetReject(db, { source, id, jobTitle: args[2], origin: args[3] === 'postunlock' ? lib.ORIGIN_POSTUNLOCK : lib.ORIGIN_SNIPPET }) };
+        else {
+          out = { recorded: lib.recordSnippetReject(db, { source, id, jobTitle: args[2], origin: args[3] === 'postunlock' ? lib.ORIGIN_POSTUNLOCK : lib.ORIGIN_SNIPPET }) };
+          if (args[3] === 'legacy' && out.recorded) lib.record({ look: source, legacyRejected: true }); // one person with an unrecorded role was given the look and rejected again
+        }
       } catch (err) {
         console.error(`${command} failed: ${err && err.message ? err.message : String(err)}`);
         process.exit(1);

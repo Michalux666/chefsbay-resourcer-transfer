@@ -27,7 +27,7 @@ if (process.env.E2E_REED_CV_TEXT) {
   };
 }
 // $E2E_REED_REQUEST_LOG: every request the fake Reed API receives is appended to that file as one JSON line (method, path, and for a search the
-// activityTimeFrame, page and page size), so the rehearsal can read what Reed was really asked (scenario 20).
+// activityTimeFrame, page and page size), so the rehearsal can read what Reed was really asked (scenario 21).
 if (process.env.E2E_REED_REQUEST_LOG) {
   const orig = fr.startFakeReed;
   fr.startFakeReed = async (o) => {

@@ -20,7 +20,7 @@ secrets travel only in an encrypted data bundle (`data/resourcer-bundle.enc`, ad
 
 ```
 README.md  HANDOFF.md  OPERATOR-PROMPT.md  MANIFEST.sha256  .gitattributes (LF line endings)  .gitignore
-docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING SCREENING-CRITERIA CV-SCREENING DESIGN UPDATE-JEV-ONLY UPDATE-B UPDATE-C UPDATE-RESCREEN UPDATE-E UPDATE-G RESCREEN RESURFACE ACTIVITY, parity/<package>.md
+docs/         INSTALL CUTOVER ROLLBACK OPERATIONS ACCEPTANCE TEARDOWN KNOWN-LIMITS DECISIONS SECURITY ENV LEGACY-MAP SCREENING SCREENING-CRITERIA CV-SCREENING DESIGN UPDATE-JEV-ONLY UPDATE-B UPDATE-C UPDATE-RESCREEN UPDATE-E UPDATE-F UPDATE-G RESCREEN RESURFACE ROLESCOPE ACTIVITY, parity/<package>.md
 resourcer/    the workspace root (RESOURCER_HOME on the instance)
   candidates-db.js  package.json  config/  scripts/  scripts/lib/  scripts/lib/screening/  scripts/lib/cv/  scripts/phase1/
   (created at run time, never committed: runs/ downloads/ logs/ runtime/ pending-searches/ secrets/ outbox/ shadow/ state/ backups/)

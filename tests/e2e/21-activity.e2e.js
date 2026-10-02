@@ -1,13 +1,13 @@
 'use strict';
 // SCENARIO 20 - the search window ("active within") and the CV limit reach both sources, and the report shows the filter that was really applied
 // (docs/ACTIVITY.md). One world with Reed on, run the way Hermes runs it (cron wrapper, scrubbed environment):
-//   20.1 the read-only probe (tools/activity-probe.js) against the fake Caterer and Reed: counts only, no person, no unlock, no profile view; refused while the browser lock is held
-//   20.2 a one-off request for 12 months and 30 CVs: the Caterer URL carries the mapped id, the fake page echoes it (match=yes), Reed gets year and a limit of 30,
+//   21.1 the read-only probe (tools/activity-probe.js) against the fake Caterer and Reed: counts only, no person, no unlock, no profile view; refused while the browser lock is held
+//   21.2 a one-off request for 12 months and 30 CVs: the Caterer URL carries the mapped id, the fake page echoes it (match=yes), Reed gets year and a limit of 30,
 //        and the run results carry the whole block
-//   20.3 a scheduled territory with the stored defaults in the same world: the Caterer URL is the one main builds (byte for byte, no LastActivityId), Reed month and 20
-//   20.4 CATERER_ACTIVITY_FILTER=all sends the stored window of a scheduled territory; off sends nothing even for a request
-//   20.5 a window with no known id (3 months): no parameter, a WARN event and a note, the run completes
-//   20.6 a Caterer that shows another window than the one sent: match=no, ONE alert caterer-activity-mismatch a day, the run completes
+//   21.3 a scheduled territory with the stored defaults in the same world: the Caterer URL is the one main builds (byte for byte, no LastActivityId), Reed month and 20
+//   21.4 CATERER_ACTIVITY_FILTER=all sends the stored window of a scheduled territory; off sends nothing even for a request
+//   21.5 a window with no known id (3 months): no parameter, a WARN event and a note, the run completes
+//   21.6 a Caterer that shows another window than the one sent: match=no, ONE alert caterer-activity-mismatch a day, the run completes
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -18,7 +18,7 @@ const D = require('./lib/data');
 const C = require('./lib/checks');
 const U = require('./lib/util');
 
-const w = new World('s20-activity');
+const w = new World('s21-activity');
 const PROBE = path.join(REPO, 'tools', 'activity-probe.js');
 const REED_MARKERS = Array.from({ length: 12 }, (_, i) => `cand${9001 + i}@example.invalid`);
 const done = async () => !w.pendingFiles().length && !w.exists('runtime/run.json') && w.pipelineProcs().length === 0;
@@ -71,7 +71,7 @@ function runProbe(args, extraEnv) {
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
-test('20.1 the probe: counts only for every Caterer id and every Reed value, nothing paid or written, refused while the browser lock is held', async () => {
+test('21.1 the probe: counts only for every Caterer id and every Reed value, nothing paid or written, refused while the browser lock is held', async () => {
   const candidatesBefore = w.dbAll('select count(*) n from candidates')[0].n;
   const callsBefore = w.browserCalls().length;
   const r = runProbe(['--job', 'Chef', '--location', 'LS29', '--distance', '20']);
@@ -121,7 +121,7 @@ test('20.1 the probe: counts only for every Caterer id and every Reed value, not
   w.setWorld({ searchWorld: { byLocation: { LS29: { total: 777, pages: { 1: [], 2: [], 3: [] } } } } });
 });
 
-test('20.2 a one-off request for 12 months and 30 CVs: Caterer gets LastActivityId=15 and echoes it, Reed gets year and 30, the results carry the block', async () => {
+test('21.2 a one-off request for 12 months and 30 CVs: Caterer gets LastActivityId=15 and echoes it, Reed gets year and 30, the results carry the block', async () => {
   const r = await runOnce({ source: 'request-search-cli', sources: 'both', activeWithin: '12 months', cvLimit: 30, priority: 'high' });
   assert.equal(r.urls.length >= 1, true);
   assert.match(r.urls[0], MAIN_URL(15));
@@ -142,7 +142,7 @@ test('20.2 a one-off request for 12 months and 30 CVs: Caterer gets LastActivity
   assert.deepEqual(w.alerts().filter((a) => a.severity !== 'info'), []);
 });
 
-test('20.3 a scheduled territory with the stored defaults, same world: the URL is the one main builds, byte for byte, with no window; Reed gets month and 20', async () => {
+test('21.3 a scheduled territory with the stored defaults, same world: the URL is the one main builds, byte for byte, with no window; Reed gets month and 20', async () => {
   const r = await runOnce({ source: 'territory-scheduler', sources: 'both', activeWithin: '1 month', cvLimit: 20, priority: 'low' });
   assert.match(r.urls[0], MAIN_URL(null), 'main builds exactly this URL (the random SearchId aside)');
   assert.ok(!r.urls.some((u) => /LastActivityId/.test(u)));
@@ -157,7 +157,7 @@ test('20.3 a scheduled territory with the stored defaults, same world: the URL i
   assert.deepEqual(w.alerts().filter((a) => a.severity !== 'info'), []);
 });
 
-test('20.4 CATERER_ACTIVITY_FILTER=all sends the stored window of a scheduled territory; off sends nothing even for a request', async () => {
+test('21.4 CATERER_ACTIVITY_FILTER=all sends the stored window of a scheduled territory; off sends nothing even for a request', async () => {
   w.writeEnv({ CATERER_ACTIVITY_FILTER: 'all' });
   const all = await runOnce({ source: 'territory-scheduler', sources: 'caterer', activeWithin: '1 month' });
   assert.match(all.urls[0], MAIN_URL(8));
@@ -172,7 +172,7 @@ test('20.4 CATERER_ACTIVITY_FILTER=all sends the stored window of a scheduled te
   w.writeEnv({ CATERER_ACTIVITY_FILTER: null });
 });
 
-test('20.5 a window with no known id (3 months): no parameter, a WARN event and a note, the run completes', async () => {
+test('21.5 a window with no known id (3 months): no parameter, a WARN event and a note, the run completes', async () => {
   const r = await runOnce({ source: 'request-search-cli', sources: 'caterer', activeWithin: '3 months', cvLimit: 25 });
   assert.match(r.urls[0], MAIN_URL(null));
   assert.match(r.log, /ACTIVITY_FILTER_NOTE no Caterer LastActivityId is known for "3 months" \(caterer-activity\.json\): no filter sent to Caterer/);
@@ -185,7 +185,7 @@ test('20.5 a window with no known id (3 months): no parameter, a WARN event and 
   assert.deepEqual(w.alerts().filter((a) => a.severity !== 'info'), [], 'a window that cannot be sent is a log warning, not an alert');
 });
 
-test('20.6 a Caterer that shows another window than the one sent: match=no, one alert a day, the run completes', async () => {
+test('21.6 a Caterer that shows another window than the one sent: match=no, one alert a day, the run completes', async () => {
   w.setWorld({ searchWorld: { activity: { forceEcho: '1 month' } } });
   const first = await runOnce({ source: 'request-search-cli', sources: 'caterer', activeWithin: '12 months', cvLimit: 30 });
   assert.match(first.urls[0], MAIN_URL(15));
@@ -209,7 +209,7 @@ test('20.6 a Caterer that shows another window than the one sent: match=no, one 
   assert.match(recent.stdout, /requested="6 months" cv_limit=20 sent="LastActivityId=11" applied="1 month" match=no/);
 });
 
-test('20.7 end of the scenario: nothing leaked, nothing left running, no stray lock, no blocked network', () => {
+test('21.7 end of the scenario: nothing leaked, nothing left running, no stray lock, no blocked network', () => {
   assert.deepEqual(C.secretHits(w), []);
   assert.deepEqual(w.lockProblems(), []);
   assert.deepEqual(w.netBlocked(), []);

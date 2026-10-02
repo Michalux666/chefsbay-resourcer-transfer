@@ -1,6 +1,7 @@
 'use strict';
 // The Phase 1 side of the role-scoped second look (docs/RESURFACE.md): a candidate who was unlocked earlier and rejected by CV screening for
-// ANOTHER role comes up in this search. dedupe.js flags the card (the rule is scripts/lib/resurface.js, read from candidates.db by
+// ANOTHER role comes up in this search, or a person whose role was never recorded (ROLE_SCOPE_LEGACY, docs/ROLESCOPE.md: unlocked, never pushed, no usable record, old
+// enough), whose one more look is claimed, measured and recorded in exactly the same way (the card carries `legacy: true` and is counted as such). dedupe.js flags the card (the rule is scripts/lib/resurface.js, read from candidates.db by
 // candidates-db.js check-batch-scoped); the normal snippet screening decides for this role; and only when that approves, unlockPass calls
 // begin() before it fetches the contact details and the CV link again, and end() after it.
 //
@@ -20,7 +21,7 @@
 // always made for a card that shows "Unlocked previously"; it is the "re-open". Whether the platform charges for it is the platform's
 // answer, and this module measures it.
 
-const { dbRun, idStr } = require('./db');
+const { dbRun, dbWrite, idStr } = require('./db');
 const { creditsCheck } = require('./session');
 
 function lib() {
@@ -30,7 +31,7 @@ function lib() {
 /** The counters of this run (created on first use, so a run that never meets a resurfaced card carries nothing). */
 function stats(ctx) {
   const st = ctx.st;
-  if (!st.resurface) st.resurface = { eligible: 0, claimed: 0, released: 0, capped: 0, reserve: 0, unreadable: 0, failed: 0, postRejected: 0, counted: [] };
+  if (!st.resurface) st.resurface = { eligible: 0, claimed: 0, released: 0, capped: 0, reserve: 0, unreadable: 0, failed: 0, postRejected: 0, legacyScreened: 0, legacyRejectedSnippet: 0, legacyRejectedAfter: 0, counted: [] };
   return st.resurface;
 }
 
@@ -87,7 +88,7 @@ const HOLD_TEXT = {
 async function gate(ctx) {
   const { p, out } = ctx;
   const rs = lib();
-  if (!rs || !rs.active()) return { go: false, why: 'disabled' };
+  if (!rs || !(rs.active() || rs.legacyActive())) return { go: false, why: 'disabled' };
   if (ctx.st.resurfaceHold) return { go: false, why: ctx.st.resurfaceHold };
   const cfg = rs.settings();
   const before = await readBalance(ctx, false);
@@ -169,17 +170,19 @@ async function end(ctx, card, begun, unlockOk) {
     }
     return m;
   }
-  rs.record({ kind: m.kind, credits: m.credits });
-  s.counted.push({ id: idStr(card.id), kind: m.kind, credits: m.credits });
+  // a person whose role was never recorded (docs/ROLESCOPE.md) is also counted as one given their one more look: the claim stayed, so the look happened
+  rs.record({ kind: m.kind, credits: m.credits, ...(card.legacy ? { legacy: true, look: 'caterer' } : {}) });
+  s.counted.push({ id: idStr(card.id), kind: m.kind, credits: m.credits, legacy: !!card.legacy });
   const word = m.kind === 'charged' ? `charged, ${m.credits} credit(s)` : (m.kind === 'notCharged' ? 'not charged' : 'charge unknown (the balance could not be compared)');
   out(`    RESURFACE re-opened: ${word}`);
   return m;
 }
 
 /** The fields a queue entry of a resurfaced candidate carries (numbers and codes only). */
-function entryFields(m) {
+function entryFields(m, card) {
   const f = { resurfaced: true, resurfaceCharge: m.kind };
   if (m.credits) f.resurfaceCredits = m.credits;
+  if (card && card.legacy) f.legacy = true;
   return f;
 }
 
@@ -191,8 +194,22 @@ function entryFields(m) {
 async function postUnlockRejected(ctx, card) {
   if (card && card.resurfaced) stats(ctx).postRejected++;
   const rs = lib();
+  if (card && card.legacy) {
+    stats(ctx).legacyRejectedAfter++;
+    if (rs) rs.record({ legacyRejected: true });
+  }
   if (!rs || !rs.active()) return;
   await dbRun(ctx, ['resurface-reject', 'caterer', idStr(card.id), ctx.p.JOB_TITLE, 'postunlock']);
+}
+
+/**
+ * A person whose role was never recorded (ROLE_SCOPE_LEGACY, docs/ROLESCOPE.md), screened once more for this role, was rejected by the snippet screening:
+ * the rejection is recorded for this role (origin resurface:snippet, the form the role scope reads: a person looked at once stays eligible for any other
+ * role and is never screened for this one again), and the look is counted. A failed write is a database failure like any other bookkeeping write.
+ */
+async function legacyRejected(ctx, card) {
+  stats(ctx).legacyRejectedSnippet++;
+  await dbWrite(ctx, ['resurface-reject', 'caterer', idStr(card.id), ctx.p.JOB_TITLE, 'legacy']);
 }
 
 /**
@@ -208,6 +225,17 @@ function queueStats(ctx) {
   if (!mine.length && !lost.length && !s.eligible && !s.capped && !s.reserve && !s.unreadable && !s.failed) return null;
   const count = (kind) => mine.filter((c) => c.resurfaceCharge === kind).length;
   const lostCount = (kind) => lost.filter((c) => c.kind === kind).length;
+  const mineLegacy = mine.filter((c) => c.legacy === true);
+  const legacy = (s.legacyScreened || mineLegacy.length || lost.some((c) => c.legacy))
+    ? {
+      screened: s.legacyScreened || 0,
+      rejectedAtSnippet: s.legacyRejectedSnippet || 0,
+      rejectedAfterUnlock: s.legacyRejectedAfter || 0,
+      candidates: mineLegacy.length,
+      charged: mineLegacy.filter((c) => c.resurfaceCharge === 'charged').length + lost.filter((c) => c.legacy && c.kind === 'charged').length,
+      credits: mineLegacy.reduce((a, c) => a + (Number(c.resurfaceCredits) || 0), 0) + lost.filter((c) => c.legacy).reduce((a, c) => a + (Number(c.credits) || 0), 0),
+    }
+    : null;
   return {
     candidates: mine.length,
     charged: count('charged'),
@@ -225,6 +253,7 @@ function queueStats(ctx) {
     capped: s.capped || 0,
     belowReserve: s.reserve || 0,
     balanceUnreadable: s.unreadable || 0,
+    ...(legacy ? { legacy } : {}),
   };
 }
 
@@ -234,7 +263,7 @@ function warnOnce(ctx) {
   ctx.st.resurfaceWarned = true;
   const rs = lib();
   if (!rs) return;
-  try { for (const w of rs.settings().warnings) ctx.out(`WARN ${w}`); } catch (e) { /* settings are advisory here */ }
+  try { for (const w of rs.allWarnings()) ctx.out(`WARN ${w}`); } catch (e) { /* settings are advisory here */ }
 }
 
-module.exports = { stats, noteCapped, invalidate, readBalance, gate, noteHeld, orderForUnlock, begin, end, entryFields, queueStats, postUnlockRejected, warnOnce };
+module.exports = { stats, noteCapped, invalidate, readBalance, gate, noteHeld, orderForUnlock, begin, end, entryFields, queueStats, postUnlockRejected, legacyRejected, warnOnce };

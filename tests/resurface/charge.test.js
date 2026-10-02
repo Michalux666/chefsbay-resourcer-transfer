@@ -27,7 +27,7 @@ function world() {
 
 test('C11 the claim is written first and is durable: one row for the new title, origin resurface:started, the old row untouched', () => {
   world();
-  assert.deepEqual(claim(101, Y), { claimed: true });
+  assert.deepEqual(claim(101, Y), { claimed: true, kind: 'resurface', slot: true });
   assert.deepEqual(H.rows(101), [{ title: X, origin: 'cv:under_qualified' }, { title: Y, origin: 'resurface:started' }]);
   assert.equal(H.candidate(101).unlocked, 1, 'the candidate stays unlocked: a second unlock is never a first unlock');
 });
@@ -256,7 +256,7 @@ test('C10 Reed: the same claim on reed_id, and a Reed claim never touches a Cate
   H.build({ cands: [{ reed_id: 501 }, { caterer_id: 501, unlocked: 1 }], rows: [[501, X, 'cv:under_qualified', 'reed']] });
   H.settings();
   const r = H.withDb((db) => rs.claim(db, { source: 'reed', id: 501, jobTitle: Y }));
-  assert.deepEqual(r, { claimed: true });
+  assert.deepEqual(r, { claimed: true, kind: 'resurface', slot: true });
   assert.deepEqual(H.rows(501, 'reed').map((x) => x.origin), ['cv:under_qualified', 'resurface:started']);
   assert.deepEqual(H.rows(501, 'caterer'), []);
   assert.equal(H.withDb((db) => rs.claim(db, { source: 'reed', id: 501, jobTitle: Y })).claimed, false);
