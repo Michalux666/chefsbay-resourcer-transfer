@@ -1,6 +1,6 @@
 # UPDATE G: the search window and the CV limit reach both sources, for an instance at the previous release
 
-Audience: the operator LLM of the `resourcer` profile (terminal tool) and the owner. This note takes an installed instance from the previous release (the commit the owner names, which you record as `<OLD_COMMIT>` in step 2; the release that carried the role-scoped second look, `docs/UPDATE-E.md`, commit `bc3e750`) to this one in ONE cycle: one pause, one pull, one set of checks, one read-only probe, one resume. A fresh install follows `docs/INSTALL.md` and needs none of this. An instance that has not yet had the release before this one does that note first.
+Audience: the operator LLM of the `resourcer` profile (terminal tool) and the owner. This note takes an installed instance from the previous release (the release of the role scope, `docs/UPDATE-F.md`, commit `9a9362a`; you record the exact commit as `<OLD_COMMIT>` in step 2) to this one in ONE cycle: one pause, one pull, one set of checks, one read-only probe, one resume. A fresh install follows `docs/INSTALL.md` and needs none of this. An instance that has not yet had the release before this one (it is not at `9a9362a`) does `docs/UPDATE-F.md` first, and the notes before it (`docs/UPDATE-E.md` and earlier) before that.
 
 ## What changes and why
 
@@ -28,6 +28,7 @@ Not changed: screening decisions, criteria, operating points, `CV_SCREEN`, the t
 HUMAN: the owner has pushed this release to the code repository, to the branch this instance tracks (step 3 is a fast-forward of that branch), and gives you:
 
 - `<NEW_DIGEST>`: the 64-character manifest digest of this release. The owner gets it from the person who finalised the release: it is the `manifest_sha256=` value that `node tools/make-manifest.js` prints on the owner's machine after the last commit. The `MANIFEST.sha256` file of the checkout is not a substitute for it, on purpose: a manifest regenerated with a tampered script would otherwise pass, so you take `<NEW_DIGEST>` from the owner's message and never from the checkout you are verifying. The owner confirms it on the owner's own machine (`node tools/make-manifest.js --dry-run` on the pushed commit prints the same `manifest_sha256=`) before sending it;
+- for the owner to compare: the digest of the release you update FROM (commit `9a9362a`, the release of `docs/UPDATE-F.md`) is `ebf6a4b9382238795044b52823ae233c69b23058d6db35bc6638a0c2fd669114`; the digest of THIS release that the finaliser printed on 2026-10-02 is `4495ab13179df31923a46cb9dd9be2ad7c3f723a24137b50260d7ffb8c9032b4`. Both are written here only for the owner to compare with the owner's own printout of `node tools/make-manifest.js --dry-run`; they are not a source for the operator, who takes `<NEW_DIGEST>` from the owner's message;
 - the go-ahead to update now. Update after 22:00 London time, when no run is in flight (`docs/OPERATIONS.md` section 12).
 
 OPERATOR: first note which of the two jobs are enabled now, because only those are resumed at the end (the owner may have paused one on purpose):
@@ -58,13 +59,13 @@ Expect: `busy` is false. If it is true, a run is in flight: wait a few minutes a
 git -C /opt/data/profiles/resourcer/workspace rev-parse HEAD
 ```
 
-Expect: 40 hex characters. Write them down as `<OLD_COMMIT>`. If the owner named the commit of the previous release, it must start with those characters (the previous release starts with `bc3e750`); any other value: STOP and report it.
+Expect: 40 hex characters that START with `9a9362a`. Write them down as `<OLD_COMMIT>`. Any other value: STOP and report it (the instance is not at the release this note starts from).
 
 ```
 node /opt/data/profiles/resourcer/workspace/tools/check-manifest.js --installed off
 ```
 
-Expect: last lines `MANIFEST_OK` and `MANIFEST_SHA256=<64 hex characters>`. Write that digest down as `<OLD_DIGEST>`. Anything but `MANIFEST_OK`: STOP (the instance was modified; do not update over it).
+Expect: last lines `MANIFEST_OK` and `MANIFEST_SHA256=` followed by `ebf6a4b9382238795044b52823ae233c69b23058d6db35bc6638a0c2fd669114`. Write that digest down as `<OLD_DIGEST>`. Anything but `MANIFEST_OK`, or another digest: STOP (the instance was modified, or is not at `9a9362a`; do not update over it).
 
 ## 3. Pull this release (OPERATOR)
 
@@ -74,7 +75,7 @@ It runs in the workspace directory (`docs/INSTALL.md` 2.6):
 git -C /opt/data/profiles/resourcer/workspace pull --ff-only
 ```
 
-Expect: `Updating <OLD_COMMIT start>..<new id>`, `Fast-forward`, and a file list that includes `resourcer/scripts/lib/search-activity.js`, `resourcer/config/caterer-activity.json`, `tools/activity-probe.js` and `docs/ACTIVITY.md`. `Already up to date`: the owner has not pushed: STOP. Any complaint about local changes or a non-fast-forward: STOP and report the text.
+Expect: `Updating 9a9362a..<new id>`, `Fast-forward`, and a file list that includes `resourcer/scripts/lib/search-activity.js`, `resourcer/config/caterer-activity.json`, `tools/activity-probe.js` and `docs/ACTIVITY.md`. `Already up to date`: the owner has not pushed: STOP. Any complaint about local changes or a non-fast-forward: STOP and report the text.
 
 ## 4. Verify the checkout against the owner's digest (OPERATOR)
 
@@ -134,7 +135,7 @@ Expect: exit 0 and two lines: `RESULTS_URL:` ending `&HideCandidatesSinceDays=7&
 node /opt/data/profiles/resourcer/workspace/resourcer/scripts/build-caterer-results-url.js --job "Chef" --location FY4 --distance 20 --search-id probe --active-within "12 months" --manual
 ```
 
-Expect: exit 0 and a `RESULTS_URL:` ending `&HideCandidatesSinceDays=7&LastActivityId=15&SearchId=probe&scr=1`. Anything else: STOP and report the line.
+Expect: exit 0 and a `RESULTS_URL:` ending `&HideCandidatesSinceDays=7&LastActivityId=15&SearchId=probe&scr=1`. Anything else: STOP and report the line. (This checks that the code sends the id of the table of `config/caterer-activity.json`. Whether 15 really means 12 months on Caterer is NOT checked here: an older source gives 14 for 12 months and 15 for 18 months, `docs/ACTIVITY.md` section 2. The probe of step 8 and the first `ACTIVITY_FILTER` line settle it.)
 
 ### 7.3 A window with no known Caterer id sends nothing and says so
 
@@ -157,22 +158,22 @@ Expect: exit 0, a first line `# recent runs: <n>`, and one `RUN ...` line for ea
 The owner names the job title and the postcode area for the probe (`<TITLE>` in quotes below; the searches of 2026-10-01 used `FY4` and 20 miles):
 
 ```
-node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run --extra-ids 6,10,14
 ```
 
-Expect: exit 0, the line `# activity-probe source=both location=FY4 distance=20mi DRY RUN (no request is made)`, seven `CATERER variant` lines (`param=none`, then `LastActivityId=7`, `8`, `9`, `11`, `15` and `0`), eleven `REED variant` lines and a closing `# 7 Caterer and 11 Reed variants; nothing was requested`. No URL is printed. Anything else: STOP and report it.
+Expect: exit 0, the line `# activity-probe source=both location=FY4 distance=20mi DRY RUN (no request is made)`, ten `CATERER variant` lines (`param=none`, then `LastActivityId=7`, `8`, `9`, `11`, `15` and `0` from the table, then the three extra ids `6`, `10` and `14`), eleven `REED variant` lines and a closing `# 10 Caterer and 11 Reed variants; nothing was requested`. No URL is printed. Anything else: STOP and report it.
 
 ## 8. The read-only probe (HUMAN gate: the owner reads the result)
 
-Both jobs are still paused, so no run is in flight. The probe loads search pages (Caterer) and runs searches (Reed), prints counts, and unlocks nothing, spends no credit and views no profile. It never signs in: if the Caterer browser is signed out it says so and stops.
+Both jobs are still paused, so no run is in flight. The probe loads search pages (Caterer) and runs searches (Reed), prints counts, and unlocks nothing, spends no credit and views no profile. It never signs in: if the Caterer browser is signed out it says so and stops. It reads ten Caterer pages (the page with no window, the six ids of the table and the three extra ids 6, 10 and 14, which are the other values an older source gives for 7 days, 3 months and 12 months, so that the page itself says what they mean) and eleven Reed searches. That normally takes a few minutes, but a slow site can make it last far longer than the 600-second limit of a foreground command (the worst case is about 40 minutes), so start it as a background terminal task and wait for it, as `docs/INSTALL.md` 0.2 says for long commands:
 
 ```
-node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --extra-ids 6,10,14
 ```
 
-Expect: exit 0 after a few minutes, a line `CATERER param=... applied="..." pool=<n> status=ok` for each of seven pages, a line `REED activityTimeFrame=... total=<n> status=ok` for each of eleven Reed values, and a last line `# done: 0 variant(s) could not be read`. Other exits: 3 means the probe refused because a run is in flight or the browser lock is held (check the status of step 1, wait, run it once more; do not loop); 4 means the Caterer browser is signed out or Reed could not refresh its token (report the lines, this is not part of this update); 5 means some variants could not be read (report the lines).
+Expect: exit 0 after a few minutes, a line `CATERER param=... applied="..." pool=<n> status=ok` for each of ten pages, a line `REED activityTimeFrame=... total=<n> status=ok` for each of eleven Reed values, and a last line `# done: 0 variant(s) could not be read`. Other exits: 3 means the probe refused because a run is in flight or the browser lock is held (check the status of step 1, wait, run it once more; do not loop); 4 means the Caterer browser is signed out or Reed could not refresh its token (report the lines, this is not part of this update); 5 means some variants could not be read (report the lines).
 
-STOP here. Send the owner the printed lines exactly as they are (they hold counts and fixed words only) and wait for the owner's word before step 9. The owner reads them like this (`docs/OPERATIONS.md` section 5.1): each `LastActivityId` line should echo its own window (`applied="12 months"` for 15); the `none` line, compared with the others, shows what Caterer does when no window is sent; the Reed totals show whether Reed accepts each value. If the owner then changes the mapping in `config/caterer-activity.json` or sets `CATERER_ACTIVITY_FILTER=all`, that is the owner's own change and not a step of this note; you do not do it.
+STOP here. Send the owner the printed lines exactly as they are (they hold counts and fixed words only) and wait for the owner's word before step 9. The owner reads them like this (`docs/OPERATIONS.md` section 5.1): each `LastActivityId` line of the table should echo its own window (`applied="12 months"` for 15; if 15 says `18 months`, the table is wrong for 12 months and the line of id 14 shows whether that is the id of 12 months); the three extra lines (6, 10, 14) show what those ids mean on the live page; the `none` line, compared with the others, shows what Caterer does when no window is sent; the Reed totals show whether Reed accepts each value. If the owner then changes the mapping in `config/caterer-activity.json` or sets `CATERER_ACTIVITY_FILTER=all`, that is the owner's own change and not a step of this note; you do not do it.
 
 ## 9. Resume (OPERATOR)
 

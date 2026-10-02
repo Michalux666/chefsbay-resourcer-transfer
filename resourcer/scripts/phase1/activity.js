@@ -23,7 +23,8 @@ function sentIdOf(url) {
 function initial(p, resultsUrl) {
   const sent = sentIdOf(resultsUrl);
   const block = {
-    requestedActiveWithin: p.ACTIVE_WITHIN,
+    // plain characters, at most 20: a hand-written pending file may hold anything, and this text reaches the log, the queue and the results
+    requestedActiveWithin: lib && p.ACTIVE_WITHIN !== undefined && p.ACTIVE_WITHIN !== null ? lib.plainLabel(p.ACTIVE_WITHIN) : p.ACTIVE_WITHIN,
     requestedCvLimit: p.CV_LIMIT,
     sentLastActivityId: sent === null ? 'none' : sent,
     appliedFilterText: null,
@@ -51,10 +52,11 @@ async function selfCheck(ctx, cardsOnPage) {
   const a = st.activity;
   if (!lib || !a || a.matched !== 'not-checked') return;
   let reading = lib.parseSummaryOutput('');
+  let evalFailed = false; // the evaluation itself timed out or failed: the page was never read, which says nothing about the layout
   try {
     const r = await ctx.browser.evalB64(lib.SUMMARY_B64, 'read applied filters', ctx.cfg.browserMs.probe);
-    if (r && r.ok && !r.timedOut) reading = lib.parseSummaryOutput(r.out);
-  } catch (e) { /* unreadable */ }
+    if (r && r.ok && !r.timedOut) reading = lib.parseSummaryOutput(r.out); else evalFailed = true;
+  } catch (e) { evalFailed = true; }
   const sent = a.sentLastActivityId === 'none' ? null : a.sentLastActivityId;
   let expected = null;
   if (sent !== null) expected = lib.entryForId(lib.loadCatererConfig(), sent);
@@ -63,11 +65,12 @@ async function selfCheck(ctx, cardsOnPage) {
   a.poolHeaderCount = ev.poolHeaderCount;
   a.matched = ev.matched;
   ctx.out(lib.activityLine(a.requestedActiveWithin, sent, ev.applied, ev.matched));
-  const alertable = ev.matched === lib.MATCH.NO || (ev.matched === lib.MATCH.UNREADABLE && cardsOnPage > 0);
+  // an unreadable summary alerts only when the page was read and had candidate cards: a timed-out read, or a page with no results, proves nothing
+  const alertable = ev.matched === lib.MATCH.NO || (ev.matched === lib.MATCH.UNREADABLE && cardsOnPage > 0 && !evalFailed);
   if (!alertable) return;
   try {
     const text = alertText(a, ev.matched);
-    if (lib.alertOncePerDay({ text, meta: { jobTitle: ctx.p.JOB_TITLE, location: ctx.p.LOCATION, matched: ev.matched } })) ctx.out(`ALERT: ${text}`);
+    if (lib.alertOncePerDay({ text, cause: ev.matched, meta: { jobTitle: ctx.p.JOB_TITLE, location: ctx.p.LOCATION, matched: ev.matched } })) ctx.out(`ALERT: ${text}`);
   } catch (e) { /* alerting never throws */ }
 }
 

@@ -506,8 +506,8 @@ Options:
   --sources <s>             both | caterer | reed (default from config/territory-defaults.json, else both)
   --priority <p>            high | medium | low (default low)
   --distance <miles>        ${VALID_DISTANCES.join(' | ')} (default 20)
-  --active-within <text>    ${VALID_ACTIVE_WITHIN.join(' | ')}
-  --cv-limit <n>            ${CV_LIMIT_MIN}-${CV_LIMIT_MAX} (default 20)
+  --active-within <text>    ${VALID_ACTIVE_WITHIN.join(' | ')} (sent to Caterer and Reed for this request; see docs/ACTIVITY.md)
+  --cv-limit <n>            ${CV_LIMIT_MIN}-${CV_LIMIT_MAX} (default 20; applies to each source)
   --location-mode <m>       outward (default) | any (also accept a full postcode or a place name)
   --home <dir>              workspace to use (default: RESOURCER_HOME, else the instance workspace if it exists, else ./resourcer of this checkout)
   --dry-run                 validate and check for duplicates, write nothing

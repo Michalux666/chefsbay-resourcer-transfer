@@ -4,12 +4,14 @@
  * activity-probe.js - what do the "active within" windows really do? READ-ONLY: search pages only. No unlock, no credit, no profile view,
  * no CV, no Zoho, no database. Run it once on the live instance (docs/ACTIVITY.md, docs/OPERATIONS.md): the owner reads the numbers.
  *
- *   node tools/activity-probe.js --job <title> --location <postcode area> --distance <miles> [--source caterer|reed|both] [--dry-run]
+ *   node tools/activity-probe.js --job <title> --location <postcode area> --distance <miles> [--source caterer|reed|both] [--extra-ids <list>] [--dry-run]
  *   node tools/activity-probe.js --recent [<n>]      the window of the last n runs (requested, sent, applied, match, Reed window and limit)
  *
  * Caterer: loads page 1 of the results for the URL the pipeline builds (no LastActivityId) and for every LastActivityId of
  *   config/caterer-activity.json, with the same browser helpers and the same URL normalisation as phase 1, and prints per variant
- *   the parameter, the filter text Caterer says it applied, and the pool count of the page header.
+ *   the parameter, the filter text Caterer says it applied, and the pool count of the page header. --extra-ids adds pages for ids that the
+ *   config does not hold (a legacy skill table gives other ids for 7 days, 3 months, 12 months and 18 months than the table of the config:
+ *   docs/ACTIVITY.md section 2): the applied text of each is how the owner reads which id means what.
  * Reed: runs the search once for each activityTimeFrame value that reed-search.js knows and prints the total candidate count.
  *
  * It prints counts and fixed strings only: never a name, a card, a snippet or any other page text.
@@ -30,6 +32,7 @@ const search = require('./request-search');
 
 const SOURCES = ['both', 'caterer', 'reed'];
 const DEFAULT_RECENT = 5;
+const MAX_EXTRA_IDS = 10;
 const RECENT_CAP = 30;
 
 const USAGE = `Usage: node tools/activity-probe.js --job <title> --location <postcode area> --distance <miles> [options]
@@ -42,6 +45,7 @@ Options:
   --location <area>    outward postcode, e.g. FY4
   --distance <miles>   ${search.VALID_DISTANCES ? search.VALID_DISTANCES.join(' | ') : '5 | 10 | 20 | 30 | 40 | 60 | 80'}
   --source <s>         both (default) | caterer | reed
+  --extra-ids <list>   more Caterer LastActivityId values to read besides those of the config, e.g. 6,10,14 (whole numbers 0 to 999, at most 10)
   --dry-run            list the variants, make no request
   --recent [<n>]       print the window of the last n runs (default ${DEFAULT_RECENT}, at most ${RECENT_CAP}) from their results files and exit
   --help               show this text
@@ -51,8 +55,21 @@ Exit codes: 0 done, 1 unexpected error, 2 usage or validation error, 3 refused (
 
 class UsageError extends Error {}
 
+/** "6,10,14" -> [6, 10, 14]: whole numbers 0 to 999, no repeats, at most MAX_EXTRA_IDS. */
+function parseIds(text) {
+  const parts = String(text).split(',').map((x) => x.trim());
+  const ids = [];
+  for (const p of parts) {
+    if (!/^[0-9]{1,3}$/.test(p)) throw new UsageError('--extra-ids takes whole numbers from 0 to 999 separated by commas, e.g. 6,10,14');
+    const n = Number(p);
+    if (!ids.includes(n)) ids.push(n);
+  }
+  if (ids.length > MAX_EXTRA_IDS) throw new UsageError(`--extra-ids takes at most ${MAX_EXTRA_IDS} values`);
+  return ids;
+}
+
 function parseArgs(argv) {
-  const o = { job: null, location: null, distance: null, source: 'both', dryRun: false, recent: null, help: false };
+  const o = { job: null, location: null, distance: null, source: 'both', extraIds: [], dryRun: false, recent: null, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const val = () => { if (i + 1 >= argv.length) throw new UsageError(`${a} needs a value`); i += 1; return argv[i]; };
@@ -62,6 +79,7 @@ function parseArgs(argv) {
     else if (a === '--location') o.location = val();
     else if (a === '--distance') o.distance = val();
     else if (a === '--source') o.source = val();
+    else if (a === '--extra-ids') o.extraIds = parseIds(val());
     else if (a === '--recent') {
       const next = argv[i + 1];
       if (next !== undefined && /^[0-9]+$/.test(next)) { i += 1; o.recent = Math.min(RECENT_CAP, Math.max(1, parseInt(next, 10))); } else o.recent = DEFAULT_RECENT;
@@ -72,7 +90,7 @@ function parseArgs(argv) {
 
 // ------------------------------------------------------------------------------------------------ the variants
 
-/** The Caterer pages to load: no parameter first, then every id of the config (in the order of the labels). */
+/** The Caterer pages to load: no parameter first, then every id of the config (in the order of the labels), then the extra ids that are not in it. */
 function catererVariants(o) {
   const sa = lib('lib/search-activity');
   const build = lib('build-caterer-results-url');
@@ -80,13 +98,21 @@ function catererVariants(o) {
   const cfg = o.config || sa.loadCatererConfig();
   const mk = (extra) => normaliseResultsUrl(build.buildResultsUrl(Object.assign({ jobTitle: o.job, location: o.location, distance: o.distance, keywords: '' }, extra)).url).base;
   const out = [{ param: 'none', label: '(no parameter: what a scheduled search sends today)', url: mk({}) }];
-  if (!cfg.ok) return { variants: out, configError: cfg.error };
-  for (const label of sa.LABELS) {
+  for (const label of cfg.ok ? sa.LABELS : []) {
     const e = cfg.labels[label];
     if (!e || e.id === null) continue;
     out.push({ param: `LastActivityId=${e.id}`, label, url: mk({ activeWithin: label, manual: true, activitySetting: 'manual', activityConfig: cfg }) });
   }
-  return { variants: out, configError: null };
+  // an extra id goes through the same builder: a stand-in config that maps one label to that id (the builder only reads the id)
+  const known = new Set(out.map((v) => v.param));
+  for (const id of o.extraIds || []) {
+    const param = `LastActivityId=${id}`;
+    if (known.has(param)) continue;
+    known.add(param);
+    const stand = { ok: true, labels: { [sa.LABELS[0]]: { id, echo: [''] } } };
+    out.push({ param, label: '(extra id, not in the config)', url: mk({ activeWithin: sa.LABELS[0], manual: true, activitySetting: 'manual', activityConfig: stand }) });
+  }
+  return { variants: out, configError: cfg.ok ? null : cfg.error };
 }
 
 /** The Reed windows: one search for each distinct activityTimeFrame value of reed-search.js, through the first key that maps to it. */
@@ -184,7 +210,7 @@ function recentRuns(n, home) {
     try { d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { d = null; }
     if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
     const a = d.activity;
-    const head = `RUN date=${clean(d.date)} location=${clean(d.location)} sources=${clean(d.sources)}`;
+    const head = `RUN date=${clean(d.date)} job="${clean(d.jobTitle)}" location=${clean(d.location)} sources=${clean(d.sources)}`;
     if (!a || typeof a !== 'object') { lines.push(`${head} activity=not-recorded (a run from before the window was recorded)`); continue; }
     const reed = a.reed && typeof a.reed === 'object' ? ` reed_window=${clean(a.reed.activeWithin)} reed_cv_limit=${clean(a.reed.cvLimit)}${a.reed.ran === false ? ' reed_ran=no' : ''}` : '';
     lines.push(`${head} requested="${clean(a.requestedActiveWithin)}" cv_limit=${clean(a.requestedCvLimit)} sent="LastActivityId=${clean(a.sentLastActivityId)}" applied="${clean(a.appliedFilterText)}" match=${clean(a.matched)} pool=${a.poolHeaderCount === null || a.poolHeaderCount === undefined ? '?' : clean(a.poolHeaderCount)}${reed}`);
@@ -228,12 +254,12 @@ async function main(argv, io, deps) {
 
   let cat = null;
   if (wantCaterer) {
-    try { cat = catererVariants({ ...req, config: io && io.config }); } catch (e) { err(`ERROR: could not build the Caterer variants: ${String(e.message).slice(0, 120)}`); return 1; }
+    try { cat = catererVariants({ ...req, extraIds: o.extraIds, config: io && io.config }); } catch (e) { err(`ERROR: could not build the Caterer variants: ${String(e.message).slice(0, 120)}`); return 1; }
   }
   const reedList = wantReed ? reedVariants() : [];
 
   out(`# activity-probe source=${o.source} location=${req.location} distance=${req.distance}mi${o.dryRun ? ' DRY RUN (no request is made)' : ''}`);
-  if (cat && cat.configError) out(`NOTE caterer-activity.json is not usable (${cat.configError}): only the no-parameter page is probed`);
+  if (cat && cat.configError) out(`NOTE caterer-activity.json is not usable (${cat.configError}): only the no-parameter page${o.extraIds.length ? ' and the extra ids' : ''} is probed`);
   if (o.dryRun) {
     if (cat) for (const v of cat.variants) out(`CATERER variant param=${v.param} label="${v.label}"`);
     for (const v of reedList) out(`REED variant activityTimeFrame=${v.value} key="${v.key}"`);
@@ -295,7 +321,7 @@ async function main(argv, io, deps) {
   return failed ? 5 : 0;
 }
 
-module.exports = { main, parseArgs, catererVariants, reedVariants, recentRuns, realDeps, USAGE };
+module.exports = { main, parseArgs, parseIds, catererVariants, reedVariants, recentRuns, realDeps, USAGE };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {

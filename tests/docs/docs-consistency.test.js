@@ -1095,9 +1095,9 @@ test('UPDATE-G.md: only commands this operator may run, code before checks befor
   const oneOff = at('--active-within "12 months" --manual');
   const unmapped = at('--active-within "3 months" --manual');
   const recent = at('tools/activity-probe.js --recent 3');
-  const dry = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run');
+  const dry = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run --extra-ids 6,10,14');
   const gate = at('## 8. The read-only probe (HUMAN gate');
-  const probe = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20\n', gate);
+  const probe = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --extra-ids 6,10,14\n', gate);
   const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick', gate);
   assert.ok(list < pause && pause < idle && idle < record && record < pull && pull < verify && verify < copy && copy < full && full < url && url < oneOff && oneOff < unmapped && unmapped < recent && recent < dry && dry < gate && gate < probe && probe < resume,
     'order: list, pause, idle, record, pull, verify, copy, full check, offline checks, probe (HUMAN gate), resume');
@@ -1108,7 +1108,10 @@ test('UPDATE-G.md: only commands this operator may run, code before checks befor
   assert.match(t, /THE FIRST LIVE SIGNAL/);
   assert.match(t, /HUMAN gate: the owner reads the result/);
   assert.match(t, /STOP here\. Send the owner the printed lines exactly as they are/);
-  assert.match(t, /start with `bc3e750`|starts with `bc3e750`|starts `bc3e750`|the previous release starts with `bc3e750`/);
+  assert.match(t, /START with `9a9362a`/);
+  assert.match(t, /`ebf6a4b9382238795044b52823ae233c69b23058d6db35bc6638a0c2fd669114`/);
+  assert.match(t, /Updating 9a9362a\.\.<new id>/);
+  assert.match(t, /background terminal task/, 'the probe can outlast the foreground limit');
   const rollback = t.slice(at('## Rolling back'));
   assert.match(rollback, /reset --hard <OLD_COMMIT>/);
   assert.match(rollback, /HUMAN-APPROVE/);
@@ -1117,10 +1120,10 @@ test('UPDATE-G.md: only commands this operator may run, code before checks befor
   for (const f of ['docs/INSTALL.md', 'HANDOFF.md']) assert.ok(read(f).includes('docs/UPDATE-G.md'), `${f} points at the note`);
 });
 
-test('UPDATE-G.md copies exactly the installed files that changed since the previous release (bc3e750), and says nothing else changed', (t) => {
-  // pinned to the release that is installed on the instance (bc3e750), not to the branch it was cut from: that branch moves
-  const base = gitLines(['rev-parse', '--verify', '--quiet', 'bc3e750^{commit}']);
-  if (!base || !base[0]) { t.skip('no git history with the release commit bc3e750 here'); return; }
+test('UPDATE-G.md copies exactly the installed files that changed since the previous release (9a9362a, the role scope), and says nothing else changed', (t) => {
+  // pinned to the release that is installed on the instance (9a9362a, the release of Update F), not to the branch it was cut from: that branch moves
+  const base = gitLines(['rev-parse', '--verify', '--quiet', '9a9362a^{commit}']);
+  if (!base || !base[0]) { t.skip('no git history with the release commit 9a9362a here'); return; }
   const changed = gitLines(['diff', '--name-only', base[0]]);
   const added = gitLines(['ls-files', '--others', '--exclude-standard']);
   if (!changed || !added) { t.skip('no git history here'); return; }
@@ -1200,7 +1203,7 @@ test('Update G: the Hermes cron history is read by job id in every document (the
 
 test('Update G: the documents keep design defaults apart from the owner\'s instruction (ACT-1 is the owner\'s; every other row says it is a design default, not yet confirmed by the owner)', () => {
   const d = read('docs/DECISIONS.md');
-  const sec = d.slice(d.indexOf('## 18. The search window and the CV limit'));
+  const sec = d.slice(d.indexOf('## 19. The search window and the CV limit'));
   assert.ok(sec.length > 500);
   const row = (id) => sec.split('\n').find((l) => l.startsWith(`| ${id} |`));
   assert.match(row('ACT-1'), /^\| ACT-1 \| 2026-10-01, the owner\./);
@@ -1223,4 +1226,23 @@ test('Update G: the documents keep design defaults apart from the owner\'s instr
     }
   }
   assert.deepEqual(bad, []);
+});
+
+test('Update G: the contested Caterer id of 12 months is disclosed wherever the id is given, and the probe command that settles it is the one the documents run', () => {
+  const act = read('docs/ACTIVITY.md');
+  assert.match(act, /\| 12 months \| 15 \(CONTESTED, see below\) \|/);
+  assert.match(act, /12 months = 14 and 18 months = 15/);
+  assert.match(read('docs/DECISIONS.md'), /ACT-3 \|[^\n]*CONTESTED/);
+  assert.match(read('docs/KNOWN-LIMITS.md'), /K-ACT1 \|[^\n]*SECOND legacy source[^\n]*12 months = 14/);
+  assert.match(read('docs/UPDATE-G.md'), /an older source gives 14 for 12 months and 15 for 18 months/);
+  assert.match(read('docs/OPERATIONS.md'), /12 months = 15 is CONTESTED/);
+  assert.match(read('resourcer/config/caterer-activity.json'), /12 months = 15 is CONTESTED/);
+  // the ids the notes pass to --extra-ids are the three the old skill table gives for 7 days, 3 months and 12 months
+  for (const f of ['docs/UPDATE-G.md', 'docs/OPERATIONS.md']) assert.ok(read(f).includes('--extra-ids 6,10,14'), f);
+  // no document claims a window is "never narrower" for Caterer: only Reed is
+  for (const f of ['docs/ACTIVITY.md', 'docs/OPERATIONS.md', 'docs/DECISIONS.md', 'docs/KNOWN-LIMITS.md']) {
+    for (const line of read(f).split('\n')) {
+      if (/never narrower/i.test(line) && /Caterer/.test(line)) assert.match(line, /Reed[^.]*never narrower|never narrower[^.]*Reed|not widened|NOT widened/, `${f}: ${line.slice(0, 120)}`);
+    }
+  }
 });

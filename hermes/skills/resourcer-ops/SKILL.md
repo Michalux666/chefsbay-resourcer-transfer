@@ -55,7 +55,7 @@ The window (`--active-within`) and the CV limit (`--cv-limit`) of a request reac
 node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --recent 5
 ```
 
-It prints one line per recent run: what was requested, what was sent (`LastActivityId`), what Caterer said it applied, `match=yes|no|unreadable|n/a`, the pool of the page header and the Reed window and limit (read only, no browser, no names). The WARN alert `caterer-activity-mismatch` (once a day) means Caterer showed another window than the one sent; report it, the owner decides (docs/ACTIVITY.md). The live probe of the windows (`tools/activity-probe.js --job ... --location ... --distance ...`) loads search pages only and is run once, at the owner's word, by `docs/UPDATE-G.md`; never run it while a run is in flight (it refuses, exit 3).
+It prints one line per recent run: what was requested, what was sent (`LastActivityId`), what Caterer said it applied, `match=yes|no|unreadable|n/a`, the pool of the page header and the Reed window and limit (read only, no browser, no names). The WARN alert `caterer-activity-mismatch` (once a day for each cause) means Caterer showed another window than the one sent; report it, the owner decides (docs/ACTIVITY.md). The live probe of the windows (`tools/activity-probe.js --job ... --location ... --distance ...`) loads search pages only and is run once, at the owner's word, by `docs/UPDATE-G.md` (as a background task: it can take longer than the foreground limit); never run it while a run is in flight (it refuses, exit 3).
 
 ## 3. Halt and back-off
 

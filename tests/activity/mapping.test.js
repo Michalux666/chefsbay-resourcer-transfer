@@ -168,6 +168,22 @@ test('Reed: every label maps to a key reed-search.js knows; the stored default i
   }
 });
 
+test('a window text that is none of the eight labels is cut to 20 plain characters wherever it is logged or stored', () => {
+  const hostile = 'SECRET"' + String.fromCharCode(10) + 'FAKE_LINE: injected ' + 'y'.repeat(400);
+  assert.equal(sa.plainLabel('12 months'), '12 months');
+  assert.equal(sa.plainLabel(undefined), '');
+  const p = sa.plainLabel(hostile);
+  assert.ok(p.length <= 20 && /^[A-Za-z0-9 ?]*$/.test(p), p);
+  const w = sa.reedWindowFor(hostile);
+  assert.equal(w.arg, 'month');
+  assert.equal(w.requested, p);
+  assert.ok(!(w.requested + w.note).includes(String.fromCharCode(10)) && !(w.requested + w.note).includes('FAKE_LINE: '));
+  const c = sa.catererFilterFor({ activeWithin: hostile, manual: true, setting: 'manual' });
+  assert.equal(c.requested, p);
+  assert.ok(!(c.requested + c.note).includes(String.fromCharCode(10)));
+  assert.equal(c.id, null);
+});
+
 test('Reed: an unrecognised window behaves as before (a month) and warns; the CV limit is the request\'s own or the default', () => {
   const w = sa.reedWindowFor('last fortnight');
   assert.equal(w.arg, 'month');
@@ -228,6 +244,10 @@ test('evaluateApplied: match yes, no and unreadable when an id was sent; n/a whe
   assert.deepEqual(sa.evaluateApplied({ sentId: null, expected: null, reading: read('1 month') }), { matched: 'n/a', applied: '1 month', poolHeaderCount: 55 }, 'a scheduled run logs what Caterer applied by default');
   assert.deepEqual(sa.evaluateApplied({ sentId: null, expected: null, reading: read('') }), { matched: 'n/a', applied: '', poolHeaderCount: 55 });
   assert.equal(sa.evaluateApplied({ sentId: 15, expected: null, reading: read('12 months') }).matched, 'n/a', 'an id the config does not know any more cannot be compared');
+  // a header with no summary line (the layout changed, or an empty results page) says nothing about the window: never a verdict
+  assert.deepEqual(sa.evaluateApplied({ sentId: 15, expected: exp, reading: read('', { summary: false }) }), { matched: 'unreadable', applied: '', poolHeaderCount: 55 });
+  assert.equal(sa.evaluateApplied({ sentId: 0, expected: all, reading: read('', { summary: false }) }).matched, 'unreadable', 'not even All is confirmed without the summary line');
+  assert.equal(sa.evaluateApplied({ sentId: null, expected: null, reading: read('', { summary: false }) }).matched, 'n/a');
 });
 
 test('the ACTIVITY_FILTER line has the documented shape, and nothing but plain text goes into it', () => {
@@ -254,5 +274,19 @@ test('the alert is sent once per London day, the day is marked before sending, a
     assert.equal(sa.alertOncePerDay({ text: 't6', file, now: at('2026-10-05T22:30:00Z'), notify }), true);
     assert.equal(sa.alertOncePerDay({ text: 't7', file, now: at('2026-10-05T23:30:00Z'), notify }), true, 'London midnight has passed');
     assert.equal(sa.alertOncePerDay({ text: 't8', file, now: at('2026-10-06T08:00:00Z'), notify }), false, 'still the 6th in London');
+    // one alert per cause and day: a window that does not match must not hide an unreadable page (and the reverse), and a failed send gives its cause back
+    const day = at('2026-10-07T09:00:00Z');
+    assert.equal(sa.alertOncePerDay({ text: 'c1', cause: 'no', file, now: day, notify }), true);
+    assert.equal(sa.alertOncePerDay({ text: 'c2', cause: 'no', file, now: day, notify }), false);
+    assert.equal(sa.alertOncePerDay({ text: 'c3', cause: 'unreadable', file, now: day, notify }), true, 'another cause, the same day');
+    assert.equal(sa.alertOncePerDay({ text: 'c4', cause: 'unreadable', file, now: day, notify }), false);
+    const day2 = at('2026-10-08T09:00:00Z');
+    assert.equal(sa.alertOncePerDay({ text: 'c5', cause: 'no', file, now: day2, notify }), true);
+    assert.equal(sa.alertOncePerDay({ text: 'c6', cause: 'unreadable', file, now: day2, notify: failing }), false);
+    assert.equal(sa.alertOncePerDay({ text: 'c7', cause: 'no', file, now: day2, notify }), false, 'the first cause stays used up');
+    assert.equal(sa.alertOncePerDay({ text: 'c8', cause: 'unreadable', file, now: day2, notify }), true, 'the failed one was given back');
+    // a state file of the earlier form ({day} only) means everything was sent today
+    fs.writeFileSync(file, JSON.stringify({ day: '2026-10-09' }));
+    assert.equal(sa.alertOncePerDay({ text: 'c9', cause: 'no', file, now: at('2026-10-09T09:00:00Z'), notify }), false);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

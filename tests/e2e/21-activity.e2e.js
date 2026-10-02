@@ -116,6 +116,22 @@ test('21.1 the probe: counts only for every Caterer id and every Reed value, not
     fs.rmSync(w.p('runtime', 'browser.lock'), { force: true });
   }
   assert.equal(runProbe(['--job', 'Chef', '--location', 'LS29', '--distance', '20', '--dry-run']).code, 0);
+
+  // the extra ids (what the old skill table calls 7 days, 3 months and 12 months): three more pages through the same adapters, read like the others
+  w.setWorld({ searchWorld: { activity: { echoById: { 14: '18 months', 10: '3 months', 6: '7 days' } } } });
+  const extra = runProbe(['--job', 'Chef', '--location', 'LS29', '--distance', '20', '--source', 'caterer', '--extra-ids', '6,10,14']);
+  assert.equal(extra.code, 0, extra.stdout + extra.stderr);
+  const extraLines = extra.stdout.split('\n').filter((l) => l.startsWith('CATERER param='));
+  assert.deepEqual(extraLines.map((l) => /param=(\S+)/.exec(l)[1]), ['none', 'LastActivityId=7', 'LastActivityId=8', 'LastActivityId=9', 'LastActivityId=11', 'LastActivityId=15', 'LastActivityId=0', 'LastActivityId=6', 'LastActivityId=10', 'LastActivityId=14']);
+  const extraEchoed = Object.fromEntries(extraLines.map((l) => [/param=(\S+)/.exec(l)[1], /applied="([^"]*)"/.exec(l)[1]]));
+  assert.equal(extraEchoed['LastActivityId=14'], '18 months');
+  assert.equal(extraEchoed['LastActivityId=10'], '3 months');
+  assert.equal(extraEchoed['LastActivityId=6'], '7 days');
+  assert.equal(extraEchoed['LastActivityId=15'], '12 months');
+  assert.ok(extraLines.every((l) => /pool=\d+ status=ok$/.test(l)), extra.stdout);
+  for (const m of markers) assert.ok(!extra.stdout.includes(m), 'no person in the extra run');
+  assert.ok(!w.browserCalls().slice(callsBefore).some((c) => c.script && /UnlockCandidate|DownloadCV/.test(c.script)), 'still no unlock and no download');
+  assert.equal(w.exists('runtime/browser.lock'), false, 'the lock is released after the extra run');
   fs.writeFileSync(reedLog, '');
   // from here on the Caterer search finds nobody: the runs below are about the window, and stay short
   w.setWorld({ searchWorld: { byLocation: { LS29: { total: 777, pages: { 1: [], 2: [], 3: [] } } } } });

@@ -40,6 +40,12 @@ function normaliseLabel(raw) {
   return LABELS.find((l) => l.toLowerCase() === t) || null;
 }
 
+/** The window text of a request as it may be logged and stored: plain characters only, at most 20 (a label is 9 at most; a hand-written file may hold anything). */
+function plainLabel(raw) {
+  if (raw === undefined || raw === null) return '';
+  return String(raw).replace(/[^A-Za-z0-9 ]/g, '?').slice(0, 20);
+}
+
 /** A pending file is a manual request when its source is one of MANUAL_SOURCES (a scheduled territory or the catch-up is not). */
 function isManualSource(source) {
   return MANUAL_SOURCES.includes(String(source === undefined || source === null ? '' : source));
@@ -120,7 +126,7 @@ function loadCatererConfig(file) {
 function catererFilterFor(o) {
   const requested = o.activeWithin === undefined || o.activeWithin === null ? '' : String(o.activeWithin);
   const sett = o.setting && SETTINGS.includes(o.setting) ? { value: o.setting, warn: null } : readSetting(o.getEnv);
-  const base = { requested, label: normaliseLabel(requested), setting: sett.value, id: null, echo: [], note: '', warn: false };
+  const base = { requested: plainLabel(requested), label: normaliseLabel(requested), setting: sett.value, id: null, echo: [], note: '', warn: false };
   if (sett.warn) { base.note = sett.warn; base.warn = true; }
   const manual = !!o.manual;
   if (sett.value === 'off') {
@@ -129,7 +135,7 @@ function catererFilterFor(o) {
   }
   if (sett.value === 'manual' && !manual) return base; // a scheduled territory: exactly as before this change
   if (!base.label) {
-    base.note = `the window "${requested.slice(0, 20).replace(/[^A-Za-z0-9 ]/g, '?')}" is not one of the eight labels: no filter sent to Caterer`;
+    base.note = `the window "${base.requested}" is not one of the eight labels: no filter sent to Caterer`;
     base.warn = true;
     return base;
   }
@@ -217,7 +223,8 @@ function evaluateApplied(o) {
     return out;
   }
   if (!o.expected) return out; // an id of the URL that the config does not know any more: nothing to compare with
-  if (!r.readable) { out.matched = MATCH.UNREADABLE; return out; }
+  // a results page whose summary line is missing says nothing about the window (a layout that changed, or a page with no results): never a verdict
+  if (!r.readable || r.summary === false) { out.matched = MATCH.UNREADABLE; return out; }
   out.matched = o.expected.echo.some((e) => fold(e) === fold(r.applied)) ? MATCH.YES : MATCH.NO;
   return out;
 }
@@ -250,11 +257,12 @@ const REED_WINDOWS = Object.freeze({
  * @returns {{requested:string, arg:string, exact:boolean, note:string, warn:boolean}}
  */
 function reedWindowFor(activeWithin) {
-  const requested = activeWithin === undefined || activeWithin === null || activeWithin === '' ? DEFAULT_LABEL : String(activeWithin);
-  const label = normaliseLabel(requested);
+  const asked = activeWithin === undefined || activeWithin === null || activeWithin === '' ? DEFAULT_LABEL : String(activeWithin);
+  const label = normaliseLabel(asked);
   if (!label) {
+    const requested = plainLabel(asked);
     return { requested, arg: REED_WINDOWS[DEFAULT_LABEL].arg, exact: false, warn: true,
-      note: `the window "${requested.slice(0, 20).replace(/[^A-Za-z0-9 ]/g, '?')}" is not one of the eight labels: Reed searched the last month, as before` };
+      note: `the window "${requested}" is not one of the eight labels: Reed searched the last month, as before` };
   }
   const w = REED_WINDOWS[label];
   return { requested: label, arg: w.arg, exact: w.exact, note: w.note || '', warn: !w.exact };
@@ -269,8 +277,10 @@ function reedCvLimitFor(cvLimit) {
 // ----------------------------------------------------------------------------------------------- the alert, once a day
 
 /**
- * One WARN alert caterer-activity-mismatch per London day. The day is marked BEFORE the alert is sent and taken back if sending throws.
- * @param {{text:string, meta?:object, now?:Date, notify?:Function, file?:string}} o
+ * One WARN alert caterer-activity-mismatch per London day and per cause (a window that does not match and a summary that cannot be read are
+ * two causes: one must not hide the other). The cause is marked BEFORE the alert is sent and taken back if sending throws. A state file of the
+ * earlier form ({day} with no list) counts as "everything sent today".
+ * @param {{text:string, meta?:object, now?:Date, notify?:Function, file?:string, cause?:string}} o
  * @returns {boolean} true when the alert was sent now.
  */
 function alertOncePerDay(o) {
@@ -278,14 +288,20 @@ function alertOncePerDay(o) {
   const { londonParts } = require('./time');
   const file = o.file || path.join(paths.RUNTIME, 'activity-alert.json');
   const day = londonParts(o.now || new Date()).ymd;
+  const cause = o.cause ? String(o.cause).slice(0, 20) : 'any';
   const state = fsx.readJson(file, null);
-  if (state && state.day === day) return false;
-  try { fsx.writeJsonAtomic(file, { day }, 0o600); } catch { return false; }
+  let sent = [];
+  if (state && state.day === day) {
+    if (!Array.isArray(state.sent)) return false;
+    sent = state.sent.filter((x) => typeof x === 'string').slice(0, 10);
+    if (sent.includes(cause)) return false;
+  }
+  try { fsx.writeJsonAtomic(file, { day, sent: sent.concat(cause) }, 0o600); } catch { return false; }
   const send = o.notify || require('./notify').notify;
   try {
     send({ severity: 'warn', key: ALERT_KEY, text: o.text, meta: o.meta });
   } catch {
-    try { fsx.safeUnlink(file); } catch { /* nothing more to do */ }
+    try { if (sent.length) fsx.writeJsonAtomic(file, { day, sent }, 0o600); else fsx.safeUnlink(file); } catch { /* nothing more to do */ }
     return false;
   }
   return true;
@@ -293,6 +309,6 @@ function alertOncePerDay(o) {
 
 module.exports = {
   LABELS, MANUAL_SOURCES, SETTINGS, DEFAULT_SETTING, SETTING_NAME, ALERT_KEY, CONFIG_NAME, DEFAULT_LABEL, DEFAULT_CV_LIMIT, MATCH, REED_WINDOWS,
-  SUMMARY_JS, SUMMARY_B64, configFile, normaliseLabel, isManualSource, readSetting, validateCatererConfig, loadCatererConfig, catererFilterFor,
+  SUMMARY_JS, SUMMARY_B64, configFile, normaliseLabel, plainLabel, isManualSource, readSetting, validateCatererConfig, loadCatererConfig, catererFilterFor,
   sentIdFromUrl, entryForId, sanitiseEcho, parseSummaryOutput, evaluateApplied, activityLine, reedWindowFor, reedCvLimitFor, alertOncePerDay,
 };

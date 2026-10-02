@@ -205,10 +205,9 @@ test('--recent prints the window of the last runs from their results files: requ
     fs.writeFileSync(path.join(dir, 'phase2-results-e.json'), '{ broken');
     const lines = probe.recentRuns(5, home);
     assert.equal(lines.length, 3, 'unreadable files are skipped');
-    assert.equal(lines[0], 'RUN date=2026-10-02 location=FY4 sources=both requested="12 months" cv_limit=30 sent="LastActivityId=15" applied="12 months" match=yes pool=321 reed_window=year reed_cv_limit=30');
-    assert.equal(lines[1], 'RUN date=2026-10-01 location=LS1 sources=caterer requested="1 month" cv_limit=20 sent="LastActivityId=none" applied="" match=n/a pool=90');
-    assert.match(lines[2], /^RUN date=2026-09-30 location=M1 sources=caterer activity=not-recorded/);
-    assert.ok(!lines.join('\n').includes('Test Role'), 'no job title is printed');
+    assert.equal(lines[0], 'RUN date=2026-10-02 job="Test Role" location=FY4 sources=both requested="12 months" cv_limit=30 sent="LastActivityId=15" applied="12 months" match=yes pool=321 reed_window=year reed_cv_limit=30');
+    assert.equal(lines[1], 'RUN date=2026-10-01 job="" location=LS1 sources=caterer requested="1 month" cv_limit=20 sent="LastActivityId=none" applied="" match=n/a pool=90');
+    assert.match(lines[2], /^RUN date=2026-09-30 job="" location=M1 sources=caterer activity=not-recorded/);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -248,4 +247,42 @@ test('the real adapters need no module that is not already part of the pipeline:
   assert.equal(typeof d.busy, 'function');
   assert.equal(typeof d.caterer.readPage, 'function');
   assert.equal(typeof d.reed.count, 'function');
+});
+
+test('--extra-ids adds one page per id that the config does not hold: the pipeline\'s own URL with that id, read like any other, never twice', async () => {
+  const v = probe.catererVariants({ job: 'Test Role', location: 'FY4', distance: 20, extraIds: [14, 10, 6, 15, 14] });
+  assert.deepEqual(v.variants.map((x) => x.param), ['none', 'LastActivityId=7', 'LastActivityId=8', 'LastActivityId=9', 'LastActivityId=11', 'LastActivityId=15', 'LastActivityId=0',
+    'LastActivityId=14', 'LastActivityId=10', 'LastActivityId=6'], 'an id of the config or a repeat is not probed again');
+  assert.deepEqual(v.variants.slice(7).map((x) => x.label), ['(extra id, not in the config)', '(extra id, not in the config)', '(extra id, not in the config)']);
+  const plain = probe.catererVariants({ job: 'Test Role', location: 'FY4', distance: 20 }).variants;
+  const noId = (u) => u.replace(/SearchId=[0-9a-f-]+/, 'SearchId=X');
+  assert.equal(noId(v.variants[0].url), noId(plain[0].url));
+  assert.equal(noId(v.variants[7].url), noId(plain[0].url).replace('&HideCandidatesSinceDays=7&', '&HideCandidatesSinceDays=7&LastActivityId=14&'));
+  // a broken config still probes the no-parameter page and the extra ids
+  const broken = probe.catererVariants({ job: 'Test Role', location: 'FY4', distance: 20, extraIds: [14], config: { ok: false, error: 'the file is not valid JSON' } });
+  assert.deepEqual(broken.variants.map((x) => x.param), ['none', 'LastActivityId=14']);
+  assert.equal(broken.configError, 'the file is not valid JSON');
+  // a dry run lists them, a real run reads them
+  const h = io();
+  const deps = fakeDeps();
+  assert.equal(await probe.main(ARGS.concat(['--dry-run', '--extra-ids', '6,10,14']), h, deps), 0);
+  assert.deepEqual(h.lines.filter((l) => l.startsWith('CATERER variant')).map((l) => /param=(\S+)/.exec(l)[1]).slice(7), ['LastActivityId=6', 'LastActivityId=10', 'LastActivityId=14']);
+  assert.deepEqual(deps.log, []);
+  const real = io();
+  const rdeps = fakeDeps();
+  assert.equal(await probe.main(ARGS.concat(['--source', 'caterer', '--extra-ids', '14']), real, rdeps), 0);
+  assert.ok(real.lines.includes('CATERER param=LastActivityId=14 label="(extra id, not in the config)" applied="" pool=? status=ok'), real.lines.join(' / '));
+  assert.ok(rdeps.log.includes('page:14'));
+});
+
+test('--extra-ids takes whole numbers from 0 to 999, at most ten, and anything else is a usage error before anything is touched', async () => {
+  assert.deepEqual(probe.parseIds('6,10,14'), [6, 10, 14]);
+  assert.deepEqual(probe.parseIds(' 6 , 6,0'), [6, 0]);
+  for (const bad of ['', '6,', 'x', '1000', '-1', '1.5', '6;10', '0,1,2,3,4,5,6,7,8,9,10']) {
+    const e = io();
+    const deps = fakeDeps();
+    assert.equal(await probe.main(ARGS.concat(['--extra-ids', bad]), e, deps), 2, bad);
+    assert.deepEqual(deps.log, [], bad);
+  }
+  assert.equal(await probe.main(ARGS.concat(['--extra-ids']), io(), fakeDeps()), 2);
 });

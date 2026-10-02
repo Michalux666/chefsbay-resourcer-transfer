@@ -60,6 +60,28 @@ test('a scheduled territory gets the URL of main, byte for byte, under the defau
   });
 });
 
+// The same proof without git history: the URLs the release this change started from (bc3e750) built for these inputs, written out.
+const GOLDEN = [
+  [{ ...BASE }, 'https://recruiter.caterer.com/CandidateSearchWebMvc/CandidateSearch/Results?FreeText=Chef&ShowUnspecifiedSalary=False&CurrentLocation=FY4&Radius=32187&SalaryFacetsType=99&PreRegStatusFacet=0%2c1&HideCandidatesSinceDays=7&SearchId=sid-1&scr=1'],
+  [{ ...BASE, jobTitle: 'Kitchen Porter', location: 'DL7', distance: 30 }, 'https://recruiter.caterer.com/CandidateSearchWebMvc/CandidateSearch/Results?FreeText=Kitchen+Porter&ShowUnspecifiedSalary=False&CurrentLocation=DL7&Radius=48280&SalaryFacetsType=99&PreRegStatusFacet=0%2c1&HideCandidatesSinceDays=7&SearchId=sid-1&scr=1'],
+  [{ ...BASE, location: 'B1', distance: 25, keywords: 'nvq dbs' }, 'https://recruiter.caterer.com/CandidateSearchWebMvc/CandidateSearch/Results?FreeText=Chef+nvq+dbs&ShowUnspecifiedSalary=False&CurrentLocation=B1&Radius=48280&SalaryFacetsType=99&PreRegStatusFacet=0%2c1&HideCandidatesSinceDays=7&SearchId=sid-1&scr=1'],
+  [{ ...BASE, jobTitle: 'Kitchen & Porter', location: 'LS29', distance: 5 }, 'https://recruiter.caterer.com/CandidateSearchWebMvc/CandidateSearch/Results?FreeText=Kitchen+%26+Porter&ShowUnspecifiedSalary=False&CurrentLocation=LS29&Radius=8047&SalaryFacetsType=99&PreRegStatusFacet=0%2c1&HideCandidatesSinceDays=7&SearchId=sid-1&scr=1'],
+];
+
+test('a scheduled territory gets the URL of the previous release, byte for byte (golden URLs, no git needed), under every setting and every label', () => {
+  for (const setting of [undefined, 'manual', 'off']) {
+    for (const [input, golden] of GOLDEN) {
+      withSetting(setting, () => {
+        assert.equal(builder.buildResultsUrl(input).url, golden, `no window passed, setting ${setting}`);
+        for (const label of sa.LABELS) assert.equal(builder.buildResultsUrl({ ...input, activeWithin: label, manual: false }).url, golden, `scheduled ${label}, setting ${setting}`);
+      });
+    }
+  }
+  // a one-off request under off, and a window that is not a label, send nothing either
+  withSetting('off', () => { for (const [input, golden] of GOLDEN) assert.equal(builder.buildResultsUrl({ ...input, activeWithin: '12 months', manual: true }).url, golden); });
+  withSetting(undefined, () => { for (const [input, golden] of GOLDEN) assert.equal(builder.buildResultsUrl({ ...input, activeWithin: 'last fortnight', manual: true }).url, golden); });
+});
+
 test('a one-off request carries LastActivityId after HideCandidatesSinceDays and nothing else changes in the URL', () => {
   const plain = builder.buildResultsUrl(BASE).url;
   const r = withSetting(undefined, () => builder.buildResultsUrl({ ...BASE, activeWithin: '12 months', manual: true }));

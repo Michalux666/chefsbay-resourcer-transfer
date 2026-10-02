@@ -67,16 +67,25 @@ test('the mismatch alert is sent once a day: a second run on the same day logs t
 });
 
 test('a page whose summary cannot be read: match=unreadable, a WARN alert when the page had cards, the run is not stopped', async (t) => {
+  // a results page that has no header and no summary line (the layout changed): unreadable, and the alert says the summary could not be read
+  const changed = await run(t, { summaryText: 'Showing 1 candidates on this page' }, ['--results-url', URL_ID(8), '--active-within', '1 month']);
+  assert.strictEqual(changed.r.code, 0, changed.out);
+  assert.strictEqual(lineOf(changed.out), 'ACTIVITY_FILTER requested="1 month" sent="LastActivityId=8" applied="" match=unreadable');
+  assert.strictEqual(changed.status.activity.matched, 'unreadable');
+  assert.strictEqual(changed.status.status, 'phase1_complete');
+  assert.strictEqual(changed.alerts.length, 1);
+  assert.match(changed.alerts[0].text, /could not be read.*not confirmed/);
+  // the evaluation itself failing (a timeout, a browser error) is logged as unreadable but says nothing about the layout: no alert
   const broken = await run(t, { activityError: 'Error: page evaluation failed' }, ['--results-url', URL_ID(15), '--active-within', '12 months']);
   assert.strictEqual(broken.r.code, 0, broken.out);
   assert.strictEqual(lineOf(broken.out), 'ACTIVITY_FILTER requested="12 months" sent="LastActivityId=15" applied="" match=unreadable');
   assert.strictEqual(broken.status.activity.matched, 'unreadable');
-  assert.strictEqual(broken.alerts.length, 1);
-  assert.match(broken.alerts[0].text, /could not be read.*not confirmed/);
-  // a results page that has no header and no summary line (the layout changed) reads the same way
-  const changed = await run(t, { summaryText: 'Showing 1 candidates on this page' }, ['--results-url', URL_ID(8), '--active-within', '1 month']);
-  assert.strictEqual(changed.status.activity.matched, 'unreadable');
-  assert.strictEqual(changed.status.status, 'phase1_complete');
+  assert.deepStrictEqual(broken.alerts, [], 'a failed read proves nothing about the page');
+  // a header with no summary line is unreadable too, not a mismatch (the old reading said match=no with an alert about "no window")
+  const headerOnly = await run(t, { summaryText: 'Candidates 55' + String.fromCharCode(10) + 'Some other layout' }, ['--results-url', URL_ID(15), '--active-within', '12 months']);
+  assert.strictEqual(headerOnly.status.activity.matched, 'unreadable');
+  assert.strictEqual(headerOnly.status.activity.poolHeaderCount, 55);
+  assert.match(headerOnly.alerts[0].text, /could not be read/);
   // a sign-in page is not a results page either: unreadable (the run has its own session checks)
   // an empty search (no cards on page 1) that cannot be read raises no alert: there is nothing to confirm
   const empty = await run(t, { cards: [], text: '0 candidates match your search', activityError: 'Error: nothing here' }, ['--results-url', URL_ID(15), '--active-within', '12 months']);
@@ -145,4 +154,20 @@ test('a page 1 that fails to load is not the one that is read: the first page th
   assert.strictEqual(r.code, 0, r.stdout);
   assert.strictEqual(lineOf(r.stdout), 'ACTIVITY_FILTER requested="12 months" sent="LastActivityId=15" applied="12 months" match=yes');
   assert.strictEqual(activityEvals(r.calls), 1);
+});
+
+test('a window text that is none of the labels never reaches the log or the records in full (plain characters, at most 20)', async (t) => {
+  const home = h.makeHome(scenarioOf({ summaryText: summary(70, '1 month') }), { activity: true });
+  t.after(() => h.cleanup(home));
+  const params = path.join(home, 'params.json');
+  const NL = String.fromCharCode(10);
+  const hostile = 'SECRETPLANT"' + NL + 'FAKE_LINE: injected ' + 'y'.repeat(400);
+  fs.writeFileSync(params, JSON.stringify({ RESULTS_URL: h.RESULTS_URL, JOB_TITLE: 'Chef', LOCATION: 'LS29', SOURCES: 'caterer', ACTIVE_WITHIN: hostile, CV_LIMIT: 25 }));
+  const r = await h.runPhase1(home, ['--params-file', params]);
+  assert.strictEqual(r.code, 0, r.stdout);
+  const status = h.statusOf(home);
+  assert.ok(status.activity.requestedActiveWithin.length <= 20 && /^[A-Za-z0-9 ?]*$/.test(status.activity.requestedActiveWithin), status.activity.requestedActiveWithin);
+  const seen = r.stdout + JSON.stringify(status);
+  assert.ok(!seen.includes('yyyyyyyyyy') && !seen.includes('FAKE_LINE: '), 'the text is cut');
+  assert.ok(!r.stdout.split(NL).some((l) => l.startsWith('FAKE_LINE')), 'no line of its own');
 });
