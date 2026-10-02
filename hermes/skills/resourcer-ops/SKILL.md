@@ -49,6 +49,14 @@ codes: 0 queued, 2 invalid, 3 that job and place is already queued or running (n
 ahead of the scheduled territories and is picked up by the next tick inside 06:00-22:00. Each search can unlock paid Caterer credits:
 queue at most a few at the owner's request, never in a loop, and ask before more than five in a day.
 
+The window (`--active-within`) and the CV limit (`--cv-limit`) of a request reach both sources: Reed searches that window and uses that limit (still lowered by the day's Reed view budget), and Caterer is sent the window as `LastActivityId` for a one-off request (`CATERER_ACTIVITY_FILTER`, default `manual`; only the owner changes it). The request also creates scheduled territory rows with the stored defaults (1 month, 20, priority low); that is how it has always been and the request is a one-off. 3 months and 18 months have no Caterer id (no filter is sent, a WARN line says so); Reed searches 18 months as 2 years. To state which window a run really used, read, never guess:
+
+```
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --recent 5
+```
+
+It prints one line per recent run: what was requested, what was sent (`LastActivityId`), what Caterer said it applied, `match=yes|no|unreadable|n/a`, the pool of the page header and the Reed window and limit (read only, no browser, no names). The WARN alert `caterer-activity-mismatch` (once a day) means Caterer showed another window than the one sent; report it, the owner decides (docs/ACTIVITY.md). The live probe of the windows (`tools/activity-probe.js --job ... --location ... --distance ...`) loads search pages only and is run once, at the owner's word, by `docs/UPDATE-G.md`; never run it while a run is in flight (it refuses, exit 3).
+
 ## 3. Halt and back-off
 
 ```

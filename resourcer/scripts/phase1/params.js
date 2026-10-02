@@ -22,7 +22,8 @@ const FLAGS = {
   'params-file': 'PARAMS_FILE',
 };
 const INT_KEYS = ['CV_LIMIT', 'CANDIDATE_COUNT', 'DISTANCE_MILES', 'MAX_PAGES'];
-const TRUTHY_STRING_KEYS = ['RESULTS_URL', 'SEARCH_ID', 'JOB_TITLE', 'LOCATION', 'ACTIVE_WITHIN', 'REQUESTED_AT', 'INIT_STATUS_FILE', 'PRIORITY', 'SOURCES'];
+// ACTIVITY_NOTE (params file only, absent unless the window of the search could not be sent: docs/ACTIVITY.md) is shown in the run log and the status.
+const TRUTHY_STRING_KEYS = ['RESULTS_URL', 'SEARCH_ID', 'JOB_TITLE', 'LOCATION', 'ACTIVE_WITHIN', 'REQUESTED_AT', 'INIT_STATUS_FILE', 'PRIORITY', 'SOURCES', 'ACTIVITY_NOTE'];
 
 const USAGE = [
   'Usage: node scripts/phase1.js --results-url <url> --job-title <title> --location <loc> [options]',

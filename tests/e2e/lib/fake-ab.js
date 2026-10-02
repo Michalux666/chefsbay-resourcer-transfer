@@ -24,6 +24,7 @@ site.navigate = function navigate(state, cfg, url) {
       const u = new URL(url);
       state.searchLoc = u.searchParams.get('CurrentLocation');
       state.searchPageNo = Number(u.searchParams.get('PageNumber') || 1);
+      state.searchActivityId = u.searchParams.get('LastActivityId');
     } catch { /* keep the previous values */ }
   }
   return r;
@@ -52,7 +53,31 @@ function searchDocument(state, cfg) {
   };
 }
 
+// What the results page says about the filters it applied (docs/ACTIVITY.md): the header count and the summary line. scenario searchWorld.activity:
+//   echoById {id: text}   the text Caterer echoes for a LastActivityId (default: the legacy probe's values)
+//   absentEcho            the text when no LastActivityId was sent (default: none, the summary then has no 'Active within last' part)
+//   forceEcho             one text for every page (a Caterer that shows another window than the one sent)
+//   noSummary             the summary line and header are missing (a changed page)
+const DEFAULT_ECHO = { 7: '14 days', 8: '1 month', 9: '2 months', 11: '6 months', 15: '12 months', 0: 'All' };
+function activityDocument(state, cfg) {
+  const act = (cfg.searchWorld && cfg.searchWorld.activity) || {};
+  const world = cfg.searchWorld && cfg.searchWorld.byLocation && cfg.searchWorld.byLocation[state.searchLoc];
+  const cards = (world && world.pages && world.pages[String(state.searchPageNo || 1)]) || [];
+  if (act.noSummary) return { body: { innerText: `Showing ${cards.length} candidates on this page` } };
+  const id = state.searchActivityId;
+  const byId = Object.assign({}, DEFAULT_ECHO, act.echoById || {});
+  let text = id === null || id === undefined ? (act.absentEcho === undefined ? null : act.absentEcho) : byId[id];
+  if (act.forceEcho !== undefined) text = act.forceEcho;
+  const total = (world && world.total) || cards.length;
+  const summary = `Search anything in CV or Profile: Chef. Exact match.${text === null || text === undefined ? '' : ` Active within last: ${text}.`} CV/Profile: Both`;
+  return { body: { innerText: `Candidates ${total}\n${summary}\n` } };
+}
+
 site.evalScript = async function evalScript(script, state, cfg, save) {
+  if (state.page === 'search' && cfg.searchWorld && script.includes('ACTIVITY-READ')) {
+    const vm = require('vm');
+    return vm.runInContext(script, vm.createContext({ document: activityDocument(state, cfg), Array, JSON, RegExp, parseInt, String }), { timeout: 5000 });
+  }
   if (state.page === 'search' && cfg.searchWorld) {
     const isExtract = script.includes('querySelectorAll') && script.includes('candidate-');
     const isProbe = script.includes("'EMPTY'") && script.includes('innerText');

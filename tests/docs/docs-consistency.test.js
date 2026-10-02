@@ -26,7 +26,7 @@ const CODE = ALL.filter((f) => /^(resourcer\/scripts|tools|plugin)\/.*\.(js|py|s
 const LIVE_DOCS = [
   'README.md', 'HANDOFF.md', 'OPERATOR-PROMPT.md', 'hermes/AGENTS.md', 'hermes/SOUL.md', 'hermes/skills/resourcer-ops/SKILL.md',
   'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/OPERATIONS.md', 'docs/CUTOVER.md', 'docs/ROLLBACK.md', 'docs/TEARDOWN.md',
-  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-RESCREEN.md', 'docs/RESCREEN.md', 'docs/UPDATE-E.md', 'docs/RESURFACE.md',
+  'docs/SECURITY.md', 'docs/KNOWN-LIMITS.md', 'docs/SCREENING.md', 'docs/ENV.md', 'docs/UPDATE-JEV-ONLY.md', 'docs/UPDATE-B.md', 'docs/UPDATE-C.md', 'docs/UPDATE-RESCREEN.md', 'docs/RESCREEN.md', 'docs/UPDATE-E.md', 'docs/RESURFACE.md', 'docs/ACTIVITY.md', 'docs/UPDATE-G.md',
 ];
 const ALL_DOCS = ALL.filter((f) => /^(docs\/.*\.md|README\.md|HANDOFF\.md|OPERATOR-PROMPT\.md|hermes\/.*\.md|plugin\/.*\.md)$/.test(f));
 
@@ -907,4 +907,163 @@ test('UPDATE-E.md copies exactly the installed files that changed since the prev
   assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
   const words = ['zero', 'one', 'two', 'three', 'four', 'five'];
   assert.ok(note.includes(`this release changes exactly ${words[profile.length]}: `), 'the note says how many installed files change, and the number is right');
+});
+
+// ---- Update G (the search window and the CV limit: docs/ACTIVITY.md, docs/UPDATE-G.md) ------------------------------------------------------------
+
+test('UPDATE-G.md: only commands this operator may run, code before checks before the probe before resume, no setting is changed, and a rollback that needs none', () => {
+  const t = read('docs/UPDATE-G.md');
+  const blocks = fences(t);
+  assert.ok(blocks.length >= 25, `only ${blocks.length} command blocks`);
+  for (const b of blocks) {
+    const bare = noQuotes(b);
+    assert.ok(!/(^|\s)(grep|head|sed|tail|awk|cat)(\s|$)/.test(bare), `a command the operator cannot run: ${b.slice(0, 80)}`);
+    assert.ok(!bare.includes('|'), `a shell pipe: ${b.slice(0, 80)}`);
+    assert.ok(!/config set/.test(b), `the update changes no setting: ${b.slice(0, 80)}`);
+    if (/(^|\s)\S*hermes -p /.test(b)) assert.ok(b.startsWith('/opt/hermes/bin/hermes -p resourcer '), `Hermes command without its full path: ${b}`);
+  }
+  const prose = t.split('/opt/hermes/bin/hermes -p resourcer').join('');
+  assert.ok(!/(^|[^/])hermes -p resourcer/.test(prose), 'a bare hermes command');
+  const steps = t.indexOf('## 1. Before you start');
+  const at = (needle, from) => { const i = t.indexOf(needle, from || steps); assert.ok(i >= 0, `missing: ${needle}`); return i; };
+  const list = at('/opt/hermes/bin/hermes -p resourcer cron list');
+  const pause = at('/opt/hermes/bin/hermes -p resourcer cron pause resourcer-tick');
+  const idle = at('pipeline-watchdog.js --status');
+  const record = at('git -C /opt/data/profiles/resourcer/workspace rev-parse HEAD');
+  const pull = at('git -C /opt/data/profiles/resourcer/workspace pull --ff-only');
+  const verify = at('check-manifest.js --installed off --expect <NEW_DIGEST>');
+  const copy = at('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md');
+  const full = at('check-manifest.js --expect <NEW_DIGEST>');
+  const url = at('build-caterer-results-url.js --job "Chef" --location FY4 --distance 20 --search-id probe --active-within "1 month"');
+  const oneOff = at('--active-within "12 months" --manual');
+  const unmapped = at('--active-within "3 months" --manual');
+  const recent = at('tools/activity-probe.js --recent 3');
+  const dry = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run');
+  const gate = at('## 8. The read-only probe (HUMAN gate');
+  const probe = at('tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20\n', gate);
+  const resume = at('/opt/hermes/bin/hermes -p resourcer cron resume resourcer-tick', gate);
+  assert.ok(list < pause && pause < idle && idle < record && record < pull && pull < verify && verify < copy && copy < full && full < url && url < oneOff && oneOff < unmapped && unmapped < recent && recent < dry && dry < gate && gate < probe && probe < resume,
+    'order: list, pause, idle, record, pull, verify, copy, full check, offline checks, probe (HUMAN gate), resume');
+  for (const ph of ['<NEW_DIGEST>', '<OLD_COMMIT>', '<OLD_DIGEST>']) assert.ok(t.includes(ph), ph);
+  assert.match(t, /never set `CATERER_ACTIVITY_FILTER`/);
+  assert.match(t, /never edit `config\/caterer-activity\.json`/);
+  assert.match(t, /There is no database migration/);
+  assert.match(t, /THE FIRST LIVE SIGNAL/);
+  assert.match(t, /HUMAN gate: the owner reads the result/);
+  assert.match(t, /STOP here\. Send the owner the printed lines exactly as they are/);
+  assert.match(t, /start with `bc3e750`|starts with `bc3e750`|starts `bc3e750`|the previous release starts with `bc3e750`/);
+  const rollback = t.slice(at('## Rolling back'));
+  assert.match(rollback, /reset --hard <OLD_COMMIT>/);
+  assert.match(rollback, /HUMAN-APPROVE/);
+  assert.match(rollback, /check-manifest\.js --expect <OLD_DIGEST>/);
+  assert.match(rollback, /nothing to set back/);
+  for (const f of ['docs/INSTALL.md', 'HANDOFF.md']) assert.ok(read(f).includes('docs/UPDATE-G.md'), `${f} points at the note`);
+});
+
+test('UPDATE-G.md copies exactly the installed files that changed since the previous release (bc3e750), and says nothing else changed', (t) => {
+  // pinned to the release that is installed on the instance (bc3e750), not to the branch it was cut from: that branch moves
+  const base = gitLines(['rev-parse', '--verify', '--quiet', 'bc3e750^{commit}']);
+  if (!base || !base[0]) { t.skip('no git history with the release commit bc3e750 here'); return; }
+  const changed = gitLines(['diff', '--name-only', base[0]]);
+  const added = gitLines(['ls-files', '--others', '--exclude-standard']);
+  if (!changed || !added) { t.skip('no git history here'); return; }
+  const files = changed.concat(added);
+  const note = read('docs/UPDATE-G.md');
+  const wrappers = files.filter((f) => /^hermes\/scripts\/resourcer-[a-z-]+\.sh$/.test(f) || f === 'hermes/SOUL.md' || f === 'hermes/cron/jobs.json');
+  assert.deepEqual(wrappers, [], 'a cron wrapper, the job list or SOUL.md changed: the note says they did not');
+  assert.deepEqual(files.filter((f) => f.startsWith('plugin/')), [], 'the dashboard plugin changed: the note says it did not');
+  assert.ok(!files.includes('resourcer/package.json'), 'package.json changed: the note says no npm install');
+  assert.ok(!files.includes('resourcer/scripts/migrate-schema.js'), 'the schema script changed: the note says no migration');
+  const profile = files.filter((f) => f.startsWith('hermes/') && f !== 'hermes/.env.example');
+  assert.deepEqual(profile.slice().sort(), ['hermes/AGENTS.md', 'hermes/skills/resourcer-ops/SKILL.md']);
+  assert.ok(note.includes('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md /opt/data/profiles/resourcer/workspace/AGENTS.md'));
+  assert.ok(note.includes('hermes/skills/resourcer-ops/. /opt/data/profiles/resourcer/skills/ops/resourcer-ops/'));
+  assert.ok(note.split('cp /opt/data/profiles/resourcer/workspace/hermes/AGENTS.md').length >= 3, 'copied on update and again on rollback');
+  const words = ['zero', 'one', 'two', 'three', 'four', 'five'];
+  assert.ok(note.includes(`this release changes exactly ${words[profile.length]}: `), 'the note says how many installed files change, and the number is right');
+  // the files the pull must bring, as step 3 names them
+  for (const f of ['resourcer/scripts/lib/search-activity.js', 'resourcer/config/caterer-activity.json', 'tools/activity-probe.js', 'docs/ACTIVITY.md']) {
+    assert.ok(files.includes(f), `${f} is new in this release`);
+    assert.ok(note.includes(f), `step 3 names ${f}`);
+  }
+});
+
+test('Update G: the alert key, the setting and the mapping the documents name are the ones of the code', () => {
+  const sa = require(path.join(REPO, 'resourcer/scripts/lib/search-activity.js'));
+  assert.equal(sa.ALERT_KEY, 'caterer-activity-mismatch');
+  for (const f of ['hermes/AGENTS.md', 'docs/OPERATIONS.md']) assert.ok(read(f).includes('caterer-activity-mismatch'), `${f} registers the alert`);
+  assert.equal(sa.DEFAULT_SETTING, 'manual');
+  assert.match(read('docs/ENV.md'), /^\| `CATERER_ACTIVITY_FILTER` \| `manual` /m);
+  assert.deepEqual(sa.readSetting(() => undefined), { value: 'manual', warn: null });
+  // the table of docs/ACTIVITY.md is the table of the shipped config
+  const cfg = JSON.parse(read('resourcer/config/caterer-activity.json'));
+  const act = read('docs/ACTIVITY.md');
+  for (const label of sa.LABELS) {
+    const row = act.split('\n').find((l) => l.startsWith(`| ${label} |`));
+    assert.ok(row, `ACTIVITY.md has a row for ${label}`);
+    const id = cfg.labels[label].id;
+    if (id === null) assert.match(row, /none known: no filter, a WARN/, label);
+    else assert.ok(new RegExp(`^\\| ${label} \\| ${id}[ (|]`).test(row), `${label}: id ${id} is the one of the config`);
+  }
+  assert.match(act.split('\n').find((l) => l.startsWith('| 18 months |')), /two years \(the next wider one/);
+  // the paths and the exit codes of the probe in OPERATIONS are the tool's
+  const tool = require(path.join(REPO, 'tools/activity-probe.js'));
+  assert.match(tool.USAGE, /Exit codes: 0 done, 1 unexpected error, 2 usage or validation error, 3 refused \(a pipeline run is in flight or the browser lock is held\),\n\s+4 not signed in \(Caterer\) or Reed token not refreshed, 5 some variants could not be read\./);
+  assert.match(read('docs/OPERATIONS.md'), /\| `activity-probe\.js` \| 0 done \(also `--dry-run` and `--recent`\), 1 unexpected, 2 usage or invalid input, 3 refused \(a pipeline run is in flight or the browser lock is held\), 4 not signed in \(Caterer\) or Reed token not refreshed, 5 some variants could not be read \|/);
+  const src = read('tools/activity-probe.js');
+  const parsed = new Set([...src.matchAll(/a === '(--[a-z-]+)'/g)].map((m) => m[1]));
+  const usage = new Set([...tool.USAGE.matchAll(/(--[a-z-]+)/g)].map((m) => m[1]));
+  parsed.delete('--help');
+  assert.deepEqual([...usage].filter((f) => f !== '--help').sort(), [...parsed].sort(), 'the usage text lists exactly the options the parser accepts');
+});
+
+test('Update G: the CV reject-rate ceiling is 0.20 in the shipped config, in the built-in defaults and in every document, and no document still says 10 percent', () => {
+  assert.equal(JSON.parse(read('resourcer/config/cv-screening.json')).alerts.rejectRateCeiling, 0.2);
+  assert.equal(JSON.parse(read('resourcer/scripts/lib/cv/defaults.json')).alerts.rejectRateCeiling, 0.2);
+  assert.match(read('docs/OPERATIONS.md'), /`cv-reject-rate-high` \| WARN \| CV screening rejected \(shadow: would reject\) more than 20 percent of a queue of at least 10 CVs/);
+  assert.match(read('hermes/AGENTS.md'), /\| cv-reject-rate-high \| [^\n]*more than 20 percent of a queue of at least 10 CVs/);
+  const cvdoc = read('docs/CV-SCREENING.md');
+  assert.match(cvdoc, /`alerts\.rejectRateCeiling`, `alerts\.rejectRateMinCandidates` \| 0\.20, 10 \|/);
+  for (const f of ['docs/CV-SCREENING.md', 'docs/OPERATIONS.md', 'hermes/AGENTS.md']) {
+    assert.ok(!/more than 10 percent of (a queue|at least 10 CVs)/.test(read(f)), `${f} still gives the old 10 percent ceiling`);
+  }
+  assert.match(read('docs/KNOWN-LIMITS.md'), /K-ACT8 \| The reject-rate ceiling[^\n]*design default, not yet confirmed by the owner/);
+});
+
+test('Update G: the Hermes cron history is read by job id in every document (the by-name form printed nothing on 2026-10-01), and the by-name form is only named to say so', () => {
+  for (const f of ALL_DOCS) {
+    const t = read(f);
+    assert.ok(!/cron runs resourcer-[a-z-]+/.test(t), `${f} gives \`cron runs\` a job name`);
+  }
+  const ops = read('docs/OPERATIONS.md');
+  assert.match(ops, /hermes -p resourcer cron runs <JOB_ID> --limit 5/);
+  assert.match(ops, /No cron execution attempts recorded/);
+  assert.match(ops, /The by-id form could not be tried offline/);
+});
+
+test('Update G: the documents keep design defaults apart from the owner\'s instruction (ACT-1 is the owner\'s; every other row says it is a design default, not yet confirmed by the owner)', () => {
+  const d = read('docs/DECISIONS.md');
+  const sec = d.slice(d.indexOf('## 18. The search window and the CV limit'));
+  assert.ok(sec.length > 500);
+  const row = (id) => sec.split('\n').find((l) => l.startsWith(`| ${id} |`));
+  assert.match(row('ACT-1'), /^\| ACT-1 \| 2026-10-01, the owner\./);
+  assert.match(sec, /Every number and mapping below is a design default, not yet confirmed by the owner, unless it says it is the owner's/);
+  for (let i = 2; i <= 8; i += 1) { assert.ok(row(`ACT-${i}`), `ACT-${i}`); assert.ok(!/^\| ACT-\d \| 2026-10-01, the owner\./.test(row(`ACT-${i}`)), `ACT-${i} is not an instruction of the owner`); }
+  assert.match(row('ACT-2'), /design default, not yet confirmed by the owner/);
+  const k = read('docs/KNOWN-LIMITS.md');
+  assert.match(k, /\| K-ACT1 \| OPEN, UNVERIFIED-LIVE\. The Caterer "active within" filter was silently dropped from 2026-06-02/);
+  assert.match(k, /FIRST LIVE SIGNAL: the `ACTIVITY_FILTER` line/);
+  assert.match(k, /\| K-ACT2 \| OPEN, awaiting the owner\. Standing territories are unchanged by default/);
+  assert.match(k, /K-ACT3 \| 3 months and 18 months have NO known Caterer id/);
+  const bad = [];
+  for (const [f, lines] of [['docs/ACTIVITY.md', read('docs/ACTIVITY.md').split('\n')], ['docs/UPDATE-G.md', read('docs/UPDATE-G.md').split('\n')],
+    ['docs/KNOWN-LIMITS.md', read('docs/KNOWN-LIMITS.md').split('\n').filter((l) => l.startsWith('| K-ACT'))], ['docs/DECISIONS.md', sec.split('\n')]]) {
+    for (const line of lines) {
+      for (const m of line.matchAll(/owner decision|decided by the owner|owner decided/gi)) {
+        const before = line.slice(Math.max(0, m.index - 16), m.index).toLowerCase();
+        if (!/\bnot (an )?$/.test(before)) bad.push(`${f}: ${line.slice(Math.max(0, m.index - 60), m.index + 40)}`);
+      }
+    }
+  }
+  assert.deepEqual(bad, []);
 });

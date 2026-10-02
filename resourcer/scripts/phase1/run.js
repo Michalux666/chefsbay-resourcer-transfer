@@ -19,6 +19,7 @@ const { finalise } = require('./finalise');
 const { handoff } = require('./handoff');
 const { KINDS, markIncomplete, raiseAlert } = require('./incomplete');
 const cvHold = require('./cv-hold');
+const activity = require('./activity');
 const { killAll } = require('./proc');
 const { makeOut, clockLondon, runTimestamp, round1, safeText } = require('./util');
 
@@ -125,6 +126,8 @@ async function pageLoop(ctx) {
     }
     consecutiveSkips = 0;
     const cards = ex.cards;
+    // The first results page that loaded shows which filters Caterer applied (docs/ACTIVITY.md): read once, never fails the run.
+    await activity.selfCheck(ctx, cards.length);
 
     out(`Cards on page ${st.page} : ${cards.length}`);
     st.pagesScraped++;
@@ -289,9 +292,11 @@ async function run(argv, opts) {
   };
   activeCtx = ctx;
   st.resultsUrlBase = norm.base;
+  st.activity = activity.initial(p, norm.base);
 
   out(`=== PHASE 1 START: ${clockLondon()} ===`);
   out(`JOB: ${p.JOB_TITLE} in ${p.LOCATION} | ${p.CANDIDATE_COUNT} candidates | CV_LIMIT=${p.CV_LIMIT}`);
+  activity.announce(ctx);
   sweepStaleInput();
 
   const { ownBridge } = clearForeignBridges(ctx);

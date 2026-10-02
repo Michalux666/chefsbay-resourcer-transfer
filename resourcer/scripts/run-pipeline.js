@@ -22,6 +22,7 @@ const env = require('./lib/env');
 const fsx = require('./lib/fsx');
 const { AUTH_MARKER, sourcesGate, syncGateStatus, authHold } = require('./reed-api-client');
 const launcher = require('./ensure-chrome-cdp');
+const activityLib = require('./lib/search-activity');
 const { PHASE2_HELD, PHASE2_HELD_EXIT } = require('./lib/phase2-exit');
 
 const RUNS_DIR = paths.RUNS;
@@ -86,17 +87,37 @@ function reedEnabled() {
   return g.reedEnabled;
 }
 
+// ---------------------------------------------------------------- the window and the CV limit of the request
+
+// What the request or territory asked for, as phase 1 recorded it in its status file (the `activity` block). A status without it (an older run,
+// a test) means the stored defaults: 1 month and 20, which give the same Reed arguments this script always passed.
+function requestedWindow(status) {
+  const a = status && status.activity && typeof status.activity === 'object' ? status.activity : {};
+  return { activeWithin: a.requestedActiveWithin, cvLimit: a.requestedCvLimit };
+}
+
+// The `activity` block that goes into the merged queue: Caterer's (from its queue, else the status file) plus what Reed was given.
+function activityBlock(status, queueFile, reedPlan) {
+  const q = queueFile && fs.existsSync(queueFile) ? readJson(queueFile) : null;
+  const base = (q && q.activity && typeof q.activity === 'object' && q.activity) || (status && status.activity) || null;
+  if (!base && !reedPlan) return null;
+  return { ...(base || {}), ...(reedPlan ? { reed: reedPlan } : {}) };
+}
+
 // ---------------------------------------------------------------- Reed Phase 1
 
 async function runReedPhase1(opts, extraEnv) {
   log('=== Reed Phase 1 ===');
+  // The window and the CV limit of the request or territory (docs/ACTIVITY.md); the stored defaults give the values this call always had.
+  const win = opts.window || activityLib.reedWindowFor(null);
+  const cvLimit = activityLib.reedCvLimitFor(opts.cvLimit);
   const args = [
     path.join(SCRIPTS, 'reed-phase1.js'),
     '--job-title', opts.jobTitle || '',
     '--location', opts.location || '',
     '--distance', String(opts.distance || 20),
-    '--active-within', 'month',
-    '--cv-limit', '20',
+    '--active-within', win.arg,
+    '--cv-limit', String(cvLimit),
   ];
   if (opts.queueFile) args.push('--caterer-queue', opts.queueFile);
 
@@ -139,12 +160,14 @@ async function runReedPhase1(opts, extraEnv) {
     if (match) reedQueue = path.join(DOWNLOADS, `reed-approved-queue-${match[1]}.json`);
   }
   if (!failure && !authFailure && code !== 0 && !reedQueue) failure = { kind: 'phase1_exit', reason: `exit ${code}`, failedAt: new Date().toISOString() };
-  return { code, reedQueue, authFailure, failure };
+  // reed-phase1.js lowers the limit to the profile views left today and says so; the run record states the limit that was really used.
+  const lowered = /CV limit lowered from ([0-9]+) to ([0-9]+)/.exec(reedOut);
+  return { code, reedQueue, authFailure, failure, cvLimitEffective: lowered ? Number(lowered[2]) : cvLimit };
 }
 
 // ---------------------------------------------------------------- queue merge
 
-async function mergeQueues(catererQueueFile, reedQueueFile) {
+async function mergeQueues(catererQueueFile, reedQueueFile, activity) {
   const ts = getTimestamp();
   const mergedFile = path.join(DOWNLOADS, `merged-queue-${ts}.json`);
   const empty = { candidates: [], searchDate: new Date().toISOString().slice(0, 10) };
@@ -168,6 +191,8 @@ async function mergeQueues(catererQueueFile, reedQueueFile) {
     candidateCount: (caterer.candidateCount || 0) + (reed.candidateCount || 0),
     phase1Stats: { caterer: caterer.phase1Stats || {}, reed: reed.phase1Stats || {} },
     candidates: [...(caterer.candidates || []), ...(reed.candidates || [])],
+    // what was asked, sent and applied for the search window, with the Reed half (docs/ACTIVITY.md); absent for a caller that has none
+    ...(activity ? { activity } : {}),
   };
 
   fsx.writeJsonAtomic(mergedFile, merged, 0o600);
@@ -343,6 +368,9 @@ async function main(argv) {
       let reedFailure = null;
       let reedSkippedByConfig = false;
       let reedHold = null;
+      let reedWindow = null;
+      let reedCvLimit = null;
+      let reedActivity = null;
 
       if (!reedEnabled()) {
         reedSkippedByConfig = true;
@@ -351,6 +379,12 @@ async function main(argv) {
         log(`REED_HELD: ${reedHold.reason} (${reedHold.detail}) - Reed step skipped, its retries are not spent, Phase 2 runs on the Caterer queue`);
       } else {
         log('Sources = both - running Reed Phase 1...');
+        const asked = requestedWindow(status);
+        reedWindow = activityLib.reedWindowFor(asked.activeWithin);
+        reedCvLimit = activityLib.reedCvLimitFor(asked.cvLimit);
+        reedActivity = { activeWithin: reedWindow.arg, requestedActiveWithin: reedWindow.requested, cvLimit: reedCvLimit, cvLimitRequested: reedCvLimit, ran: false, ...(reedWindow.note ? { note: reedWindow.note } : {}) };
+        log(`REED_ACTIVITY requested="${reedWindow.requested}" sent="${reedWindow.arg}" cvLimit=${reedCvLimit}`);
+        if (reedWindow.warn) log(`WARN: ${reedWindow.note}`);
         const waitSec = Number(env.get('REED_LOCK_WAIT_SEC', '300'));
         const waitMs = (Number.isFinite(waitSec) && waitSec >= 0 ? waitSec : 300) * 1000;
         const lock = await launcher.browserLock.wait('reed', { purpose: 'run-pipeline', waitMs, pollMs: 5000 });
@@ -364,8 +398,9 @@ async function main(argv) {
           childEnv = { RESOURCER_BROWSER_LOCK_HOLDER_PID: String(lock.borrowed ? lock.holder.pid : process.pid) };
           try {
             const reedResult = await runReedPhase1({
-              jobTitle: status.jobTitle, location: status.location, distance: status.distance, queueFile,
+              jobTitle: status.jobTitle, location: status.location, distance: status.distance, queueFile, window: reedWindow, cvLimit: reedCvLimit,
             }, childEnv);
+            reedActivity = { ...reedActivity, cvLimit: reedResult.cvLimitEffective, ran: true };
             reedQueuePath = reedResult.reedQueue;
             reedAuthFailure = reedResult.authFailure;
             reedFailure = reedResult.failure;
@@ -380,7 +415,7 @@ async function main(argv) {
         finalQueueFile = queueFile;
       } else if (reedQueuePath && fs.existsSync(reedQueuePath)) {
         // Always merge, even if the Reed queue is empty: the merged file records that both sources were attempted.
-        finalQueueFile = await mergeQueues(queueFile, reedQueuePath);
+        finalQueueFile = await mergeQueues(queueFile, reedQueuePath, activityBlock(status, queueFile, reedActivity));
       } else {
         if (reedAuthFailure) {
           log(`!! Reed SKIPPED due to auth failure (${reedAuthFailure.reason}) - merged queue will carry authFailed flag`);
@@ -410,7 +445,7 @@ async function main(argv) {
             } : {}),
           },
         }, 0o600);
-        finalQueueFile = await mergeQueues(queueFile, placeholderReed);
+        finalQueueFile = await mergeQueues(queueFile, placeholderReed, activityBlock(status, queueFile, reedActivity));
       }
 
       // Phase 2 ALWAYS runs once on the final queue, even with 0 candidates (territory map update, pending-search cleanup).
@@ -468,4 +503,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, acquireRunLock, releaseRunLock, findApprovedQueue, mergeQueues, reedEnabled, parseArgs };
+module.exports = { main, acquireRunLock, releaseRunLock, findApprovedQueue, mergeQueues, reedEnabled, parseArgs, requestedWindow, activityBlock, runReedPhase1 };

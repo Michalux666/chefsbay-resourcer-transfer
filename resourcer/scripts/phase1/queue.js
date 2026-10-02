@@ -29,6 +29,8 @@ function statusObject(ctx, status, pg) {
     phase2Status: st.phase2Status,
     updatedAt: new Date().toISOString(),
   };
+  // what was asked, sent and applied for the search window (docs/ACTIVITY.md)
+  if (st.activity) obj.activity = st.activity;
   const why = reasonOf(st);
   if (why) {
     obj.incomplete = why;
@@ -134,6 +136,7 @@ function buildQueueObject(ctx, fin) {
     },
     candidates: st.approved,
   };
+  if (st.activity) obj.activity = st.activity;
   const why = reasonOf(st);
   if (why) obj.phase1Stats.incomplete = why;
   // only when a resurfaced candidate (or a stop of the second look) happened in this run: otherwise the queue is exactly what it always was

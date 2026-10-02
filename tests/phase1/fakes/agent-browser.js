@@ -55,6 +55,14 @@ async function main() {
   if (cmd === 'eval') {
     const b64 = argv[argv.indexOf('-b') + 1];
     const js = Buffer.from(b64 || '', 'base64').toString('utf8');
+    // the read of the filters Caterer applied (lib/search-activity.js): the real script runs against the page's summary text
+    if (js.includes('ACTIVITY-READ')) {
+      logCall('agent-browser', { cmd: 'eval', activity: true, page: st.page, jsMarker: false });
+      if (page.activityHang) await sleepMs(HANG_MS);
+      if (page.activityError) { process.stderr.write(String(page.activityError) + '\n'); process.exit(1); }
+      process.stdout.write(JSON.stringify(evalProbe(js, page.summaryText || '')) + '\n');
+      return;
+    }
     const isProbe = js.includes('EMPTY');
     logCall('agent-browser', { cmd: 'eval', probe: isProbe, page: st.page, jsMarker: js.includes('FAKE-EXTRACT') });
     if (isProbe) {

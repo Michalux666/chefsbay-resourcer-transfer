@@ -61,8 +61,10 @@ Check they exist and are enabled (agent):
 ```sh
 hermes -p resourcer cron list
 hermes -p resourcer cron status
-hermes -p resourcer cron runs resourcer-tick --limit 5
+hermes -p resourcer cron runs <JOB_ID> --limit 5
 ```
+
+`<JOB_ID>` is the id that `cron list` prints for the job (for the tick: the id on the `resourcer-tick` line). Use the id for `cron runs`: by the job NAME, `cron runs` printed "No cron execution attempts recorded" on this host on 2026-10-01 although the job was running, so an empty answer to the by-name form proves nothing. The by-id form could not be tried offline; it is the form to use until a live run shows otherwise (the other `cron` commands here take the job name, as the install note does).
 
 Pause or resume ONE job (owner asks):
 
@@ -152,6 +154,33 @@ Options: `--keywords`, `--sources both|caterer|reed`, `--priority high|medium|lo
 Exit codes: 0 queued, 2 invalid input, 3 that title and place is already queued or running (not an error; the dashboard shows 409), 4 could not write. The request appears as `pending-searches/search-<time>-<id>.json` with no claim stamp. Do not write those files by hand: a file that carries a `spawnedAt` key is treated as already claimed and is skipped for 10 minutes.
 
 While Reed is off (`RESOURCER_SOURCES=caterer`, the default) a request that asks for Reed runs as Caterer only and is consumed once.
+
+### 5.1 The search window and the CV limit (Update G, `docs/ACTIVITY.md`)
+
+A request names how recently a candidate must have been active (`--active-within`) and how many CVs one run may take (`--cv-limit`). Both reach both sources:
+
+- **Reed.** The window is searched as Reed's `activityTimeFrame` (14 days = two weeks, 1 month, 2 months, 3 months, 6 months, 12 months = a year, All) and the limit is the limit of the Reed run, still lowered to the Reed profile views left today exactly as before. Reed has no 18 months window: it is searched as 2 years (wider, never narrower) and the run record and the log say so. A scheduled territory with the stored defaults (1 month, 20) gets exactly the Reed arguments it always had.
+- **Caterer.** The window is sent as `LastActivityId` in the results URL (14 days 7, 1 month 8, 2 months 9, 6 months 11, 12 months 15, All 0: `config/caterer-activity.json`, UNVERIFIED-LIVE, taken from the legacy search probe of 2026-08-05). 3 months and 18 months have no known id: no filter is sent for them, a WARN line (`activity-filter-warn` in `logs/watchdog-runner.jsonl`, `ACTIVITY_FILTER_NOTE` in the run log) says why, and Caterer's own default window applies. Until Update G the window was never sent: every standing territory's stored `1 month` was silently dropped from 2026-06-02.
+- **Who sends it** is the setting `CATERER_ACTIVITY_FILTER` (owner only, `docs/ENV.md`): `manual` (default, a design default, not yet confirmed by the owner) sends it for one-off requests only (dashboard or `request-search.js`), so the standing territories are not changed; `all` sends every territory's stored window (a business decision: it shrinks every pool); `off` sends nothing (the behaviour before Update G).
+- **A request is a one-off.** It also creates scheduled territory rows with the stored defaults (1 month, 20, priority low, next run in about a month), not the values of the request. That is unchanged: change a standing territory with the territory tools if the owner wants it.
+
+What a run records (no personal data): the log line `ACTIVITY_FILTER requested="<label>" sent="LastActivityId=<id or none>" applied="<text Caterer echoed>" match=yes|no|unreadable|n/a` in `logs/phase1-console-*.log` (`n/a`: nothing was sent, or the config does not know the id; `applied` is empty when the page shows no window), and an `activity` block in the status file, the queue and the run results with `requestedActiveWithin`, `requestedCvLimit`, `sentLastActivityId`, `appliedFilterText`, `poolHeaderCount`, `matched` and, for a two-source run, a `reed` part with the window and the limit Reed was given. `match=no` or `unreadable` raises the WARN alert `caterer-activity-mismatch` (section 11, once a day): the run is not stopped, only the pool differs. Read the last runs in one command (no browser, nothing printed but counts and fixed strings):
+
+```sh
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --recent 5
+```
+
+The live check (`tools/activity-probe.js`, read only: search pages only, no unlock, no credit, no profile view, no CV, no Zoho, no database). Run it once on the live instance when `docs/UPDATE-G.md` says so, with the pipeline idle. The owner names the title and the postcode area; the searches of 2026-10-01 used `FY4` and 20 miles. First the dry run (nothing is requested), then the real run (a few minutes: seven Caterer pages and eleven Reed searches):
+
+```sh
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20 --dry-run
+```
+
+```sh
+node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --job "<TITLE>" --location FY4 --distance 20
+```
+
+It prints, per Caterer variant, the parameter (`none` is the URL a scheduled search sends), the text the page echoed and the pool count of its header, and per Reed value the total candidate count. Exit codes: 0 every variant read, 1 unexpected, 2 usage, 3 refused (a pipeline run is in flight or the browser lock is held: wait, do not loop), 4 not signed in (Caterer browser signed out, or the Reed token could not be refreshed: the probe never signs in; nothing more of that source is probed), 5 some variants could not be read (the others are printed). `--source caterer` or `--source reed` probes one source. The owner reads the numbers and decides: (1) the mapping: each `LastActivityId` row should echo its own label (`applied="12 months"` for 15); a row that echoes another text means that id is wrong, and the owner corrects it in `config/caterer-activity.json` (an edit made on the instance shows as `CONFIG_CHANGED` in the manifest check until it is committed); (2) what the absent parameter really does: compare the `none` row with the others (if its applied text or pool equals 12 months, Caterer's default is wide and the standing territories have been searching it; if it equals 1 month, nothing was lost); (3) whether to set `CATERER_ACTIVITY_FILTER=all`: the difference between the `none` pool and the `1 month` pool is what every standing territory would lose; (4) the Reed values: a value that comes back with an error code is not accepted by Reed and the label that uses it must change.
 
 ## 6. Halts: screening is unavailable
 
@@ -289,7 +318,7 @@ hermes -p resourcer cron run resourcer-alerts
 grep -c 'alerts-test' outbox/alerts-delivered.jsonl
 ```
 
-`--test` queues one critical test alert (with a unique event id, so the hourly repeat rule does not swallow a second test) and prints the line it will produce; add `--dry-run` to print it without queuing. `cron run` delivers it now (otherwise the scheduled run does within 5 minutes); the count must be `1` and the message must arrive on your channel. If the count is 1 and nothing arrived, the channel or the target text is wrong: look at `hermes -p resourcer cron runs resourcer-alerts --limit 3`. (`docs/INSTALL.md` 9.7 proved this path at install time with the same `--test` command.)
+`--test` queues one critical test alert (with a unique event id, so the hourly repeat rule does not swallow a second test) and prints the line it will produce; add `--dry-run` to print it without queuing. `cron run` delivers it now (otherwise the scheduled run does within 5 minutes); the count must be `1` and the message must arrive on your channel. If the count is 1 and nothing arrived, the channel or the target text is wrong: look at `hermes -p resourcer cron runs <JOB_ID> --limit 3` (the id of `resourcer-alerts` from `cron list`, section 2). (`docs/INSTALL.md` 9.7 proved this path at install time with the same `--test` command.)
 
 Delivery rules: the same alert (key, severity) is not repeated inside 60 minutes (critical), 6 hours (warn) or 24 hours (info), and suppressed repeats are counted on the next delivery; between 22:00 and 06:00 non-critical alerts are held and delivered together at 06:00, critical ones are not held; at most 25 lines per run; an alert file that was replaced or rotated is handled; a crash of the delivery job leaves alerts in the outbox for the next run. `node scripts/alerts-deliver.js --dry-run` prints what the next run would say without marking anything delivered.
 
@@ -323,7 +352,7 @@ Levels: INFO, WARN, CRITICAL. "Human" means the owner must act; the agent can pr
 | `zoho-push-partial` | WARN | Some but not all Zoho creates in a run failed | Same recovery command as above, from the alert text; do it within the 14 days |
 | `cv-attach-failed` | WARN | A CV could not be attached in Zoho; kept 14 days | Report the count. There is no retry tool yet (`docs/KNOWN-LIMITS.md`). |
 | `cv-cleanup-failed`, `run-results-write-failed` | WARN | A local delete or a statistics row failed | The nightly sweep repairs; report if repeated |
-| `cv-reject-rate-high` | WARN | CV screening rejected (shadow: would reject) more than 10 percent of a queue of at least 10 CVs (real CVs show 2 to 4 percent) | A gate that is too strict, or a broken reader: `node scripts/cv-report.js`, then `docs/CV-SCREENING.md` section 5 |
+| `cv-reject-rate-high` | WARN | CV screening rejected (shadow: would reject) more than 20 percent of a queue of at least 10 CVs (real CVs of ordinary candidates show 2 to 4 percent; the ceiling was 10 percent until 2026-10-01 and is a design default, not yet confirmed by the owner) | A gate that is too strict, or a broken reader: `node scripts/cv-report.js`, then `docs/CV-SCREENING.md` section 5 |
 | `cv-fallback-rate-high` | WARN | More than 5 percent of a queue of at least 20 CVs was not decided by Jev (the owner rule is 99 percent decided by Jev) | Read the reason codes `answers_invalid`, `injection_flag`, `redaction_unverified` in `shadow/cv-*.jsonl` through `node scripts/cv-report.js` |
 | `cv-forced-rate-high` | WARN | More than 35 percent of a queue of at least 10 CVs was decided in real doubt (forced; normal is about 6 percent) | Audit the forced rows (`node scripts/cv-report.js --forced`) |
 | `cv-unreadable-rate-high` | WARN | More than 30 percent of a queue of at least 10 CVs could not be read; they went to Zoho unscreened (normal is 5 to 8 percent) | The CV reader may be broken: report |
@@ -332,6 +361,7 @@ Levels: INFO, WARN, CRITICAL. "Human" means the owner must act; the agent can pr
 | `cv-config-invalid` | WARN | CV screening in shadow mode did not run for a queue because `config/cv-screening.json` is broken or missing (nothing was blocked) | Owner fixes the file or restores it from git (`docs/CV-SCREENING.md` section 5); never switch to `on` with this alert open |
 | `cv-reject-not-recorded` | WARN | A CV rejection (mode `on`) could not be written to `candidates.db`; its files were kept and the decision repeats next run | `node scripts/preflight-db.js`; report |
 | `cv-resurface-cap-reached` | WARN | Once a day: people who were unlocked and CV-rejected for another role came up again (the role-scoped second look, `docs/RESURFACE.md`), and the daily cap `CV_RESURFACE_MAX_PER_DAY` (default 40) or the credit reserve `CV_RESURFACE_MIN_CREDITS` (default 1000) held some back. They stay skipped for now, nothing is recorded against them (not rejected), and they are looked at again the next day or when the balance is above the reserve | Read the day's numbers (`node scripts/cv-report.js --days 1`: block RESURFACED); report; the owner decides whether the cap or the reserve should change. Nothing is lost, nothing needs clearing |
+| `caterer-activity-mismatch` | WARN | Once a day: the Caterer results page did not show the search window that was sent (`ACTIVITY_FILTER ... match=no`), or its summary could not be read (`match=unreadable`, only when the page had candidate cards). The run went on; only the pool differs. A Caterer id that does not echo its label means the mapping in `config/caterer-activity.json` is wrong; an unreadable summary means the page layout changed | Report the alert text and the newest `ACTIVITY_FILTER` line; section 5.1 and `docs/ACTIVITY.md`; the owner decides (the agent never edits the config) |
 | `cv-review-errors` | WARN | The CV reviewer process failed on some CVs; they passed through like unreadable ones | Report the text |
 | `phase2-fatal` | CRITICAL | The push run aborted | Report the text; recovery runs by itself up to 3 times |
 | `stranded-recovered` | INFO | An interrupted run was found and its unlocked candidates are being pushed | None |
@@ -560,7 +590,7 @@ Hermes Cloud can freeze an idle instance after about two minutes and wake it whe
 - Overnight jobs (23:00, 02:00 and 05:00 keep-alive, 03:30 backup, 04:10 maintenance, 04:20 retention, 05:50 pre-flight) depend on Hermes waking the instance for them. If a morning shows `backup-stale`, no 07:00 alive line, or a session that went stale overnight, the wake did not happen: run the missed job by hand (`sh /opt/data/profiles/resourcer/scripts/resourcer-backup.sh`, or `hermes -p resourcer cron run resourcer-backup`) and tell the owner; the fix is a platform setting (the cron provider and the scale-to-zero option in the Portal), not code.
 - An open dashboard tab counts as activity and keeps the instance awake.
 
-Signs the tick is not being fired: the critical alert `tick-silent`, an old `lastTickAt` (more than 2 minutes between 05:00 and 23:59), a non-null `tick` whose `heartbeatAgeSec` is above 180, `hermes -p resourcer cron status` saying the next run is overdue, or `hermes -p resourcer cron runs resourcer-tick --limit 5` showing no recent runs. Check the job is enabled (`cron list`) and the profile is not parked (`cron status`), then tell the owner.
+Signs the tick is not being fired: the critical alert `tick-silent`, an old `lastTickAt` (more than 2 minutes between 05:00 and 23:59), a non-null `tick` whose `heartbeatAgeSec` is above 180, `hermes -p resourcer cron status` saying the next run is overdue, or `hermes -p resourcer cron runs <JOB_ID> --limit 5` (the id of `resourcer-tick` from `cron list`, section 2: by the job NAME, `cron runs` printed "No cron execution attempts recorded" on this host on 2026-10-01 although the job was running) showing no recent runs. Check the job is enabled (`cron list`) and the profile is not parked (`cron status`), then tell the owner.
 
 ## 17. Data, retention and privacy routine
 
@@ -633,6 +663,7 @@ For the owner and the agent alike.
 | `retention-sweep.js` | 0 (also when it refuses to sweep `downloads/`), 1 unexpected, 2 usage | JSON summary in `logs/retention-<date>.log` |
 | `preflight-db.js` | 0 fit, 1 not fit (one reason line), 2 usage | reasons `missing`, `empty-file`, `not-a-file`, `open-failed`, `locked`, `integrity-failed`, `no-candidates-table`, `no-candidates` |
 | `request-search.js` | 0 queued, 1 unexpected, 2 invalid, 3 already queued or running, 4 could not write | |
+| `activity-probe.js` | 0 done (also `--dry-run` and `--recent`), 1 unexpected, 2 usage or invalid input, 3 refused (a pipeline run is in flight or the browser lock is held), 4 not signed in (Caterer) or Reed token not refreshed, 5 some variants could not be read | read only: search pages only; prints counts and fixed strings; never signs in (section 5.1) |
 | `rescreen-policy-rejects.js` | 0 ok (dry run, apply, queue, undo), 1 unexpected, 2 usage, 3 refused with nothing written (wrong or missing `--confirm`, a run in flight, a halt or a halt file that cannot be read, a ledger that cannot be read, above `--max-rows`, no verified backup, an undo that would overwrite a different row), 4 could not write (the transaction failed and was rolled back, the pending folder could not be written, the undone marker could not be written) | writes `runtime/rescreen-ledger-<stamp>.jsonl` (0600), its markers `runtime/rescreen-applied-<stamp>.json` and `runtime/rescreen-undone-<stamp>.json` (0600) and `runtime/rescreen-queue.json`; counts and territories only on stdout (docs/RESCREEN.md) |
 | `screening-report.js --strict` | 0 GO, 1 NO-GO, 2 insufficient data | |
 | `process-approved-queue.js` (Phase 2) | 0 done or already processed, 1 fatal error or bad input, 2 held: CV screening (`CV_SCREEN=on`) could not reach Jev or its criteria file is broken, nothing lost, retried by the stranded-run recovery once the halt clears | the caller (phase 1 hand-over, `run-pipeline.js`) does not count it as a failure: it ends with exit 14 (held), writes no results file for the run, and the runner records `phase2-held` |

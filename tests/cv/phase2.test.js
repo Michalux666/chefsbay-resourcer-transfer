@@ -210,7 +210,7 @@ test('the reject-rate alert: above the ceiling with at least ten CVs it warns, b
   const alert = ws.alerts().find(a => a.key === 'cv-reject-rate-high');
   assert.ok(alert, 'alert raised');
   assert.equal(alert.severity, 'warn');
-  assert.match(alert.text, /rejected 8 of 12 CVs \(67 percent, ceiling 10\)/);
+  assert.match(alert.text, /rejected 8 of 12 CVs \(67 percent, ceiling 20\)/);
   assert.doesNotMatch(alert.text, /would have/);
   assert.equal(hi.results.cvScreen.rejectRate, 0.667);
   // the ceiling and the minimum are configuration

@@ -44,7 +44,8 @@ test('normal multi-page run: dedupe, screening, unlock, queue, status schema, ha
   assert.ok(out.includes('QUEUE_FILE: '));
 
   // status file schema (key order matters to nobody but is kept) and values
-  assert.deepStrictEqual(Object.keys(status), ['id', 'status', 'jobTitle', 'location', 'distance', 'pool', 'startedAt', 'page', 'approved', 'skippedDb', 'errors', 'sources', 'phase2Status', 'updatedAt']);
+  assert.deepStrictEqual(Object.keys(status), ['id', 'status', 'jobTitle', 'location', 'distance', 'pool', 'startedAt', 'page', 'approved', 'skippedDb', 'errors', 'sources', 'phase2Status', 'updatedAt', 'activity']);
+  assert.deepStrictEqual(status.activity, { requestedActiveWithin: '1 month', requestedCvLimit: 20, sentLastActivityId: 'none', appliedFilterText: null, poolHeaderCount: null, matched: 'not-checked' }, 'the harness has no activity library: what was asked and sent is recorded, nothing is read from the page');
   assert.match(status.id, /^phase1-\d{4}-\d{2}-\d{2}-\d{6}$/);
   assert.strictEqual(status.status, 'phase1_complete');
   assert.strictEqual(status.pool, 2 + 3 + 1);
@@ -58,7 +59,7 @@ test('normal multi-page run: dedupe, screening, unlock, queue, status schema, ha
 
   // queue file schema
   assert.deepStrictEqual(Object.keys(queue), ['searchId', 'searchDate', 'jobTitle', 'location', 'distance', 'activeWithin', 'keywords', 'cvLimit', 'priority', 'sources', 'phase2Status',
-    'screeningModel', 'candidateCount', 'creditsRemaining', 'phase1StartedAt', 'requestedAt', 'phase1Stats', 'candidates']);
+    'screeningModel', 'candidateCount', 'creditsRemaining', 'phase1StartedAt', 'requestedAt', 'phase1Stats', 'candidates', 'activity']);
   assert.deepStrictEqual(Object.keys(queue.phase1Stats), ['pagesScraped', 'approved', 'skippedDb', 'scrapingStartedAt', 'phase1CompletedAt', 'sessionValidationTimeSecs', 'scrapingTimeSecs',
     'avgTimePerPageSecs', 'avgTimePerBrowserRoundtrip', 'pageTimings', 'sessionRefreshed', 'skippedReview', 'errors', 'browserRoundtrips', 'totalCandidatesSeen']);
   assert.strictEqual(queue.phase2Status, 'pending');

@@ -264,8 +264,8 @@
   },
   "searchLevelOverrides": {},
   "alerts": {
-    "_note": "A run with at least minCandidates screened CVs raises a warning when one of these shares is above its ceiling, so a mis-tuned gate or a broken reader is noticed within one run (in shadow mode too, where the reject rate is what the stage WOULD have rejected). rejectRateCeiling 0.10 is about three times the 2 to 4 percent that real CVs show, so it fires for a gate that drifted, not for a normal run. fallbackRateCeiling watches the owner's rule that Jev decides at least 99 percent of candidates (checked with fallbackMinCandidates). forcedRateCeiling (normal is about 6 percent) and unreadableRateCeiling (normal is 5 to 8 percent) catch a Jev that is unsure of everything and a broken reader.",
-    "rejectRateCeiling": 0.1,
+    "_note": "A run with at least minCandidates screened CVs raises a warning when one of these shares is above its ceiling, so a mis-tuned gate or a broken reader is noticed within one run (in shadow mode too, where the reject rate is what the stage WOULD have rejected). rejectRateCeiling 0.20 is five to ten times the 2 to 4 percent that real CVs show, so it fires for a gate that drifted, not for a normal run. It was 0.10 until 2026-10-01, when a queue made up largely of people who were screened a second time (uncertain at the snippet stage, approved on doubt, then caught by the CV stage) reached 12.9 percent with nothing wrong: 0.20 is a design default, not yet confirmed by the owner. fallbackRateCeiling watches the owner's rule that Jev decides at least 99 percent of candidates (checked with fallbackMinCandidates). forcedRateCeiling (normal is about 6 percent) and unreadableRateCeiling (normal is 5 to 8 percent) catch a Jev that is unsure of everything and a broken reader.",
+    "rejectRateCeiling": 0.2,
     "rejectRateMinCandidates": 10,
     "fallbackRateCeiling": 0.05,
     "fallbackMinCandidates": 20,

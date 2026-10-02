@@ -1,5 +1,5 @@
 'use strict';
-// The alert ceilings of a Phase 2 run (config alerts.*): reject rate 0.10 (at least 10 CVs), forced 0.35, unreadable 0.30, fallback 0.05
+// The alert ceilings of a Phase 2 run (config alerts.*): reject rate 0.20 (at least 10 CVs), forced 0.35, unreadable 0.30, fallback 0.05
 // (at least 20 CVs decided by the model or the facts), and the one warning when a shadow queue was cut short. The check is "above", never "at".
 const { makeHome } = require('./helpers/home');
 const home = makeHome('cv-alerts');
@@ -15,25 +15,26 @@ const stats = over => ({ mode: 'on', screened: 20, rejected: 0, jev: 20, facts: 
 const keys = s => cvStage.alertsFor(s, cfg, 'Chef', 'LS1').map(a => a.key);
 
 test('the shipped ceilings are the design defaults of docs/parity/cv-stage.md (not yet confirmed by the owner)', () => {
-  assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.1, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
+  assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.2, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
 });
 
-test('reject rate: above 10 percent of at least 10 CVs warns; 10 percent exactly, or fewer than 10 CVs, does not', () => {
-  assert.deepEqual(keys(stats({ rejected: 2 })), [], '2 of 20 is exactly 10 percent');
-  assert.deepEqual(keys(stats({ rejected: 3 })), ['cv-reject-rate-high']);
-  assert.deepEqual(keys(stats({ screened: 10, jev: 10, rejected: 1 })), [], '1 of 10 is exactly 10 percent');
-  assert.deepEqual(keys(stats({ screened: 10, jev: 10, rejected: 2 })), ['cv-reject-rate-high']);
+test('reject rate: above 20 percent of at least 10 CVs warns; 20 percent exactly, or fewer than 10 CVs, does not (it was 10 percent until 2026-10-01)', () => {
+  assert.deepEqual(keys(stats({ rejected: 3 })), [], '3 of 20 is 15 percent: the 12.9 percent of 2026-10-01 stays quiet');
+  assert.deepEqual(keys(stats({ rejected: 4 })), [], '4 of 20 is exactly 20 percent');
+  assert.deepEqual(keys(stats({ rejected: 5 })), ['cv-reject-rate-high']);
+  assert.deepEqual(keys(stats({ screened: 10, jev: 10, rejected: 2 })), [], '2 of 10 is exactly 20 percent');
+  assert.deepEqual(keys(stats({ screened: 10, jev: 10, rejected: 3 })), ['cv-reject-rate-high']);
   assert.deepEqual(keys(stats({ screened: 9, jev: 9, rejected: 9 })), [], 'fewer than 10 CVs never alert');
-  const a = cvStage.alertsFor(stats({ rejected: 3 }), cfg, 'Chef', 'LS1')[0];
+  const a = cvStage.alertsFor(stats({ rejected: 5 }), cfg, 'Chef', 'LS1')[0];
   assert.equal(a.severity, 'warn');
-  assert.match(a.text, /rejected 3 of 20 CVs \(15 percent, ceiling 10\) for Chef in LS1/);
+  assert.match(a.text, /rejected 5 of 20 CVs \(25 percent, ceiling 20\) for Chef in LS1/);
   assert.doesNotMatch(a.text, /would have|nothing was blocked/);
 });
 
 test('reject rate in shadow mode says what the stage WOULD have done and that nothing was blocked', () => {
   const a = cvStage.alertsFor(stats({ mode: 'shadow', rejected: 6 }), cfg, 'Chef', 'LS1')[0];
   assert.equal(a.key, 'cv-reject-rate-high');
-  assert.match(a.text, /would have rejected 6 of 20 CVs \(30 percent, ceiling 10\)/);
+  assert.match(a.text, /would have rejected 6 of 20 CVs \(30 percent, ceiling 20\)/);
   assert.match(a.text, /nothing was blocked/);
   assert.equal(a.meta.mode, 'shadow');
 });

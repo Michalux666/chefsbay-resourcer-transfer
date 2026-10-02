@@ -89,7 +89,7 @@ const COPY_REAL = [
   'pending-gate.js', 'run-lock.js', 'constants.js', 'create-init-status.js', 'build-caterer-results-url.js',
   'cull-ghost-phase1.js', 'recover-stranded-phase1.js', 'preflight-db.js',
   'pipeline-watchdog.js', 'watchdog-runner.js', 'maintenance.js', 'backup-db.js', 'alerts-deliver.js',
-  'lib/paths.js', 'lib/env.js', 'lib/fsx.js', 'lib/notify.js', 'lib/time.js', 'lib/tick.js', 'lib/pipeline-halt.js', 'lib/phase2-exit.js', 'lib/browser-env.js',
+  'lib/paths.js', 'lib/env.js', 'lib/fsx.js', 'lib/notify.js', 'lib/time.js', 'lib/search-activity.js', 'lib/tick.js', 'lib/pipeline-halt.js', 'lib/phase2-exit.js', 'lib/browser-env.js',
   'ensure-chrome-cdp.js',
 ];
 

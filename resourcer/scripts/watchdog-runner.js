@@ -182,9 +182,21 @@ function buildParams(ctx, pending, initStatusFile, log) {
   const sources = effectiveSources(requested, ctx.allowedSources());
   if (sources !== requested && log) log('sources-gated', { requested, effective: sources, allowed: ctx.allowedSources() });
 
-  const { url, searchId } = ctx.buildResultsUrl({ jobTitle, location, distance, keywords });
+  // The search window (docs/ACTIVITY.md): a one-off request (pending-file source dashboard or request-search-cli) sends its window to Caterer
+  // as LastActivityId; a scheduled territory sends nothing unless CATERER_ACTIVITY_FILTER=all. The builder decides and says why.
+  const activeWithin = pending.activeWithin || '1 month';
+  let manual = false;
+  try { manual = require('./lib/search-activity').isManualSource(pending.source); } catch { manual = false; }
+  const built = ctx.buildResultsUrl({ jobTitle, location, distance, keywords, activeWithin, manual });
+  const { url, searchId } = built;
+  const activity = built.activity || null;
+  if (activity && log && (manual || activity.id !== null || activity.note)) {
+    log(activity.warn ? 'activity-filter-warn' : 'activity-filter', {
+      requested: activity.requested, setting: activity.setting, manual, sent: activity.id === null ? 'none' : activity.id, note: activity.note || undefined,
+    });
+  }
 
-  return {
+  const params = {
     RESULTS_URL: url,
     SEARCH_ID: searchId,
     JOB_TITLE: jobTitle,
@@ -199,6 +211,9 @@ function buildParams(ctx, pending, initStatusFile, log) {
     PRIORITY: pending.priority || 'low',
     INIT_STATUS_FILE: initStatusFile,
   };
+  // Only when there is something to say (a window that could not be sent): a plain scheduled run has exactly the params it always had.
+  if (activity && activity.note) params.ACTIVITY_NOTE = String(activity.note).slice(0, 200);
+  return params;
 }
 
 // The caterer login module's answer -> 'ok' | 'login' | 'safelist' | 'error' | 'unknown'.

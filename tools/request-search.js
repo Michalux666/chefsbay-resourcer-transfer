@@ -589,7 +589,7 @@ async function main(argv, io) {
 module.exports = {
   main, parseArgs, resolveHome, jailPath, JailError, ValidationError, validateSearch, normaliseTitle, normaliseLocation,
   normaliseKeywords, loadSettings, loadSearchDefaults, scanPending, scanActiveRuns, findDuplicate, writeNewFileAtomic,
-  withDirLock, enqueueSearch, newSearchFilename, USAGE,
+  withDirLock, enqueueSearch, newSearchFilename, USAGE, MANUAL_SOURCES, VALID_ACTIVE_WITHIN, VALID_DISTANCES,
 };
 
 if (require.main === module) {

@@ -97,6 +97,12 @@ function makeHome(scenario, opts) {
   // Data files
   fs.writeFileSync(path.join(home, 'scripts', 'extract-js.b64'), Buffer.from('/*FAKE-EXTRACT*/ (function(){return "[]"})()', 'utf8').toString('base64') + '\n');
   fs.mkdirSync(path.join(home, 'config'), { recursive: true });
+  // The self-check of the applied search window (docs/ACTIVITY.md): its library and the config it reads. Without them (every older test) the feature reads as off.
+  if (o.activity) {
+    fs.copyFileSync(path.join(SRC, 'scripts', 'lib', 'search-activity.js'), path.join(home, 'scripts', 'lib', 'search-activity.js'));
+    if (typeof o.activity === 'object' && o.activity.config !== undefined) fs.writeFileSync(path.join(home, 'config', 'caterer-activity.json'), typeof o.activity.config === 'string' ? o.activity.config : JSON.stringify(o.activity.config));
+    else fs.copyFileSync(path.join(SRC, 'config', 'caterer-activity.json'), path.join(home, 'config', 'caterer-activity.json'));
+  }
   fs.writeFileSync(path.join(home, 'config', 'postcode-cities.json'), JSON.stringify({
     LS: { city: 'Leeds', county: 'West Yorkshire' },
     M: { city: 'Manchester', county: 'Greater Manchester' },

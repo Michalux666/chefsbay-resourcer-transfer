@@ -1,0 +1,13 @@
+{
+  "_comment": "Maps the 'active within' window of a search to the LastActivityId of the Caterer results URL, and to the text the results page echoes when it applies it (the self-check reads that text). Owner-editable: an invalid file is ignored with a WARN and NO filter is sent (docs/ACTIVITY.md). The ids come from the legacy search probe of 2026-08-05 and are UNVERIFIED-LIVE: the first live ACTIVITY_FILTER log line, or node tools/activity-probe.js, shows what Caterer really does. 3 months and 18 months have no known id and are null on purpose: nothing is guessed, no filter is sent for them. An echo list holds every text that counts as a match; an empty text means the page shows no 'Active within last' part.",
+  "labels": {
+    "14 days": { "id": 7, "echo": ["14 days"] },
+    "1 month": { "id": 8, "echo": ["1 month"] },
+    "2 months": { "id": 9, "echo": ["2 months"] },
+    "3 months": { "id": null, "echo": ["3 months"] },
+    "6 months": { "id": 11, "echo": ["6 months"] },
+    "12 months": { "id": 15, "echo": ["12 months"] },
+    "18 months": { "id": null, "echo": ["18 months"] },
+    "All": { "id": 0, "echo": ["All", ""] }
+  }
+}

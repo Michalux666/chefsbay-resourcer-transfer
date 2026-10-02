@@ -32,7 +32,7 @@ test('defaults: Jev only, concurrency 4, fallback policy approve, the 1:3 operat
   assert.equal(cfg.tau, 0.75);
   assert.deepEqual(cfg.forced, { low: 0.2, high: 0.8 });
   assert.equal(cfg.evidence.minReadableChars, 120);
-  assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.1, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
+  assert.deepEqual(cfg.alerts, { rejectRateCeiling: 0.2, rejectRateMinCandidates: 10, fallbackRateCeiling: 0.05, fallbackMinCandidates: 20, forcedRateCeiling: 0.35, unreadableRateCeiling: 0.3 });
   assert.deepEqual(cfg.cache, { answersTtlSec: 604800, searchLevelTtlSec: 2592000, maxEntries: 2000 });
   assert.deepEqual(cfg.phase2, { shadowStopAfterFailures: 5, shadowMaxSeconds: 120 });
   assert.equal(cfg.shadow.retentionDays, 180);
@@ -62,7 +62,7 @@ test('a value of the wrong type or range is replaced by its default with a warni
   assert.equal(cfg.evidence.thinFullMonths, config.DEFAULTS.evidence.thinFullMonths);
   assert.equal(cfg.levels.mid.minRelevantMonths, config.DEFAULTS.levels.mid.minRelevantMonths);
   assert.equal(cfg.levels.mid.requireComparableOrSenior, true);
-  assert.equal(cfg.alerts.rejectRateCeiling, 0.1);
+  assert.equal(cfg.alerts.rejectRateCeiling, 0.2);
   assert.equal(cfg.fallback.policy, 'approve');
   assert.equal(cfg.operatingPoint.costLost, 3);
   assert.equal(cfg.operatingPoint.rejectAbove, 0.75);

@@ -26,6 +26,7 @@
 # 16 the Reed first-page failure (HTTP 400, code 50010): failed attempt, recovery, transient faults, an unsearchable place, no search page fetched,
 # 17 the re-screen of the pre-unlock rejections that Update A's review policy made because Jev was uncertain (tools/rescreen-policy-rejects.js): dry run, apply, queue, the next run, undo,
 # 18 the role-scoped second look at people rejected after an unlock (docs/RESURFACE.md): CV_SCREEN=on, a charging fake Caterer, seven searches; the standard world with the feature on and off in shadow and off mode.
+# 20 the search window and the CV limit reach both sources (docs/ACTIVITY.md): the read-only probe, a one-off request for 12 months and 30 CVs (the Caterer URL carries the mapped id and the fake page echoes it; Reed gets year and 30), a scheduled territory (the URL of main, byte for byte; Reed month and 20), CATERER_ACTIVITY_FILTER all and off, a window with no Caterer id, a page that echoes another window (one alert a day).
 #
 # Environment: E2E_ROOT (default ~/hermes-sim), E2E_PYTHON (a python with fastapi and httpx; when unset a venv is created
 # at $E2E_VENV, default ~/hermes-sim-venv, and filled with pip), E2E_SEED (random-kill seed, default 20260929),

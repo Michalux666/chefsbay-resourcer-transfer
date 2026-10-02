@@ -624,6 +624,7 @@ async function run(queuePathArg, injected) {
       candidates: rawCandidates = [],
       phase1Stats = {},
       screeningModel = null,
+      activity: queueActivity = null,
     } = queue;
 
     const catererP1 = (phase1Stats.caterer && typeof phase1Stats.caterer === 'object') ? phase1Stats.caterer : phase1Stats;
@@ -1329,6 +1330,8 @@ async function run(queuePathArg, injected) {
       activeWithin,
       keywords,
       cvLimit,
+      // the search window as requested, sent and applied, for both sources (docs/ACTIVITY.md); absent from a queue that has none
+      ...(queueActivity && typeof queueActivity === 'object' ? { activity: queueActivity } : {}),
       candidateCount,
       creditsRemaining,
       screeningModel,

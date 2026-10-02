@@ -26,4 +26,22 @@ if (process.env.E2E_REED_CV_TEXT) {
     return fake;
   };
 }
+// $E2E_REED_REQUEST_LOG: every request the fake Reed API receives is appended to that file as one JSON line (method, path, and for a search the
+// activityTimeFrame, page and page size), so the rehearsal can read what Reed was really asked (scenario 20).
+if (process.env.E2E_REED_REQUEST_LOG) {
+  const orig = fr.startFakeReed;
+  fr.startFakeReed = async (o) => {
+    const fake = await orig(o);
+    const file = process.env.E2E_REED_REQUEST_LOG;
+    fake.api.requests = {
+      push(rec) {
+        let b = {};
+        try { b = JSON.parse(rec.body || '{}'); } catch { b = {}; }
+        try { fs.appendFileSync(file, JSON.stringify({ method: rec.method, path: rec.path, activityTimeFrame: b.activityTimeFrame, currentPage: b.currentPage, pageItemCount: b.pageItemCount }) + '\n'); } catch { /* the log is optional */ }
+        return 0;
+      },
+    };
+    return fake;
+  };
+}
 require('../../reed/helpers/fake-chromium');

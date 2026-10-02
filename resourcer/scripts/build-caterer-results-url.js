@@ -24,13 +24,19 @@
  *     &SalaryFacetsType=99&PreRegStatusFacet=0%2c1&HideCandidatesSinceDays=7
  *     &SearchId=<random-guid>&scr=1
  *
+ * ACTIVE WITHIN (docs/ACTIVITY.md): when the caller passes activeWithin (the label of the request or territory) and manual (true for a
+ * one-off request), the URL carries &LastActivityId=<id> after HideCandidatesSinceDays, according to the setting
+ * CATERER_ACTIVITY_FILTER (manual = default, all, off) and config/caterer-activity.json. Without activeWithin, or when the setting says
+ * no filter for this search, the URL is byte for byte what it was before this existed. buildResultsUrl also returns `activity` (what was
+ * decided and why) for the caller to log.
+ *
  * Usage (CLI):
- *   node scripts/build-caterer-results-url.js --job "Chef" --location DL7 --distance 30 [--keywords ""] [--search-id <guid>]
+ *   node scripts/build-caterer-results-url.js --job "Chef" --location DL7 --distance 30 [--keywords ""] [--search-id <guid>] [--active-within <label> [--manual]]
  *   -> prints exactly one line: RESULTS_URL:<url>   (and SEARCH_ID:<guid> on a 2nd line)
  *
  * Usage (module):
  *   const { buildResultsUrl } = require('./build-caterer-results-url');
- *   const { url, searchId } = buildResultsUrl({ jobTitle, location, distance, keywords });
+ *   const { url, searchId, activity } = buildResultsUrl({ jobTitle, location, distance, keywords, activeWithin, manual });
  */
 'use strict';
 
@@ -98,7 +104,11 @@ function resolveRadius(distanceMiles) {
  * @param {number} opts.distance  miles, e.g. 20 / 30         (required)
  * @param {string} [opts.keywords]  appended to FreeText when non-empty (territory runs leave this blank)
  * @param {string} [opts.searchId]  override the random GUID (mainly for tests)
- * @returns {{ url: string, searchId: string }}
+ * @param {string} [opts.activeWithin]  the window label (14 days ... All); absent = no filter, as before
+ * @param {boolean} [opts.manual]  the search is a one-off request (pending-file source dashboard or request-search-cli)
+ * @param {object} [opts.activityConfig]  an already loaded caterer-activity config (tests); default: config/caterer-activity.json
+ * @param {string} [opts.activitySetting]  manual | all | off (tests); default: the CATERER_ACTIVITY_FILTER setting
+ * @returns {{ url: string, searchId: string, activity: (object|null) }}
  */
 function buildResultsUrl(opts) {
   const jobTitle = (opts.jobTitle || '').trim();
@@ -116,6 +126,20 @@ function buildResultsUrl(opts) {
 
   const searchId = (opts.searchId && String(opts.searchId).trim()) || crypto.randomUUID();
 
+  // The window filter. The library is loaded only when a window was passed: every older caller is untouched. A library that cannot load
+  // (an unusual checkout) means no filter, with the reason in `activity.note`, never an exception.
+  let activity = null;
+  let activityParam = '';
+  if (opts.activeWithin !== undefined && opts.activeWithin !== null) {
+    try {
+      const sa = require('./lib/search-activity');
+      activity = sa.catererFilterFor({ activeWithin: opts.activeWithin, manual: !!opts.manual, setting: opts.activitySetting, config: opts.activityConfig });
+    } catch (e) {
+      activity = { requested: String(opts.activeWithin), label: null, setting: 'unknown', id: null, echo: [], note: 'the activity library could not be loaded: no filter sent to Caterer', warn: true };
+    }
+    if (activity.id !== null) activityParam = `&LastActivityId=${activity.id}`;
+  }
+
   // NOTE: order + literal encodings chosen to byte-match the browser-captured URLs:
   //   PreRegStatusFacet=0%2c1  (the %2c is a literal comma, pre-encoded - do NOT re-encode)
   const url =
@@ -127,10 +151,11 @@ function buildResultsUrl(opts) {
     `&SalaryFacetsType=99` +
     `&PreRegStatusFacet=0%2c1` +
     `&HideCandidatesSinceDays=${HIDE_VIEWED_SINCE_DAYS}` +
+    activityParam +
     `&SearchId=${searchId}` +
     `&scr=1`;
 
-  return { url, searchId };
+  return { url, searchId, activity };
 }
 
 module.exports = { buildResultsUrl, resolveRadius, RADIUS_METERS, HIDE_VIEWED_SINCE_DAYS };
@@ -139,7 +164,7 @@ module.exports = { buildResultsUrl, resolveRadius, RADIUS_METERS, HIDE_VIEWED_SI
 if (require.main === module) {
   const argv = process.argv.slice(2);
   if (argv[0] === '--help' || argv[0] === '-h') {
-    console.log('Usage: node scripts/build-caterer-results-url.js --job <title> --location <postcode> --distance <miles> [--keywords <kw>] [--search-id <guid>]\nPrints RESULTS_URL:<url> and SEARCH_ID:<guid>; on error prints ERROR:<msg> to stderr and exits 1.');
+    console.log('Usage: node scripts/build-caterer-results-url.js --job <title> --location <postcode> --distance <miles> [--keywords <kw>] [--search-id <guid>] [--active-within <label> [--manual]]\nPrints RESULTS_URL:<url> and SEARCH_ID:<guid>; on error prints ERROR:<msg> to stderr and exits 1.\n--active-within adds LastActivityId for the window according to CATERER_ACTIVITY_FILTER (manual: only with --manual; all; off) and config/caterer-activity.json; the reason nothing was added goes to stderr as NOTE:<text>.');
     process.exit(0);
   }
   const get = (flag) => {
@@ -147,13 +172,16 @@ if (require.main === module) {
     return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
   };
   try {
-    const { url, searchId } = buildResultsUrl({
+    const { url, searchId, activity } = buildResultsUrl({
       jobTitle: get('--job'),
       location: get('--location'),
       distance: get('--distance'),
       keywords: get('--keywords') || '',
       searchId: get('--search-id'),
+      activeWithin: get('--active-within'),
+      manual: argv.includes('--manual'),
     });
+    if (activity && activity.note) console.error(`NOTE:${activity.note}`);
     console.log(`RESULTS_URL:${url}`);
     console.log(`SEARCH_ID:${searchId}`);
   } catch (e) {

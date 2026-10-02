@@ -122,7 +122,7 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | zoho-push-failing, zoho-push-partial | every (or some) Zoho creates in a run failed; CVs and files are kept 14 days | HUMAN checks Zoho credentials/quota; then the command named in the alert text |
 | cv-attach-failed | CV could not be attached; kept 14 days | report the count; no retry tool yet |
 | cv-cleanup-failed, run-results-write-failed | local delete or stats row failed | report; the nightly sweep repairs |
-| cv-reject-rate-high | CV screening rejected (in shadow mode: would reject) more than 10 percent of a queue of at least 10 CVs | report; the owner checks `shadow/cv-*.jsonl` and `config/cv-screening.json` (docs/CV-SCREENING.md) |
+| cv-reject-rate-high | CV screening rejected (in shadow mode: would reject) more than 20 percent of a queue of at least 10 CVs | report; the owner checks `shadow/cv-*.jsonl` and `config/cv-screening.json` (docs/CV-SCREENING.md) |
 | cv-fallback-rate-high | more than 5 percent of a queue of at least 20 CVs was not decided by Jev | report; the owner reads `node scripts/cv-report.js` |
 | cv-forced-rate-high | more than 35 percent of a queue was decided in real doubt (forced) | report; the owner audits the forced rows |
 | cv-unreadable-rate-high | more than 30 percent of a queue could not be read; those CVs went to Zoho unscreened | report; the CV reader may be broken |
@@ -131,6 +131,7 @@ only if it is on this page or in the skill. HUMAN = the owner must act, you prep
 | cv-config-invalid | CV screening (shadow): `config/cv-screening.json` is broken or missing, so the stage did not run for that queue; nothing was blocked | report; the owner fixes or restores the file (docs/CV-SCREENING.md section 5) |
 | cv-reject-not-recorded | a CV rejection (mode on) could not be written to `candidates.db`; files kept, decided again next run | report; check `node scripts/preflight-db.js` |
 | cv-resurface-cap-reached | WARN, once a day: people who were unlocked and rejected for another role came up again, and the daily cap (`CV_RESURFACE_MAX_PER_DAY`) or the credit reserve (`CV_RESURFACE_MIN_CREDITS`) held some back; they stay skipped for now, nothing is recorded against them, they are looked at again later | report the text and the day's numbers (`node scripts/cv-report.js --days 1`); the owner decides whether to change the cap; never change it yourself |
+| caterer-activity-mismatch | WARN, once a day: the Caterer results page did not show the search window that was sent (the run's `ACTIVITY_FILTER` line says `match=no`), or its summary could not be read (`match=unreadable`); the run went on, only the size of the pool differs | report the text and the newest `ACTIVITY_FILTER` line of `logs/phase1-console-*.log` (counts only), and say that the owner decides (docs/ACTIVITY.md); never edit `config/caterer-activity.json` |
 | cv-review-errors | the CV reviewer process failed on some CVs; they went through like unreadable ones | report the text |
 | phase2-fatal | the Zoho push run aborted | report with the text; recovery runs by itself up to 3 times |
 | stranded-recovered | an interrupted run was pushed | none |
@@ -163,14 +164,14 @@ Any key not in this table: read its text, report it, and only run a command that
 ## What only the owner can do
 
 Enter or rotate any secret; approve a dangerous command prompt; read the Caterer verification e-mail; do the Reed human login;
-change `RESOURCER_SOURCES` (Reed on), `CV_SCREEN` (CV screening: shadow, on or off; it starts in shadow and switching it to `on` rejects candidates), `CV_RESURFACE`, `CV_RESURFACE_MAX_PER_DAY` and `CV_RESURFACE_MIN_CREDITS` (the role-scoped second look at people rejected after an unlock: on by default, effective only with `CV_SCREEN` on, capped, and it may cost a second credit; docs/RESURFACE.md), the screening criteria files (`config/screening-criteria.json`, `config/cv-screening.json`), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
+change `RESOURCER_SOURCES` (Reed on), `CV_SCREEN` (CV screening: shadow, on or off; it starts in shadow and switching it to `on` rejects candidates), `CV_RESURFACE`, `CV_RESURFACE_MAX_PER_DAY` and `CV_RESURFACE_MIN_CREDITS` (the role-scoped second look at people rejected after an unlock: on by default, effective only with `CV_SCREEN` on, capped, and it may cost a second credit; docs/RESURFACE.md), `CATERER_ACTIVITY_FILTER` (which searches send their "active within" window to Caterer: `manual` by default, so only one-off requests; `all` would shrink the pool of every standing territory; docs/ACTIVITY.md), the screening criteria files (`config/screening-criteria.json`, `config/cv-screening.json`) and the Caterer window table (`config/caterer-activity.json`), `SCREEN_ENGINE`, `SCREEN_REVIEW_PRE`, `SCREEN_REVIEW_POST` or `SCREEN_CALIBRATED` (screening: the engine is `jev_only`, Jev alone; never set another engine and never set `SCREEN_ALLOW_LLM`, the Vercel team blocks every other model and the code ignores any other engine anyway); set the alert channel; press restart
 in the portal; buy credits; accept the privacy and data protection steps in docs/SECURITY.md; change code; tear down the old system.
 
 ## What you may do on your own
 
 Read status, logs (last lines), alerts and reports; run the checks above; request one search
 (`node /opt/data/profiles/resourcer/workspace/tools/request-search.js --job "Sous Chef" --location LS1`); clear a halt after its cause is
-fixed; clear the Caterer back-off after the owner fixed the session; run `node scripts/backup-db.js --restore-test`; produce the screening
+fixed; clear the Caterer back-off after the owner fixed the session; run `node scripts/backup-db.js --restore-test`; show the search window of the last runs (`node /opt/data/profiles/resourcer/workspace/tools/activity-probe.js --recent 5`, read only: no browser, counts and fixed strings); produce the screening
 report (`node /opt/data/profiles/resourcer/workspace/tools/screening-report.js`, read only) and the CV screening report (`node scripts/cv-report.js --days 7 --mode shadow`, read only; it holds numbers and candidate ids, no CV text). Ask before anything that spends credits in bulk.
 
 ## Command hygiene on this host
